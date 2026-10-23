@@ -19,6 +19,7 @@ import platform
 import queue
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -59,7 +60,9 @@ IGNORED_CLASSES = {"IME", "MSCTFIME UI"}
 SYNTHETIC_API_PROMPT = "Reply with one short sentence confirming you can answer a synthetic acceptance-test question."
 SYNTHETIC_MCP_PROMPT = "In one short sentence, what is a hash function?"
 REQUIRED_CHECKS = (
-    "installer_matches_build", "fresh_targets", "installer_window", "textboxes_filled", "install_clicked",
+    "installer_matches_build", "fresh_targets", "controlled_foreign_listener_fixture",
+    "ollama_avoids_controlled_foreign_listener", "controlled_foreign_listener_still_owned",
+    "ollama_log_no_foreign_dll_warning", "installer_window", "textboxes_filled", "install_clicked",
     "consent_1_preflight", "consent_2_model_downloads", "consent_count",
     "no_os_security_prompt", "install_within_30min", "receipts_valid", "installed_files_match_manifest",
     "gateway_process", "ollama_process", "gateway_health_after_install", "gui_launched_by_installer",
@@ -175,6 +178,80 @@ def under(path, folder):
 def env_clean():
     return {k: v for k, v in os.environ.items()
             if not k.upper().startswith("TEMPO_") and "TOKEN" not in k.upper() and "SECRET" not in k.upper()}
+
+
+class ControlledForeignListener:
+    """Harmless test-owned loopback listener; this is not an actual Ollama process."""
+
+    port = 11434
+
+    def __init__(self):
+        self.pid = os.getpid()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.sock.bind(("127.0.0.1", self.port))
+            self.sock.listen(1)
+        except OSError:
+            self.sock.close()
+            raise
+
+    def close(self):
+        self.sock.close()
+
+    def still_owned(self):
+        try:
+            bound = self.sock.fileno() >= 0 and self.sock.getsockname() == ("127.0.0.1", self.port)
+            listening = bound and self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 1
+        except OSError:
+            bound = listening = False
+        pids = []
+        for line in subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
+                                   timeout=60).stdout.splitlines():
+            parts = line.split()
+            if (len(parts) >= 5 and parts[3] == "LISTENING"
+                    and parts[1].endswith(":%d" % self.port) and parts[4].isdigit()):
+                pids.append(int(parts[4]))
+        return {"bound": bound, "listening": listening, "listener_pids": pids,
+                "owned_by_acceptance_process": pids == [self.pid], "pid": self.pid, "port": self.port}
+
+
+def _foreign_path_fixture():
+    folder = OUT / "fixtures" / "controlled-foreign-path"
+    folder.mkdir(parents=True, exist_ok=True)
+    dll = folder / "ggml-base.dll"
+    # Intentionally inert bytes, not a PE image and never loaded by the test.
+    data = b"Perennos Tempo controlled foreign PATH fixture; inert bytes only.\n"
+    dll.write_bytes(data)
+    return folder, dll, hashlib.sha256(data).hexdigest()
+
+
+def _remove_foreign_path_fixture(dll):
+    if dll is None:
+        return
+    try:
+        folder = dll.parent
+        dll.unlink(missing_ok=True)
+        folder.rmdir()
+        folder.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _ollama_log_check(path):
+    path = Path(path)
+    if not path.is_file():
+        return {"passed": False, "present": False, "size_bytes": 0, "sha256": None,
+                "foreign_dll_warning_count": None}
+    size = path.stat().st_size
+    warnings = 0
+    markers = ("warn", "error", "failed", "unable", "cannot", "could not", "incompatible")
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            low = line.lower()
+            if "ggml-base.dll" in low and any(marker in low for marker in markers):
+                warnings += 1
+    return {"passed": size > 0 and warnings == 0, "present": True, "size_bytes": size,
+            "sha256": sha256_file(path), "foreign_dll_warning_count": warnings}
 
 
 def ps(command, timeout=60):
@@ -582,7 +659,7 @@ def cmd_verify_build(_args):
 
 
 # ---------------------------------------------------------------- native installer UI drive
-def drive_install(res, build):
+def drive_install(res, build, *, foreign_path=None):
     """Launch the unmodified EXE (no args), drive ONLY its own window/dialogs, return (proc, main hwnd, shots)."""
     exe = BUILD / EXE_NAME
     exe_sha = sha256_file(exe)
@@ -590,7 +667,11 @@ def drive_install(res, build):
     clean = not any(p.exists() for p in (APP, DATA, MODELS)) and free_bytes() >= MIN_FREE_BYTES_START
     res.require("fresh_targets", clean, free_gib=round(free_bytes() / GIB, 1))
     shots, started = [], time.monotonic()
-    proc = subprocess.Popen([str(exe)], cwd=str(OUT), env=env_clean(), stdin=subprocess.DEVNULL,
+    install_env = env_clean()
+    if foreign_path is not None:
+        path_key = next((key for key in install_env if key.upper() == "PATH"), "PATH")
+        install_env[path_key] = os.pathsep.join((str(Path(foreign_path).resolve()), install_env.get(path_key, "")))
+    proc = subprocess.Popen([str(exe)], cwd=str(OUT), env=install_env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=open(OUT / "installer-stderr.txt", "wb"))
     res.doc["installer_pid"] = proc.pid
     main = None
@@ -848,6 +929,8 @@ def cmd_run(_args):
     OUT.mkdir(parents=True, exist_ok=True)
     res = Result(OUT / "acceptance-result.json", "perennos-tempo-windows-acceptance")
     proc = None
+    foreign_listener = None
+    foreign_dll = None
     try:
         build, manifest = load_json(BUILD / "BUILD-RECEIPT.json"), load_json(PAYLOAD / "MANIFEST.json")
         res.doc["environment"] = environment()
@@ -856,8 +939,42 @@ def cmd_run(_args):
                              "bootstrap_cs_sha256": manifest["files"]["desktop/Bootstrap.cs"],
                              "acceptance_scripts": {p.name: sha256_file(p) for p in HERE.glob("*.py")}}
         res.save()
-        proc, hwnd, shots = drive_install(res, build)
+        foreign_path, foreign_dll, foreign_dll_sha256 = _foreign_path_fixture()
+        try:
+            foreign_listener = ControlledForeignListener()
+        except OSError as exc:
+            res.require("controlled_foreign_listener_fixture", False,
+                        reason="the test-owned loopback fixture could not reserve 127.0.0.1:11434",
+                        error_type=type(exc).__name__, errno=getattr(exc, "errno", None),
+                        winerror=getattr(exc, "winerror", None))
+        fixture_status = foreign_listener.still_owned()
+        res.require("controlled_foreign_listener_fixture",
+                    fixture_status["bound"] and fixture_status["listening"]
+                    and fixture_status["owned_by_acceptance_process"],
+                    fixture="controlled foreign listener; not an actual Ollama",
+                    foreign_dll="inert bytes; not a PE image", foreign_dll_sha256=foreign_dll_sha256,
+                    **fixture_status)
+        res.note("controlled_foreign_listener_fixture",
+                 scope="controlled foreign listener; not an actual Ollama",
+                 two_ollama_scope="reserved for separate Beast acceptance",
+                 port=foreign_listener.port, owner_pid=foreign_listener.pid,
+                 foreign_dll="inert bytes; not a PE image", foreign_dll_sha256=foreign_dll_sha256)
+        proc, hwnd, shots = drive_install(res, build, foreign_path=foreign_path)
         dr, port = validate_install(res, build, manifest)
+        ollama_port = dr.get("ollama_port")
+        port_avoided = isinstance(ollama_port, int) and ollama_port != foreign_listener.port
+        res.check("ollama_avoids_controlled_foreign_listener", port_avoided,
+                  controlled_listener_port=foreign_listener.port, installed_ollama_port=ollama_port,
+                  fixture="controlled foreign listener; not an actual Ollama")
+        listener_status = foreign_listener.still_owned()
+        listener_owned = (listener_status["bound"] and listener_status["listening"]
+                          and listener_status["owned_by_acceptance_process"])
+        res.check("controlled_foreign_listener_still_owned", listener_owned,
+                  fixture="controlled foreign listener; not an actual Ollama", **listener_status)
+        log_status = _ollama_log_check(APP / "logs" / "ollama.log")
+        res.check("ollama_log_no_foreign_dll_warning", log_status["passed"], **log_status)
+        if not (port_avoided and listener_owned and log_status["passed"]):
+            raise Fail("controlled Windows installer fixtures did not pass")
         verify_services(res, dr, port, "gateway_health_after_install")
         res.doc["gateway_receipt_facts"] = {"gateway_pid": dr.get("gateway_pid"), "ollama_pid": dr.get("ollama_pid"),
                                             "gateway_port": port, "ollama_port": dr.get("ollama_port")}
@@ -906,10 +1023,17 @@ def cmd_run(_args):
         res.doc["failure_reason"] = "unexpected %s: %s" % (type(exc).__name__, redact(str(exc))[:300])
         log(redact(traceback.format_exc()))
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()  # own child only; installer-owned services are deliberately left running
-            res.doc["installer_terminated_by_test_cleanup"] = True
-        passed = res.finish(REQUIRED_CHECKS)
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()  # own child only; installer-owned services are deliberately left running
+                res.doc["installer_terminated_by_test_cleanup"] = True
+        finally:
+            try:
+                if foreign_listener is not None:
+                    foreign_listener.close()
+            finally:
+                _remove_foreign_path_fixture(foreign_dll)
+                passed = res.finish(REQUIRED_CHECKS)
     return 0 if passed else 1
 
 

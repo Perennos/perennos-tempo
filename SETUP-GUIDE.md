@@ -20,6 +20,10 @@ The Windows installer does not put Python on PATH. For the commands below, repla
 
 ## Desktop chat
 
+For v1.0.1, update the gateway and its desktop/MCP clients together. Before an authenticated request, the client checks a secret-free challenge on the same connection; an older gateway cannot pass this check. Completed Windows installs also verify the recorded process and connected socket owner. An unverified listener receives neither the bearer token nor the question.
+
+If engine startup fails, the app-local `logs/ollama-probe-diagnostic.json` records the failed stage, exception type and numeric error codes. It contains no question, token, headers or response body. Transient transport failures retry within the startup deadline; ownership refusals stop immediately. Existing Ollama installations are left running.
+
 With the local gateway configured and running, open the desktop client:
 
 ```powershell

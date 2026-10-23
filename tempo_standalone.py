@@ -101,10 +101,11 @@ class StandaloneGuard:
         if _quarantine:raise GuardError('previous inference completion is unknown; restart after checking the runtime is idle')
         self.lock.__enter__()
         try:
+            from tempo_local_http import open_local
             if self.info is None:
-                busy=json.load(urllib.request.urlopen(self.url+'/api/ps',timeout=5)).get('models')
+                busy=json.load(open_local(self.url+'/api/ps',timeout=5)).get('models')
                 if busy:raise GuardError('local runtime may already be busy; no inference started')
-                tags=json.load(urllib.request.urlopen(self.url+'/api/tags',timeout=5))['models']
+                tags=json.load(open_local(self.url+'/api/tags',timeout=5))['models']
                 self.info=next((m for m in tags if m['name'] in (self.model,self.model+':latest')),None)
                 if not self.info:raise GuardError('local engine is not installed')
             if self.revision and self.info.get('digest')!=self.revision:raise GuardError('engine revision changed; setup must check it again')
@@ -112,7 +113,7 @@ class StandaloneGuard:
             context_mib=2048
             if self.requested!='cpu' and self.free>math.ceil(self.info['size']/1048576)+2048:
                 req=urllib.request.Request(self.url+'/api/show',json.dumps({'model':self.model}).encode(),{'Content-Type':'application/json'})
-                metadata=json.load(urllib.request.urlopen(req,timeout=5)).get('model_info',{})
+                metadata=json.load(open_local(req,timeout=5)).get('model_info',{})
                 arch=metadata.get('general.architecture')
                 fields=[metadata.get(str(arch)+'.'+key) for key in ('block_count','embedding_length','attention.head_count','attention.head_count_kv')]
                 if any(type(v) is not int or v<=0 for v in fields):raise GuardError('context-memory metadata is unavailable; GPU admission refused')

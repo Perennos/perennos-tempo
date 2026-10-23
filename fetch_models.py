@@ -6,7 +6,7 @@
 Every file is pinned to a repository revision and a SHA-256; a mismatch is an error, never a silent replacement.
 About 1.7 GB in total (the Sev weights). ModernBERT-large weights are not needed: only its config and tokenizer.
 """
-import argparse, hashlib, json, sys, urllib.request
+import argparse, hashlib, json, sys, tempfile, time, urllib.request
 from pathlib import Path
 
 HOME = Path(__file__).resolve().parent
@@ -42,13 +42,34 @@ def sha256(p):
     return h.hexdigest()
 
 
-def get(url, dest):
+def get(url, dest, want, *, max_bytes=2 * 1024 ** 3, timeout=1800):
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
-        while b := r.read(1 << 20):
-            f.write(b)
-    tmp.replace(dest)
+    part = tempfile.NamedTemporaryFile(prefix=dest.name + ".", suffix=".part", dir=dest.parent, delete=False)
+    tmp = Path(part.name)
+    deadline = time.monotonic() + timeout
+    digest, total = hashlib.sha256(), 0
+    try:
+        with part as f, urllib.request.urlopen(url, timeout=min(60, timeout)) as r:
+            # read1 avoids a server indefinitely trickling inside a large read().
+            read = getattr(r, "read1", r.read)
+            while True:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("model download deadline exceeded")
+                b = read(min(1 << 20, max_bytes + 1 - total))
+                if not b:
+                    break
+                total += len(b)
+                if total > max_bytes:
+                    raise ValueError("model download size limit exceeded")
+                digest.update(b)
+                f.write(b)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("model download deadline exceeded")
+        if digest.hexdigest() != want:
+            raise ValueError("model download SHA-256 mismatch")
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def run(verify_only=False, only=None):
@@ -64,7 +85,7 @@ def run(verify_only=False, only=None):
             ok = p.exists() and sha256(p) == want
             action = "present"
             if not ok and not verify_only:
-                get(url, p)
+                get(url, p, want)
                 ok, action = sha256(p) == want, "downloaded"
             out.append({"file": str(p), "ok": ok, "action": action if ok or not verify_only else "missing or wrong"})
     return {"all_ok": all(o["ok"] for o in out), "files": out}

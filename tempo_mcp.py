@@ -127,7 +127,7 @@ class TempoMCP:
             return {"jsonrpc": "2.0", "id": request_id, "result": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "Perennos Tempo", "version": "1.0.0"},
+                "serverInfo": {"name": "Perennos Tempo", "version": "1.0.1"},
             }}
         if method == "ping":
             return {"jsonrpc": "2.0", "id": request_id, "result": {}}
@@ -157,7 +157,7 @@ def _response_bytes(server, raw):
         return server._error("Parse error", -32700)
     try:
         request = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return server._error("Parse error", -32700)
     return server.dispatch(request)
 

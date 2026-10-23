@@ -37,7 +37,8 @@ def _ollama_roles(name):
 
 def ollama():
     try:
-        tags = json.load(urllib.request.urlopen(OLLAMA, timeout=5))["models"]
+        from tempo_local_http import open_local
+        tags = json.load(open_local(OLLAMA, timeout=5))["models"]
     except Exception as e:
         return [], f"ollama unreachable: {type(e).__name__}"
     from tempo_runtime import policy

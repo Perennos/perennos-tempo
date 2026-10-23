@@ -12,7 +12,7 @@ The pack holds:
  - CHAIN.json: a pack-time decision/outcome hash chain and file hashes; append-chained receipts retain their window anchor.
 It is a record of what the router decided and who judged it. It is not legal advice or a certification.
 """
-import argparse, hashlib, json, shutil, sys, time
+import argparse, hashlib, json, shutil, stat, sys, time
 from pathlib import Path
 
 HOME = Path(__file__).resolve().parent
@@ -139,8 +139,24 @@ def pack(since=None, out=None):
 
 def verify(folder):
     f = Path(folder)
+    required = {"AUDIT-SUMMARY.md", "PROFILE-SUMMARY.json", "decisions.jsonl", "outcomes.jsonl",
+                "attempts.jsonl", "receipts.jsonl", "egress-policy.json"}
+    allowed = required | {"setup-receipt.json", "concierge-receipt.json", "profiles.json", "fiduciary-dpa-map.json"}
+
+    def regular(name):
+        p = f / name
+        info = p.lstat()
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("audit pack member must be a regular file")
+        return p
+
+    regular("CHAIN.json")
     c = json.loads((f / "CHAIN.json").read_text(encoding="utf-8"))
-    bad = [n for n, h in c["files"].items() if not (f / n).exists() or _sha((f / n).read_bytes()) != h]
+    files = c.get("files") if isinstance(c, dict) else None
+    # Validate raw names before ANY path lookup (including UNC and drive paths).
+    if not isinstance(files, dict) or not required <= set(files) or any(n not in allowed for n in files):
+        raise ValueError("audit pack contains unknown or missing members")
+    bad = [n for n, h in files.items() if _sha(regular(n).read_bytes()) != h]
     rows = _jsonl(f / "decisions.jsonl") + _jsonl(f / "outcomes.jsonl")
     ch = chain(rows)
     ok_chain = (ch[-1] if ch else None) == c["head"] and len(ch) == c["length"]
