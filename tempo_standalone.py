@@ -129,12 +129,39 @@ class StandaloneGuard:
     def dispatched(self):self.sent=True
     def check(self):
         if time.monotonic()>self.deadline:raise GuardError('standalone request timed out')
+    def _wait_for_unload(self):
+        deadline=min(self.deadline,time.monotonic()+15)
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise GuardError('local runtime did not become idle before the request deadline')
+            from tempo_local_http import open_local
+            try:
+                # Socket inactivity is capped; the reader also bounds the body by an absolute deadline.
+                response=open_local(self.url+'/api/ps',timeout=min(2,remaining))
+                from tempo_runtime import read_resident_json
+                try:state=read_resident_json(response,deadline)
+                finally:response.close()
+            except Exception as exc:
+                raise GuardError('local runtime idle confirmation failed') from exc
+            if time.monotonic()>=deadline:raise GuardError('local runtime idle confirmation exceeded the request deadline')
+            if not isinstance(state,dict) or not isinstance(state.get('models'),list):
+                raise GuardError('local runtime idle response is invalid')
+            if not state['models']:return
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise GuardError('local runtime did not become idle before the request deadline')
+            time.sleep(min(.25,remaining))
     def __exit__(self,kind,value,traceback):
         if kind is not None and self.sent:
             # The backend's completion is unknown. Retain this process's lock;
             # recovery requires a restart and a fresh idle-runtime check.
             _quarantine.append(self.lock)
-        else:self.lock.__exit__(kind,value,traceback)
+        else:
+            if self.sent:
+                try:self._wait_for_unload()
+                except BaseException:
+                    _quarantine.append(self.lock)
+                    raise
+            self.lock.__exit__(kind,value,traceback)
 
 @contextlib.contextmanager
 def decision_head_guard(timeout=180):

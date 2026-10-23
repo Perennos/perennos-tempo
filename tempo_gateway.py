@@ -223,14 +223,15 @@ def qualified_engine_ids(data_dir):
         return set()
 
 
-def _ollama_chunks(url, model, messages, temperature, max_tokens, timeout, cpu=False, family=None, context_tokens=None, *, resident_policy=None, backend_witness=None, witness_provider=None):
+def _ollama_chunks(url, model, messages, temperature, max_tokens, timeout, cpu=False, family=None, context_tokens=None, *, resident_policy=None, backend_witness=None, witness_provider=None, release_after=False):
     from tempo_runtime import request,policy,visible_answer
     resident=resident_policy is not None or backend_witness is not None or witness_provider is not None
     extra={}
     if resident:
         if not callable(witness_provider):raise ValueError('trusted resident witness provider is required')
         extra=dict(resident_policy=resident_policy,backend_witness=backend_witness)
-    endpoint,payload=request(model,messages,temperature,max_tokens,cpu=cpu,family=family,**extra)
+    endpoint,payload=request(model,messages,temperature,max_tokens,cpu=cpu,family=family,
+                             release_after=release_after,**extra)
     if resident and context_tokens is not None and context_tokens!=payload['options']['num_ctx']:
         raise ValueError('resident context override is forbidden')
     if resident and backend_witness['valid_until']-time.time()<float(timeout):
@@ -473,7 +474,7 @@ class TempoGateway:
             if on_start:
                 on_start(started_receipt, job_id, engine["model"])
             if self.standalone:self.active_guard.dispatched()
-            extra={'context_tokens':self.active_guard.context_tokens} if self.standalone else {}
+            extra={'context_tokens':self.active_guard.context_tokens,'release_after':True} if self.standalone else {}
             remaining=self.timeout-(time.monotonic()-started)
             if self.standalone:remaining=min(remaining,self.active_guard.deadline-time.monotonic())
             if remaining<=0:raise TimeoutError('gateway request deadline exceeded before generation')

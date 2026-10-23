@@ -64,6 +64,16 @@ def emit(kind: str, **details):
 def _private_error(exc: BaseException) -> str:
     if isinstance(exc, BootstrapError):
         return str(exc)[:400]
+    from tempo_client import TempoAPIError
+    if isinstance(exc, TempoAPIError):
+        safe_codes = {"GuardError", "RuntimeError", "ValueError", "TimeoutError", "ConnectionError",
+                      "OSError", "ImportError", "PermissionError", "server_error", "authentication_error"}
+        code = exc.code if isinstance(exc.code, str) and exc.code in safe_codes else "gateway_error"
+        status = str(exc.status) if type(exc.status) is int and 100 <= exc.status <= 599 else "unknown"
+        message = f"Local gateway request failed (HTTP {status}, {code})."
+        if exc.request_may_continue:
+            message += " The request outcome is unknown; inspect receipts before retrying."
+        return message
     return type(exc).__name__
 
 
@@ -902,6 +912,8 @@ def _process_identity(pid: int):
     kernel.GetProcessTimes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                                        ctypes.c_void_p, ctypes.c_void_p]
     kernel.GetProcessTimes.restype = ctypes.c_int
+    kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel.GetExitCodeProcess.restype = ctypes.c_int
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel.CloseHandle.restype = ctypes.c_int
     handle = kernel.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -910,6 +922,11 @@ def _process_identity(pid: int):
         # or any other failure is unknown, so callers must fail closed.
         return None if ctypes.get_last_error() == 87 else {"unavailable": True}
     try:
+        exit_code = ctypes.c_ulong()
+        if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return {"unavailable": True}
+        if exit_code.value != 259:  # A retained handle can outlive its process.
+            return None
         size = ctypes.c_ulong(32768)
         buffer = ctypes.create_unicode_buffer(size.value)
         if not kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
@@ -1470,11 +1487,13 @@ def install(python: Path, app_root: Path, home: Path, models_root: Path, code: P
         pass
 
     emit("progress", phase=f"Verifying the selected local {ENGINE} engine")
-    _assert_owned_listener(ollama_rec, ollama_dir / "ollama.exe", ollama_rec["port"])
-    _run_checked([str(ollama_dir / "ollama.exe"), "pull", ENGINE],
-                 env=_child_env(ollama_host=ollama_url.removeprefix("http://"),
-                                ollama_models=models_root / "ollama", ollama_runtime=ollama_dir),
-                 cwd=ollama_dir, timeout=7200, label=f"Downloading or verifying {ENGINE}")
+    from tempo_pull import PullError, pull_owned_model
+    try:
+        pull_owned_model(ENGINE, ollama_rec["port"], ollama_rec, ollama_dir / "ollama.exe",
+                         assert_owned_listener=_assert_owned_listener,
+                         assert_connected_peer=_assert_connected_peer)
+    except PullError as exc:
+        raise BootstrapError(str(exc)) from exc
     engine_model = _engine_model(ollama_url, ollama_rec, ollama_dir / "ollama.exe")
     if not isinstance(engine_model, dict) or engine_model.get("digest") != plan_doc["engine_digest"]:
         raise BootstrapError("The downloaded local engine revision differs from the pinned app catalog.")

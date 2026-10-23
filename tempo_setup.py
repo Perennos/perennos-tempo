@@ -241,7 +241,8 @@ def qualify(home, ollama_url, wanted, lease_script, env, uncensored=False, lease
                         e.get('revision'),cpu_booking,cpu_until,180)
                     extra=dict(resident_policy=resident_policy,backend_witness=witness)
                 endpoint,payload=request(e['model'],[{'role':'user','content':'Reply with the single word OK.'}],.2,512,
-                                         cpu=effective=='cpu',family=e.get('family'),stream=False,**extra)
+                                         cpu=effective=='cpu',family=e.get('family'),stream=False,
+                                         release_after=standalone,**extra)
                 if standalone:
                     payload['options']['num_ctx']=admitted.context_tokens
                     admitted.dispatched()

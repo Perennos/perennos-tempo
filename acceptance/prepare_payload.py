@@ -16,7 +16,7 @@ HEX64 = set("0123456789abcdef")
 MUST_LIST = {"MANIFEST.json"}  # never listed by the product manifest itself
 REQUIRED = {"tempo.py", "tempo_client.py", "tempo_desktop.py", "tempo_bootstrap.py", "tempo_setup.py",
             "tempo_gateway.py", "tempo_mcp.py", "fetch_models.py", "model_catalog.json",
-            "desktop/Bootstrap.cs", "build_desktop_installer.py", "tempo_local_http.py"}
+            "desktop/Bootstrap.cs", "build_desktop_installer.py", "tempo_local_http.py", "tempo_pull.py"}
 
 
 def fail(message):
@@ -136,7 +136,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--dest", default="C:/TempoCI/payload")
-    parser.add_argument("--expect-files", type=int, default=61)
+    parser.add_argument("--expect-files", type=int, default=62)
     parser.add_argument("--result", default=None)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
