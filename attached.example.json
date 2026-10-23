@@ -1,0 +1,10 @@
+[
+ {"id": "claude-sonnet-5-5", "provider": "anthropic", "model": "claude-sonnet-5-5", "revision": "as-served", "locality": "hosted", "roles": ["thinking", "research", "writing-code"], "key_provider": "anthropic"},
+ {"id": "claude-haiku-5-5", "provider": "anthropic", "model": "claude-haiku-5-5", "revision": "as-served", "locality": "hosted", "roles": ["research", "inference"], "key_provider": "anthropic"},
+ {"id": "openai-frontier", "provider": "openai", "model": "<set your OpenAI model id>", "revision": "as-served", "locality": "hosted", "roles": ["thinking", "research", "writing-code"], "key_provider": "openai"},
+ {"id": "gemini-frontier", "provider": "google", "model": "<set your Gemini model id>", "revision": "as-served", "locality": "hosted", "roles": ["research", "thinking"], "key_provider": "google"},
+ {"id": "groq-fast", "provider": "openai-compatible", "base_url": "https://api.groq.com/openai/v1", "model": "<set a Groq model id>", "revision": "as-served", "locality": "hosted", "roles": ["inference", "research"], "key_provider": "groq", "notes": "fast hosted inference lane"},
+ {"id": "xai-grok", "provider": "openai-compatible", "base_url": "https://api.x.ai/v1", "model": "<set a Grok model id>", "revision": "as-served", "locality": "hosted", "roles": ["thinking", "research"], "key_provider": "xai"},
+ {"id": "openrouter-any", "provider": "openai-compatible", "base_url": "https://openrouter.ai/api/v1", "model": "<set a model id>", "revision": "as-served", "locality": "hosted", "roles": ["research", "inference"], "key_provider": "openrouter"},
+ {"id": "lan-server", "provider": "openai-compatible", "base_url": "http://<host>:8000/v1", "model": "<served model>", "revision": "<digest or tag>", "locality": "local", "roles": ["research", "inference"], "key_provider": "none", "notes": "a vLLM / llama.cpp / LM Studio server on your own network counts as local"}
+]

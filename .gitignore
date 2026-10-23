@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+tempo-home/
+setup-receipt.json
+*.log
+runtime/
+models/
+*-receipt.json
+*gateway-token*
+*.safetensors
+*.gguf
+*.exe
+payload.zip
+python-runtime.zip

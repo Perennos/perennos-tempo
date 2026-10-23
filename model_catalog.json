@@ -1,0 +1,26 @@
+{
+ "about": "Engines tempo_setup.py may recommend. Every name is re-checked against the Ollama registry before a pull; an unverified name is skipped. gb = download size from the registry manifest. Licences are the base model's; confirm before reselling a derivative. params_b orders engines inside a role; gb decides whether one fits.",
+ "verified_at": "2026-10-17",
+ "verified_by": "registry.ollama.ai v2 manifests (check_registry, 39 of 39 present)",
+ "engines": [
+  {
+   "name": "qwen3:4b",
+   "gb": 2.5,
+   "params_b": 4,
+   "roles": [
+    "thinking",
+    "research",
+    "inference",
+    "writing-code"
+   ],
+   "uncensored": false,
+   "licence": "Apache-2.0",
+   "family": "qwen3",
+   "runtime_policy": {
+    "think": false,
+    "wire": "qwen3-empty-think"
+   },
+   "installed_digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7"
+  }
+ ]
+}

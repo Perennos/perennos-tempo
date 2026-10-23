@@ -1,0 +1,29 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Byte-compile every Python file
+        run: python -m compileall -q .
+      - name: Receipt chain tests
+        run: python -m unittest discover -s tests -v
+      - name: Installer acceptance fixtures
+        run: python -m unittest discover -s acceptance -p 'test_*.py' -v
+      - name: Ratings self-test (synthetic, offline)
+        run: |
+          export TEMPO_HOME="$(mktemp -d)"
+          python tempo_ratings.py selftest | python -c "import json,sys; d=json.load(sys.stdin); print(d['passed'], 'passed,', d['failed'], 'failed'); sys.exit(1 if d['failed'] or not d['passed'] else 0)"
+      - name: Leak scan (keys, tokens, private addresses)
+        run: |
+          if grep -rInE --exclude-dir=.git 'sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|192\.168\.[1-9][0-9]*\.[0-9]+|\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+' .; then
+            echo "Possible secret or private address found"; exit 1
+          fi
