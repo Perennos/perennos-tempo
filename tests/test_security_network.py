@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import threading
+import types
 import unittest
 from email.message import Message
 from pathlib import Path
@@ -112,6 +113,16 @@ class _FakeConnection:
 
 
 class ClientTrustTests(unittest.TestCase):
+    def test_native_main_guard_survives_separate_compilation(self):
+        from tempo_bootstrap import _connection_owner_guard
+        imported = _connection_owner_guard({}, Path("."), PORT)
+        native = types.FunctionType(imported.__code__.replace(), imported.__globals__,
+                                    closure=imported.__closure__)
+        native.__module__ = "__main__"
+        native.__qualname__ = imported.__qualname__
+        self.assertIsNot(native.__code__, imported.__code__)
+        self.assertTrue(tempo_client._is_bootstrap_owner_guard(native))
+
     def _call(self, *, challenge_ok=True, proof_override=None, method="GET", path="/v1/models",
               callback=None, installed_guard=None):
         instance = None

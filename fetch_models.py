@@ -6,12 +6,13 @@
 Every file is pinned to a repository revision and a SHA-256; a mismatch is an error, never a silent replacement.
 About 1.7 GB in total (the Sev weights). ModernBERT-large weights are not needed: only its config and tokenizer.
 """
-import argparse, hashlib, json, sys, tempfile, time, urllib.request
+import argparse, hashlib, json, sys, tempfile, time
 from pathlib import Path
 
 HOME = Path(__file__).resolve().parent
 sys.path.insert(0, str(HOME))
 from tempo_home import DATA, MODELS
+from tempo_bootstrap import _open_https, _read_download_block
 
 PINS = [
     # (target, url, sha256)
@@ -49,13 +50,11 @@ def get(url, dest, want, *, max_bytes=2 * 1024 ** 3, timeout=1800):
     deadline = time.monotonic() + timeout
     digest, total = hashlib.sha256(), 0
     try:
-        with part as f, urllib.request.urlopen(url, timeout=min(60, timeout)) as r:
-            # read1 avoids a server indefinitely trickling inside a large read().
-            read = getattr(r, "read1", r.read)
+        with part as f, _open_https(url, timeout=min(60, timeout), deadline=deadline) as r:
             while True:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("model download deadline exceeded")
-                b = read(min(1 << 20, max_bytes + 1 - total))
+                b = _read_download_block(r, deadline)
                 if not b:
                     break
                 total += len(b)

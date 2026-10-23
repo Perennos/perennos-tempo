@@ -13,6 +13,28 @@ import tempo_mcp
 
 
 class SecurityFiles(unittest.TestCase):
+    def test_mcp_escaped_id_cannot_expand_past_output_cap(self):
+        raw = json.dumps({"jsonrpc": "2.0", "id": "\U0001f680" * 100000, "method": "ping"}, ensure_ascii=False).encode() + b"\n"
+        self.assertLess(len(raw), tempo_mcp.MAX_MESSAGE_BYTES)
+        sink = io.BytesIO()
+        tempo_mcp.serve("127.0.0.1", 8765, "x" * 32, stdin=io.BytesIO(raw), stdout=sink)
+        self.assertLessEqual(len(sink.getvalue()), tempo_mcp.MAX_OUTPUT_BYTES)
+        response = json.loads(sink.getvalue())
+        self.assertIsNone(response["id"])
+        self.assertEqual(response["error"]["code"], -32603)
+
+    def test_mcp_oversized_integer_and_surrogate_id_do_not_kill_adapter(self):
+        raw = (b'{"jsonrpc":"2.0","id":' + b'9' * 5000 + b',"method":"ping"}\n'
+               b'{"jsonrpc":"2.0","id":"\\ud800","method":"ping"}\n'
+               b'{"jsonrpc":"2.0","id":3,"method":"ping"}\n')
+        sink = io.BytesIO()
+        tempo_mcp.serve("127.0.0.1", 8765, "x" * 32, stdin=io.BytesIO(raw), stdout=sink)
+        rows = [json.loads(line) for line in sink.getvalue().splitlines()]
+        self.assertEqual(rows[0]["error"]["code"], -32700)
+        self.assertEqual(rows[1]["id"], "\ud800")
+        self.assertEqual(rows[2]["id"], 3)
+        self.assertEqual(rows[2]["result"], {})
+
     def test_audit_refuses_unsafe_names_before_member_access(self):
         for name in ("../outside", "/outside", "C:/outside", "//attacker.invalid/share/probe", "..\\outside"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
@@ -71,7 +93,7 @@ class SecurityFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             dest = pathlib.Path(folder) / "model"
             dest.write_bytes(b"previous")
-            with patch.object(fetch.urllib.request, "urlopen", return_value=io.BytesIO(b"corrupt")):
+            with patch.object(fetch, "_open_https", return_value=io.BytesIO(b"corrupt")):
                 with self.assertRaises(ValueError):
                     fetch.get("https://huggingface.co/pinned", dest, hashlib.sha256(b"expected").hexdigest())
             self.assertEqual(dest.read_bytes(), b"previous")
@@ -84,7 +106,7 @@ class SecurityFiles(unittest.TestCase):
             dest.write_bytes(b"previous")
             with patch.object(fetch, "MODELS", pathlib.Path(folder)), patch.object(fetch, "PINS", [
                     ("model", "https://huggingface.co/pinned", hashlib.sha256(b"expected").hexdigest())
-            ]), patch.object(fetch.urllib.request, "urlopen", return_value=io.BytesIO(b"corrupt")):
+            ]), patch.object(fetch, "_open_https", return_value=io.BytesIO(b"corrupt")):
                 with self.assertRaises(ValueError):
                     fetch.run()
             self.assertEqual(dest.read_bytes(), b"previous")
@@ -95,7 +117,7 @@ class SecurityFiles(unittest.TestCase):
             dest = pathlib.Path(folder) / "model"
             dest.write_bytes(b"previous")
             with patch.object(fetch.time, "monotonic", side_effect=[0, 2]), patch.object(
-                    fetch.urllib.request, "urlopen", return_value=io.BytesIO(b"good")):
+                    fetch, "_open_https", return_value=io.BytesIO(b"good")):
                 with self.assertRaises(TimeoutError):
                     fetch.get("https://huggingface.co/pinned", dest, hashlib.sha256(b"good").hexdigest(), timeout=1)
             self.assertEqual(dest.read_bytes(), b"previous")
@@ -105,16 +127,29 @@ class SecurityFiles(unittest.TestCase):
         fetch = self._fetch()
         with tempfile.TemporaryDirectory() as folder:
             dest = pathlib.Path(folder) / "model"
-            with patch.object(fetch.urllib.request, "urlopen", return_value=io.BytesIO(b"good")):
+            with patch.object(fetch, "_open_https", return_value=io.BytesIO(b"good")):
                 fetch.get("https://huggingface.co/pinned", dest, hashlib.sha256(b"good").hexdigest())
             self.assertEqual(dest.read_bytes(), b"good")
+
+    def test_model_fetch_bounds_response_headers_with_shared_deadline(self):
+        fetch = self._fetch()
+        with tempfile.TemporaryDirectory() as folder:
+            dest = pathlib.Path(folder) / "model"
+            dest.write_bytes(b"previous")
+            with patch.object(fetch, "_open_https", side_effect=TimeoutError("header deadline")) as opened:
+                with self.assertRaises(TimeoutError):
+                    fetch.get("https://huggingface.co/pinned", dest, "0" * 64, timeout=1)
+            self.assertIn("deadline", opened.call_args.kwargs)
+            self.assertEqual(opened.call_args.kwargs["timeout"], 1)
+            self.assertEqual(dest.read_bytes(), b"previous")
+            self.assertEqual(list(pathlib.Path(folder).glob("*.part")), [])
 
     def test_download_limit_preserves_destination(self):
         fetch = self._fetch()
         with tempfile.TemporaryDirectory() as folder:
             dest = pathlib.Path(folder) / "model"
             dest.write_bytes(b"previous")
-            with patch.object(fetch.urllib.request, "urlopen", return_value=io.BytesIO(b"oversize")):
+            with patch.object(fetch, "_open_https", return_value=io.BytesIO(b"oversize")):
                 with self.assertRaises(ValueError):
                     fetch.get("https://huggingface.co/pinned", dest, "0" * 64, max_bytes=3)
             self.assertEqual(dest.read_bytes(), b"previous")

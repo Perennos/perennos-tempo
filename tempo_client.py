@@ -171,7 +171,7 @@ class _OwnershipRequest:
 
 
 def _is_bootstrap_owner_guard(callback):
-    if (getattr(callback, "__module__", None) != "tempo_bootstrap"
+    if (getattr(callback, "__module__", None) not in {"tempo_bootstrap", "__main__"}
             or not getattr(callback, "__qualname__", "").endswith(
                 "_connection_owner_guard.<locals>.verify_before_request")):
         return False
@@ -180,7 +180,9 @@ def _is_bootstrap_owner_guard(callback):
         expected = _connection_owner_guard({}, Path("."), 1024)
     except Exception:
         return False
-    return getattr(callback, "__code__", None) is getattr(expected, "__code__", None)
+    # Native setup executes the same file as __main__; its separately compiled
+    # code object is equal, but cannot have the imported object's identity.
+    return getattr(callback, "__code__", None) == getattr(expected, "__code__", None)
 
 
 def _installed_windows_owner_guard(port):
