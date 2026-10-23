@@ -764,7 +764,7 @@ def _child_env(*, home=None, ollama_host=None, ollama_models=None, ollama_runtim
     if ollama_models:
         env["OLLAMA_MODELS"] = str(ollama_models)
     if ollama_runtime is not None:
-        system_root = env.get("SystemRoot") or env.get("WINDIR")
+        system_root = env.get("SystemRoot") or env.get("SYSTEMROOT") or env.get("WINDIR")
         if not system_root:
             raise BootstrapError("The Windows system path is unavailable for the bundled local engine.")
         runtime_path = str(Path(ollama_runtime).resolve())

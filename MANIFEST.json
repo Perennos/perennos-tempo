@@ -52,7 +52,7 @@
   "tempo.py": "14471f2c36bc3c2df3f6d26d20e65d5cb66ab9e696ea1bf0eea7996e700c591c",
   "tempo.sh": "66b59a7978a2dd651df27142be4bbeec31f1e260f1d5103c79e9c293f0bca0f7",
   "tempo_audit.py": "9c433c91fcd41fee3e9ec900f544a7ee5472ab0cf4bf06944054054596f662f7",
-  "tempo_bootstrap.py": "d9459e0db2a5612b28f819aee370d4e4f740a97905094bdcdd73cb24a8ffe8ad",
+  "tempo_bootstrap.py": "d748c29dc76e458104969e1a32237a9dc15341327fdcc9fe66fb2cd64cf3eb63",
   "tempo_calibrate.py": "c693d87794846ad266a24ca7eaa08ee423608f0173f201f36f133a380f1a697b",
   "tempo_client.py": "f116f691d9b1f34260cbc59d3f582816ad92a416c2dd0ecbcf006a265b4dd409",
   "tempo_content_screen.py": "02b8c352b0966e5945cf09a701077f5277867fe6f523a2b111f0a6eb8ecf6f51",
