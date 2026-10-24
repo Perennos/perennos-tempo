@@ -38,7 +38,8 @@ def main():
                 root.update()
                 time.sleep(.02)
             state = desk.smoke_snapshot()
-            widgets = (desk.entry, desk.send_button, desk.cancel_button)
+            widgets = (desk.entry, desk.send_button, desk.cancel_button,
+                       desk.new_chat_button, desk.copy_answer_button)
             visible = all(w.winfo_ismapped() and w.winfo_width() > 20 and w.winfo_height() > 15
                           and w.winfo_rootx() >= root.winfo_rootx()
                           and w.winfo_rooty() >= root.winfo_rooty()
@@ -47,7 +48,8 @@ def main():
                           for w in widgets)
             res.require(f'controls_visible_{width}', visible, geometry=state)
             res.require(f'buttons_fit_{width}', all(w.winfo_width() >= w.winfo_reqwidth()
-                        for w in (desk.send_button, desk.cancel_button)))
+                        for w in (desk.send_button, desk.cancel_button,
+                                  desk.new_chat_button, desk.copy_answer_button)))
             hwnd = u32.GetAncestor(root.winfo_id(), 2)
             path = out / f'native-gui-{width}x{height}.png'
             capture_window_png(hwnd, path, expect_pid=os.getpid())

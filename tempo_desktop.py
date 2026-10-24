@@ -15,6 +15,9 @@ import re
 import subprocess
 import sys
 import threading
+import time
+
+from tempo_conversation import Conversation
 
 
 CODE = Path(__file__).resolve().parent
@@ -79,6 +82,10 @@ class TempoDesktop:
         self.connection_lock = threading.Lock()
         self.active_connection = None
         self.busy = False
+        self.busy_started = None
+        self.conversation = Conversation()
+        self.pending_prompt = None
+        self.last_answer = ""
         self.status_checking = False
         self.client = None
         self.token = None
@@ -146,11 +153,17 @@ class TempoDesktop:
         # Own row below the brand/badge so they never touch at the 760px minimum width.
         controls = ttk.Frame(outer, style="Tempo.TFrame")
         controls.pack(anchor="e", pady=(10, 0))
+        self.new_chat_button = ttk.Button(controls, text="New chat", style="Plain.TButton",
+                                          command=self.new_conversation)
+        self.new_chat_button.pack(side="left", padx=(0, 8))
         ttk.Button(controls, text="New window", style="Plain.TButton", command=self.open_new_window).pack(
             side="left", padx=(0, 8))
         self.status_button = ttk.Button(controls, text="Check local status", style="Plain.TButton",
                                         command=self.check_status)
         self.status_button.pack(side="left", padx=(0, 8))
+        self.copy_answer_button = ttk.Button(controls, text="Copy answer", style="Plain.TButton",
+                                             command=self.copy_answer, state="disabled")
+        self.copy_answer_button.pack(side="left", padx=(0, 8))
         self.cli_button = ttk.Button(controls, text="Copy CLI", style="Plain.TButton",
                                      command=self.copy_headless_command)
         self.cli_button.pack(side="left")
@@ -158,8 +171,10 @@ class TempoDesktop:
         title_row = ttk.Frame(outer, style="Tempo.TFrame")
         title_row.pack(fill="x", pady=(12, 14))
         ttk.Label(title_row, text="A private conversation.", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(title_row, text="Messages stay in this window. Perennos Tempo records safe job metadata and receipts.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
+        subtitle = ttk.Label(title_row, text="Recent turns stay in memory. Close or start a new chat to clear them.",
+                             style="Muted.TLabel", justify="left")
+        subtitle.pack(fill="x", anchor="w", pady=(5, 0))
+        subtitle.bind("<Configure>", lambda event: subtitle.configure(wraplength=max(event.width, 100)))
 
         transcript_frame = ttk.Frame(outer, style="Surface.TFrame")
         self.transcript = tk.Text(transcript_frame, wrap="word", bg=PALETTE["surface"], fg=PALETTE["ink"],
@@ -182,11 +197,7 @@ class TempoDesktop:
         self.transcript.tag_configure("receipt", font=("Consolas", 8), foreground=PALETTE["muted"],
                                       lmargin1=12, lmargin2=12, spacing3=10)
         self.transcript.tag_configure("error", foreground=PALETTE["error"], spacing1=8, spacing3=8)
-        self._append("Default installer setup runs inference on this machine. If the owner approved a private "
-                     "remote host, requests may go there. The gateway records a content-free receipt for each "
-                     "answer; a receipt does not show that an answer is correct or that any policy is met.\n"
-                     "Press Ctrl+Enter to send, Shift+Enter for a new line, or Esc to stop waiting.\n",
-                     "intro")
+        self._append_intro()
 
         message_label = ttk.Label(outer, text="MESSAGE", style="Muted.TLabel")
         compose = ttk.Frame(outer, style="Surface.TFrame", padding=(12, 10, 12, 10))
@@ -227,6 +238,39 @@ class TempoDesktop:
         self.transcript.configure(state="disabled")
         self.transcript.see("end")
 
+    def _append_intro(self):
+        self._append("Ask a question, then follow up. Recent completed turns are included automatically "
+                     "(up to 12 turns and 12,000 UTF-8 bytes); older context drops first.\n\n"
+                     "Default setup runs on this machine. An owner-approved private host may process requests. "
+                     "The gateway keeps content-free receipts; review important answers.\n"
+                     "Ctrl+Enter to send · Shift+Enter for a new line · Esc to stop waiting\n", "intro")
+
+    def new_conversation(self):
+        if self.busy:
+            return
+        self.conversation.clear()
+        self.pending_prompt = None
+        self.last_answer = ""
+        self.copy_answer_button.configure(state="disabled")
+        self.transcript.configure(state="normal")
+        self.transcript.delete("1.0", "end")
+        self.transcript.configure(state="disabled")
+        self.entry.delete("1.0", "end")
+        self.entry.edit_reset()
+        self._append_intro()
+        self.status.set("New chat · conversation cleared from this window")
+        self.entry.focus_set()
+
+    def copy_answer(self):
+        if not self.last_answer:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.last_answer)
+            self.status.set("Answer copied to your system clipboard.")
+        except Exception:
+            self.status.set("Clipboard unavailable. Select and copy the answer manually.")
+
     def _send_shortcut(self, _event=None):
         self.send()
         return "break"
@@ -249,28 +293,36 @@ class TempoDesktop:
             self.status.set("Write a message first.")
             self.entry.focus_set()
             return
+        try:
+            messages = self.conversation.messages(prompt)
+        except ValueError as exc:
+            self.status.set(str(exc))
+            self.entry.focus_set()
+            return
         if self.client is None or not self.token:
             self._append("The local gateway is not configured. Run the private setup again.\n", "error")
             self.status.set("Local setup needs attention.")
             return
         self.entry.delete("1.0", "end")
+        self.pending_prompt = prompt
         self._append("YOU\n", "you")
         self._append(prompt + "\n", "prompt")
         self._set_busy(True, "Sending to the local gateway…")
         self.cancel_event = threading.Event()
-        worker = threading.Thread(target=self._send_worker, args=(prompt, self.cancel_event), daemon=True)
+        worker = threading.Thread(target=self._send_worker, args=(messages, self.cancel_event), daemon=True)
         worker.start()
 
-    def _send_worker(self, prompt: str, cancel_event: threading.Event):
+    def _send_worker(self, messages: list[dict[str, str]], cancel_event: threading.Event):
         try:
-            payload, headers = self.client.chat(
-                "127.0.0.1", self.port, self.token, prompt,
+            payload, headers = self.client.chat_messages(
+                "127.0.0.1", self.port, self.token, messages,
                 timeout=610, cancel_event=cancel_event, on_connection=self._set_connection)
             choices = payload.get("choices") if isinstance(payload, dict) else None
             message = choices[0].get("message") if isinstance(choices, list) and choices else None
             content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("empty local response")
+            content.encode("utf-8")  # reject malformed JSON Unicode before the UI-thread commit
             self.events.put(("success", content, _safe_metadata(headers)))
         except Exception as exc:
             cancelled = cancel_event.is_set() or type(exc).__name__ == "TempoCancelled"
@@ -297,8 +349,11 @@ class TempoDesktop:
 
     def _set_busy(self, busy: bool, message: str):
         self.busy = busy
+        self.busy_started = time.monotonic() if busy else None
         self.send_button.configure(state="disabled" if busy else "normal")
         self.cancel_button.configure(state="normal" if busy else "disabled")
+        self.new_chat_button.configure(state="disabled" if busy else "normal")
+        self.copy_answer_button.configure(state="normal" if self.last_answer and not busy else "disabled")
         self.status.set(message)
 
     def cancel(self):
@@ -321,13 +376,18 @@ class TempoDesktop:
             while True:
                 kind, value, metadata = self.events.get_nowait()
                 if kind == "status":
-                    self.status.set(value)
+                    if not self.busy:
+                        self.status.set(value)
                     continue
                 if kind == "status_check_done":
                     self.status_checking = False
                     continue
                 self._set_busy(False, IDLE_STATUS)
                 if kind == "success":
+                    if self.pending_prompt is not None:
+                        self.conversation.commit(self.pending_prompt, value)
+                    self.last_answer = value
+                    self.copy_answer_button.configure(state="normal")
                     self._append("PERENNOS TEMPO\n", "tempo")
                     self._append(value + "\n", "answer")
                     if metadata:
@@ -343,9 +403,14 @@ class TempoDesktop:
                     request_may_continue = (isinstance(metadata, dict)
                                             and metadata.get("request_may_continue") is True)
                     self._append(_error_notice(value, request_may_continue), "error")
+                self.pending_prompt = None
                 self.cancel_event = None
         except queue.Empty:
             pass
+        if (self.busy and self.busy_started is not None
+                and not (self.cancel_event is not None and self.cancel_event.is_set())):
+            elapsed = int(time.monotonic() - self.busy_started)
+            self.status.set(f"Waiting for the local gateway · {elapsed}s · Esc stops waiting")
         self.root.after(100, self._poll)
 
     def _headless_command(self) -> str:
@@ -365,7 +430,7 @@ class TempoDesktop:
             self.status.set("Clipboard unavailable; use the app's local headless command from its install folder.")
 
     def check_status(self):
-        if self.status_checking:
+        if self.status_checking or self.busy:
             return
         if self.client is None or not self.token:
             self.status.set("Local gateway unavailable · setup needs attention")
@@ -419,15 +484,19 @@ class TempoDesktop:
             "message": (self.entry.winfo_width(), self.entry.winfo_height()),
             "send": (self.send_button.winfo_width(), self.send_button.winfo_height()),
             "cancel": (self.cancel_button.winfo_width(), self.cancel_button.winfo_height()),
+            "new_chat": (self.new_chat_button.winfo_width(), self.new_chat_button.winfo_height()),
+            "copy_answer": (self.copy_answer_button.winfo_width(), self.copy_answer_button.winfo_height()),
         }
         required = {
             "send": self.send_button.winfo_reqwidth(),
             "cancel": self.cancel_button.winfo_reqwidth(),
+            "new_chat": self.new_chat_button.winfo_reqwidth(),
+            "copy_answer": self.copy_answer_button.winfo_reqwidth(),
         }
         if (widgets["transcript"][1] <= 20 or widgets["message"][0] <= 100
                 or widgets["message"][1] <= 30
                 or any(widgets[name][0] < required[name] or widgets[name][1] <= 15
-                       for name in ("send", "cancel"))):
+                       for name in required)):
             raise RuntimeError("Perennos Tempo composer controls are clipped at the current window size.")
         return {
             "title": self.root.title(),
@@ -440,6 +509,8 @@ class TempoDesktop:
                 "cancel": self.cancel_button.winfo_geometry(),
                 "status": self.status_button.winfo_geometry(),
                 "copy_cli": self.cli_button.winfo_geometry(),
+                "new_chat": self.new_chat_button.winfo_geometry(),
+                "copy_answer": self.copy_answer_button.winfo_geometry(),
             },
             "required_button_widths": required,
             "send_enabled": str(self.send_button.cget("state")),

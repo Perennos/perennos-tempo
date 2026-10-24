@@ -49,5 +49,5 @@ jobs:
         with:
           name: windows-acceptance
           path: C:/TempoCI-out/upload/
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: error

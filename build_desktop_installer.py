@@ -178,6 +178,7 @@ def build(package, out, python_runtime):
     manifest=json.loads((package/'MANIFEST.json').read_text(encoding='utf-8'))
     names=set(manifest['files']) | {'MANIFEST.json'}
     required={'tempo.py','tempo_client.py','tempo_desktop.py','tempo_bootstrap.py','tempo_setup.py','tempo_gateway.py',
+              'tempo_doctor.py','tempo_conversation.py',
               'tempo_mcp.py','fetch_models.py','model_catalog.json','tempo_local_http.py'}
     if not required.issubset(names):
         raise ValueError('package is missing required native desktop or local runtime files: '+', '.join(sorted(required-names)))

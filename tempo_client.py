@@ -392,9 +392,28 @@ def request_json(host, port, token, method, path, body=None, *, timeout=15, canc
 def chat(host, port, token, prompt, *, timeout=610, cancel_event=None, on_connection=None):
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS:
         raise ValueError("prompt must contain 1 to 32000 characters")
+    return chat_messages(host, port, token, [{"role": "user", "content": prompt}],
+                         timeout=timeout, cancel_event=cancel_event, on_connection=on_connection)
+
+
+def chat_messages(host, port, token, messages, *, timeout=610, cancel_event=None, on_connection=None):
+    """Send explicit text turns through the same private, authenticated boundary."""
+    if not isinstance(messages, list) or not 1 <= len(messages) <= 100:
+        raise ValueError("messages must contain 1 to 100 text messages")
+    clean = []
+    for message in messages:
+        if (not isinstance(message, dict) or not isinstance(message.get("role"), str)
+                or message["role"] not in {"system", "user", "assistant"}
+                or not isinstance(message.get("content"), str) or len(message["content"]) > MAX_PROMPT_CHARS):
+            raise ValueError("each message needs a supported role and at most 32000 text characters")
+        try:
+            message["content"].encode("utf-8")
+        except UnicodeError:
+            raise ValueError("message must be valid Unicode text") from None
+        clean.append({"role": message["role"], "content": message["content"]})
     body = {
         "model": "tempo/auto",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": clean,
         "metadata": {"privacy_class": "private"},
         "stream": False,
         "max_tokens": 1024,

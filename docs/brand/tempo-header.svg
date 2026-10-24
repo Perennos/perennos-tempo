@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="480" viewBox="0 0 1280 480" role="img" aria-labelledby="title desc">
+<title id="title">Perennos Tempo — Your models. Your rules.</title>
+<desc id="desc">A dark green and lime Tempo wordmark. Private by default. Decisions you can inspect. Desktop, local API and MCP.</desc>
+<rect width="1280" height="480" rx="20" fill="#172522"/>
+<path d="M56 52h72v16h-28v56H84V68H56z" fill="#C6F35B"/>
+<text x="154" y="93" fill="#F3F0E8" font-family="DejaVu Sans,Arial,sans-serif" font-size="23" letter-spacing="6">PERENNOS / TEMPO</text>
+<line x1="56" y1="151" x2="1224" y2="151" stroke="#42564E"/>
+<text x="56" y="249" fill="#F3F0E8" font-family="DejaVu Sans,Arial,sans-serif" font-size="74" font-weight="700" letter-spacing="-3">Your models.</text>
+<text x="56" y="331" fill="#C6F35B" font-family="DejaVu Sans,Arial,sans-serif" font-size="74" font-weight="700" letter-spacing="-3">Your rules.</text>
+<text x="59" y="390" fill="#B8C5BC" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Private by default. Decisions you can inspect.</text>
+<text x="59" y="437" fill="#F3F0E8" font-family="DejaVu Sans,Arial,sans-serif" font-size="14" letter-spacing="3">DESKTOP · LOCAL API · MCP</text>
+<g fill="none" stroke="#42564E" stroke-width="2"><circle cx="1038" cy="300" r="109"/><circle cx="1038" cy="300" r="79"/><path d="M1038 173v31m0 192v31m-127-127h31m192 0h31"/></g>
+<path d="M1038 221v79l53 32" fill="none" stroke="#C6F35B" stroke-width="12" stroke-linecap="round"/>
+<circle cx="1038" cy="300" r="9" fill="#F3F0E8"/>
+</svg>
