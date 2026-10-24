@@ -9,6 +9,7 @@ PATH, firewall, or machine-wide configuration.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import errno
 import hashlib
@@ -1460,51 +1461,62 @@ def install(python: Path, app_root: Path, home: Path, models_root: Path, code: P
     _atomic_json(state_path, state)
     _update_owned_tenant_url(home, models_root, ollama_url, previous_ollama_url)
 
-    venv, vpy = Path(plan_doc["venv"]), Path(plan_doc["venv_python"])
-    pip_report = Path(plan_doc["pip_report"])
-    wheelhouse = app_root / "runtime" / "wheelhouse"
-    wheelhouse.mkdir(parents=True, exist_ok=True)
-    wheel_files = []
-    for item in plan_doc["downloads"]["wheels"]:
-        dest = wheelhouse / item["sha256"][:16] / item["filename"]
-        if not _valid_pinned_file(dest, item["sha256"]):
-            emit("progress", phase="Downloading a hash-checked Python dependency wheel")
-            downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
-            if downloaded["bytes"] != item["bytes"]:
-                raise BootstrapError("A dependency wheel size changed after confirmation; setup stopped.")
-        wheel_files.append(str(dest))
-    install_env = _child_env()
-    install_env["PIP_CONFIG_FILE"] = os.devnull
-    install_env["PIP_INDEX_URL"] = "https://pypi.org/simple"
-    install_env["PIP_EXTRA_INDEX_URL"] = "https://download.pytorch.org/whl/cpu"
-    if wheel_files:
-        _run_checked([str(vpy), "-I", "-B", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir",
-                      "--no-index", "--no-deps", "--only-binary=:all:", *wheel_files],
-                     env=install_env, cwd=code, timeout=7200, label="Installing the resolved local dependencies")
-    try:
-        pip_report.unlink()
-    except OSError:
-        pass
-
     emit("progress", phase=f"Verifying the selected local {ENGINE} engine")
     from tempo_pull import PullError, pull_owned_model
-    try:
-        pull_owned_model(ENGINE, ollama_rec["port"], ollama_rec, ollama_dir / "ollama.exe",
-                         assert_owned_listener=_assert_owned_listener,
-                         assert_connected_peer=_assert_connected_peer)
-    except PullError as exc:
-        raise BootstrapError(str(exc)) from exc
+
+    cancel_pull = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pull_executor:
+        try:
+            pull_future = pull_executor.submit(
+                pull_owned_model, ENGINE, ollama_rec["port"], ollama_rec, ollama_dir / "ollama.exe",
+                assert_owned_listener=_assert_owned_listener,
+                assert_connected_peer=_assert_connected_peer,
+                cancel_event=cancel_pull,
+            )
+            venv, vpy = Path(plan_doc["venv"]), Path(plan_doc["venv_python"])
+            pip_report = Path(plan_doc["pip_report"])
+            wheelhouse = app_root / "runtime" / "wheelhouse"
+            wheelhouse.mkdir(parents=True, exist_ok=True)
+            wheel_files = []
+            for item in plan_doc["downloads"]["wheels"]:
+                dest = wheelhouse / item["sha256"][:16] / item["filename"]
+                if not _valid_pinned_file(dest, item["sha256"]):
+                    emit("progress", phase="Downloading a hash-checked Python dependency wheel")
+                    downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
+                    if downloaded["bytes"] != item["bytes"]:
+                        raise BootstrapError("A dependency wheel size changed after confirmation; setup stopped.")
+                wheel_files.append(str(dest))
+            install_env = _child_env()
+            install_env["PIP_CONFIG_FILE"] = os.devnull
+            install_env["PIP_INDEX_URL"] = "https://pypi.org/simple"
+            install_env["PIP_EXTRA_INDEX_URL"] = "https://download.pytorch.org/whl/cpu"
+            if wheel_files:
+                _run_checked([str(vpy), "-I", "-B", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir",
+                              "--no-index", "--no-deps", "--only-binary=:all:", *wheel_files],
+                             env=install_env, cwd=code, timeout=7200,
+                             label="Installing the resolved local dependencies")
+            try:
+                pip_report.unlink()
+            except OSError:
+                pass
+
+            for item in plan_doc["downloads"]["decision_files"]:
+                dest = Path(item["path"])
+                if not _valid_pinned_file(dest, item["sha256"]):
+                    emit("progress", phase="Downloading a hash-checked decision-model file")
+                    downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
+                    if downloaded["bytes"] != item["bytes"]:
+                        raise BootstrapError("A pinned decision-model file size changed after confirmation; setup stopped.")
+            try:
+                pull_future.result()
+            except PullError as exc:
+                raise BootstrapError(str(exc)) from exc
+        finally:
+            cancel_pull.set()
+
     engine_model = _engine_model(ollama_url, ollama_rec, ollama_dir / "ollama.exe")
     if not isinstance(engine_model, dict) or engine_model.get("digest") != plan_doc["engine_digest"]:
         raise BootstrapError("The downloaded local engine revision differs from the pinned app catalog.")
-
-    for item in plan_doc["downloads"]["decision_files"]:
-        dest = Path(item["path"])
-        if not _valid_pinned_file(dest, item["sha256"]):
-            emit("progress", phase="Downloading a hash-checked decision-model file")
-            downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
-            if downloaded["bytes"] != item["bytes"]:
-                raise BootstrapError("A pinned decision-model file size changed after confirmation; setup stopped.")
 
     setup_env = _child_env(home=home)
     setup_env["OLLAMA_HOST"] = ollama_url.removeprefix("http://")

@@ -16,7 +16,7 @@
   "repos.lock.json",
   "owner configuration, ledgers, histories, training outputs, priors, and model weights"
  ],
- "built": "2026-10-23T01:26:12Z",
+ "built": "2026-10-24T06:15:21.246287Z",
  "files": {
   "attached.example.json": "664fc50f3cd225c0f3f1467d31bfae1afc66dfa0e5a503be3c5037ee84f57706",
   "build_desktop_installer.py": "8dbd12a6af58c9b4e057f8431456aad7e548b662b9b03a9915962141b2ee260a",
@@ -52,7 +52,7 @@
   "tempo.py": "14471f2c36bc3c2df3f6d26d20e65d5cb66ab9e696ea1bf0eea7996e700c591c",
   "tempo.sh": "66b59a7978a2dd651df27142be4bbeec31f1e260f1d5103c79e9c293f0bca0f7",
   "tempo_audit.py": "9c433c91fcd41fee3e9ec900f544a7ee5472ab0cf4bf06944054054596f662f7",
-  "tempo_bootstrap.py": "df0af6fcf9134dc5407e2efbb4d8eb2df036296633421bc1fec63b0552ad0aec",
+  "tempo_bootstrap.py": "cb63fce107ed3ef998e4ae6b51368d1c7c831e3ff5a88276c2b096cb7050ace5",
   "tempo_calibrate.py": "c693d87794846ad266a24ca7eaa08ee423608f0173f201f36f133a380f1a697b",
   "tempo_client.py": "1eaffa04635c99789a33822c5457a53534ac102af5ad067cf098e30046493ca3",
   "tempo_content_screen.py": "02b8c352b0966e5945cf09a701077f5277867fe6f523a2b111f0a6eb8ecf6f51",
@@ -79,6 +79,6 @@
   "tempo_verdicts.py": "ced3cb50a3e16aa34f51fa852d526c85ba6d84a2a09e5727d2c8e823cc14b61b",
   "tool_policy.py": "b1324a2b918371ef4cae9e301f68e1134f5ebf241409a22223932d05e5700100",
   "tempo_local_http.py": "81c8aa60b8fa8e96b3f39e65f6d5fc44d97d7f61cabf9dca7f353599f458cc65",
-  "tempo_pull.py": "1a84509eb237a4c4392ed4e114f5ae42e7db2d6a2e733c8cfcde01562030c7c8"
+  "tempo_pull.py": "676931b576c18e177514df842ce9bf4ffe0ce4c1e858e6e6d645ea8e20b97199"
  }
 }

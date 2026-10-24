@@ -58,6 +58,18 @@ def _timeout(value, label):
 def _interrupt(sock):
     with suppress(OSError):
         sock.shutdown(socket.SHUT_RDWR)
+    try:
+        descriptor = sock.detach()
+    except OSError:
+        return
+    if descriptor >= 0:
+        with suppress(OSError):
+            socket.close(descriptor)
+
+
+def _interrupt_sockets(sockets):
+    for sock in sockets:
+        _interrupt(sock)
 
 
 def _response_socket(response, retained_socket):
@@ -77,10 +89,15 @@ def _remaining(deadline, clock):
     return remaining
 
 
+def _check_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise PullError("The local model pull was cancelled.")
+
+
 def pull_owned_model(model, port, owner_record, owner_executable, *,
                      assert_owned_listener, assert_connected_peer,
                      idle_timeout=60, overall_timeout=7200, max_attempts=3,
-                     clock=time.monotonic):
+                     clock=time.monotonic, cancel_event=None):
     """Pull through an owned listener; heartbeat bytes alone never reset progress."""
     idle_timeout = _timeout(idle_timeout, "idle_timeout")
     overall_timeout = _timeout(overall_timeout, "overall_timeout")
@@ -95,10 +112,13 @@ def pull_owned_model(model, port, owner_record, owner_executable, *,
         raise PullError("The local model pull requires a matching owned-listener record.")
     if not callable(assert_owned_listener) or not callable(assert_connected_peer):
         raise PullError("The local model pull requires both listener ownership checks.")
+    if cancel_event is not None and not callable(getattr(cancel_event, "is_set", None)):
+        raise ValueError("cancel_event must provide is_set()")
 
     deadline = clock() + overall_timeout
     body = json.dumps({"name": model, "stream": True}, separators=(",", ":")).encode("utf-8")
     for attempt in range(1, max_attempts + 1):
+        _check_cancelled(cancel_event)
         progress_at = clock()
         last_status = None
         completed_by_digest = {}
@@ -108,6 +128,10 @@ def pull_owned_model(model, port, owner_record, owner_executable, *,
         transport = None
         read_socket = None
         timer = None
+        timer_started = False
+        watcher = None
+        watcher_started = False
+        attempt_finished = threading.Event()
         deadline_socket = None
         response = None
         pull_completed = False
@@ -117,7 +141,7 @@ def pull_owned_model(model, port, owner_record, owner_executable, *,
             except Exception:
                 raise PullError("The local model pull could not verify its recorded listener.") from None
             conn = http.client.HTTPConnection("127.0.0.1", port,
-                                              timeout=min(idle_timeout, _remaining(deadline, clock)))
+                                              timeout=min(1.0, _remaining(deadline, clock)))
             conn.auto_open = 0
             conn.connect()
             if conn.sock is None:
@@ -130,22 +154,42 @@ def pull_owned_model(model, port, owner_record, owner_executable, *,
                 assert_connected_peer(transport, owner_record, owner_executable, port)
             except Exception:
                 raise PullError("The connected model pull peer failed ownership verification.") from None
+            _check_cancelled(cancel_event)
             deadline_socket = transport.dup()
-            timer = threading.Timer(_remaining(deadline, clock), _interrupt, args=(deadline_socket,))
+            interrupt_sockets = (deadline_socket, transport)
+            timer = threading.Timer(_remaining(deadline, clock), _interrupt_sockets,
+                                   args=(interrupt_sockets,))
             timer.daemon = True
             timer.start()
+            timer_started = True
+            if cancel_event is not None:
+                def watch_cancellation(sockets=interrupt_sockets,
+                                       finished=attempt_finished,
+                                       cancelled=cancel_event):
+                    while not finished.wait(0.05):
+                        if cancelled.is_set():
+                            _interrupt_sockets(sockets)
+                            return
+
+                watcher = threading.Thread(target=watch_cancellation, daemon=True)
+                watcher.start()
+                watcher_started = True
             remaining = _remaining(deadline, clock)
             transport.settimeout(min(idle_timeout, remaining))
+            _check_cancelled(cancel_event)
             conn.request("POST", "/api/pull", body=body,
                          headers={"Accept": "application/json", "Content-Type": "application/json",
                                   "Connection": "close"})
+            _check_cancelled(cancel_event)
             response = conn.getresponse()
+            _check_cancelled(cancel_event)
             if response.status != 200:
                 raise PullError(f"The owned local engine returned HTTP {response.status} for model pull.")
             read_socket = _response_socket(response, transport)
 
             pending = bytearray()
             while True:
+                _check_cancelled(cancel_event)
                 now = clock()
                 remaining = _remaining(deadline, clock)
                 idle_left = idle_timeout - (now - progress_at)
@@ -176,6 +220,7 @@ def pull_owned_model(model, port, owner_record, owner_executable, *,
                     if moved:
                         progress_at = clock()
                     if success:
+                        _check_cancelled(cancel_event)
                         pull_completed = True
                         return None
                 if len(pending) > MAX_EVENT_BYTES:
@@ -186,17 +231,24 @@ def pull_owned_model(model, port, owner_record, owner_executable, *,
         except PullError:
             raise
         except (OSError, http.client.HTTPException, TimeoutError) as exc:
+            _check_cancelled(cancel_event)
             now = clock()
             if now >= deadline:
                 raise PullError("The local model pull exceeded its overall deadline.") from None
             if isinstance(exc, TimeoutError) and now - progress_at >= idle_timeout:
                 if attempt < max_attempts:
+                    _check_cancelled(cancel_event)
                     continue
                 raise PullError(f"The local model pull made no streamed progress after {max_attempts} attempts.") from None
             raise PullError("The local model pull failed before completion.") from None
         finally:
+            attempt_finished.set()
             if timer is not None:
                 timer.cancel()
+            if watcher_started:
+                watcher.join()
+            if timer_started:
+                timer.join()
             # Abort the old pull before a retry opens a replacement request.
             if transport is not None and not pull_completed:
                 _interrupt(transport)
