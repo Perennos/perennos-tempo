@@ -57,6 +57,11 @@ def _parser():
     _add_home(config)
     config.add_argument("--host", choices=sorted(LOOPBACK_HOSTS), default="127.0.0.1")
     config.add_argument("--port", type=int, default=8765)
+
+    doctor = modes.add_parser("doctor", help="read-only, content-free setup diagnostics (offline by default)")
+    _add_home(doctor)
+    doctor.add_argument("--port", type=int, default=8765)
+    doctor.add_argument("--connect", action="store_true", help="also verify the local gateway; never runs inference")
     return parser
 
 
@@ -183,6 +188,12 @@ def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.mode == "doctor":
+            from tempo_doctor import diagnose, exit_code
+            selected = args.home or (Path.home() / "PerennosTempo")
+            report = diagnose(Path(selected), port=args.port, connect=args.connect)
+            print(json.dumps(report, indent=2))
+            return exit_code(report)
         home = _home_path(args.home, required=args.mode != "gui")
         if args.mode == "gui":
             if not 1024 <= args.port <= 65535:

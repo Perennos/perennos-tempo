@@ -101,10 +101,11 @@ class StandaloneGuard:
         if _quarantine:raise GuardError('previous inference completion is unknown; restart after checking the runtime is idle')
         self.lock.__enter__()
         try:
+            from tempo_local_http import open_local
             if self.info is None:
-                busy=json.load(urllib.request.urlopen(self.url+'/api/ps',timeout=5)).get('models')
+                busy=json.load(open_local(self.url+'/api/ps',timeout=5)).get('models')
                 if busy:raise GuardError('local runtime may already be busy; no inference started')
-                tags=json.load(urllib.request.urlopen(self.url+'/api/tags',timeout=5))['models']
+                tags=json.load(open_local(self.url+'/api/tags',timeout=5))['models']
                 self.info=next((m for m in tags if m['name'] in (self.model,self.model+':latest')),None)
                 if not self.info:raise GuardError('local engine is not installed')
             if self.revision and self.info.get('digest')!=self.revision:raise GuardError('engine revision changed; setup must check it again')
@@ -112,7 +113,7 @@ class StandaloneGuard:
             context_mib=2048
             if self.requested!='cpu' and self.free>math.ceil(self.info['size']/1048576)+2048:
                 req=urllib.request.Request(self.url+'/api/show',json.dumps({'model':self.model}).encode(),{'Content-Type':'application/json'})
-                metadata=json.load(urllib.request.urlopen(req,timeout=5)).get('model_info',{})
+                metadata=json.load(open_local(req,timeout=5)).get('model_info',{})
                 arch=metadata.get('general.architecture')
                 fields=[metadata.get(str(arch)+'.'+key) for key in ('block_count','embedding_length','attention.head_count','attention.head_count_kv')]
                 if any(type(v) is not int or v<=0 for v in fields):raise GuardError('context-memory metadata is unavailable; GPU admission refused')
@@ -128,12 +129,39 @@ class StandaloneGuard:
     def dispatched(self):self.sent=True
     def check(self):
         if time.monotonic()>self.deadline:raise GuardError('standalone request timed out')
+    def _wait_for_unload(self):
+        deadline=min(self.deadline,time.monotonic()+15)
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise GuardError('local runtime did not become idle before the request deadline')
+            from tempo_local_http import open_local
+            try:
+                # Socket inactivity is capped; the reader also bounds the body by an absolute deadline.
+                response=open_local(self.url+'/api/ps',timeout=min(2,remaining))
+                from tempo_runtime import read_resident_json
+                try:state=read_resident_json(response,deadline)
+                finally:response.close()
+            except Exception as exc:
+                raise GuardError('local runtime idle confirmation failed') from exc
+            if time.monotonic()>=deadline:raise GuardError('local runtime idle confirmation exceeded the request deadline')
+            if not isinstance(state,dict) or not isinstance(state.get('models'),list):
+                raise GuardError('local runtime idle response is invalid')
+            if not state['models']:return
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise GuardError('local runtime did not become idle before the request deadline')
+            time.sleep(min(.25,remaining))
     def __exit__(self,kind,value,traceback):
         if kind is not None and self.sent:
             # The backend's completion is unknown. Retain this process's lock;
             # recovery requires a restart and a fresh idle-runtime check.
             _quarantine.append(self.lock)
-        else:self.lock.__exit__(kind,value,traceback)
+        else:
+            if self.sent:
+                try:self._wait_for_unload()
+                except BaseException:
+                    _quarantine.append(self.lock)
+                    raise
+            self.lock.__exit__(kind,value,traceback)
 
 @contextlib.contextmanager
 def decision_head_guard(timeout=180):

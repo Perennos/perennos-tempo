@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import http.client
+import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import socket
 import stat
 import threading
@@ -33,6 +36,9 @@ AMBIGUOUS_POST_MESSAGE = (
     "Perennos Tempo request outcome is unknown after send. The backend may continue; "
     "check the receipt before retrying; no automatic replay was performed."
 )
+CHALLENGE_HEADER = "X-Tempo-Gateway-Nonce"
+PROOF_HEADER = "X-Tempo-Gateway-Proof"
+_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 
 class TempoAPIError(RuntimeError):
@@ -150,6 +156,81 @@ def _read_bounded(response, conn, deadline, cancel_event):
     return b"".join(chunks)
 
 
+def _gateway_proof(token, nonce, port):
+    message = f"PerennosTempoGateway-v1\n{port}\n{nonce}".encode("ascii")
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+class _OwnershipRequest:
+    """Narrow request view for the bootstrap guard; guard failure closes without masking its error as cancel."""
+    def __init__(self, connection):
+        self.connection = connection
+
+    def close(self):
+        self.connection.close()
+
+
+def _is_bootstrap_owner_guard(callback):
+    if (getattr(callback, "__module__", None) not in {"tempo_bootstrap", "__main__"}
+            or not getattr(callback, "__qualname__", "").endswith(
+                "_connection_owner_guard.<locals>.verify_before_request")):
+        return False
+    try:
+        from tempo_bootstrap import _connection_owner_guard
+        expected = _connection_owner_guard({}, Path("."), 1024)
+    except Exception:
+        return False
+    # Native setup executes the same file as __main__; its separately compiled
+    # code object is equal, but cannot have the imported object's identity.
+    return getattr(callback, "__code__", None) == getattr(expected, "__code__", None)
+
+
+def _installed_windows_owner_guard(port):
+    """Use the finished app receipt when present; source/headless installs use the nonce proof."""
+    if os.name != "nt" or not os.environ.get("TEMPO_HOME"):
+        return None
+    home = Path(os.environ["TEMPO_HOME"]).expanduser().resolve()
+    receipt_path = home / "desktop-install-receipt.json"
+    try:
+        receipt_stat = receipt_path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise TempoAPIError("Perennos Tempo listener ownership could not be verified") from None
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if receipt_path.is_symlink() or getattr(receipt_stat, "st_file_attributes", 0) & reparse_point:
+        raise TempoAPIError("Perennos Tempo listener ownership could not be verified")
+    try:
+        with receipt_path.open("r", encoding="utf-8-sig") as stream:
+            raw = stream.read(1 << 20 | 1)
+        if len(raw) > 1 << 20:
+            raise ValueError("receipt exceeds limit")
+        receipt = json.loads(raw)
+        record = receipt["gateway_process"]
+        home_record = Path(receipt["data_home"]).expanduser().resolve()
+        bootstrap_python = Path(receipt["bootstrap_python_path"]).expanduser().resolve()
+        expected_python = (bootstrap_python.parents[2] / "runtime" / "python" / "python.exe").resolve()
+        app_root = bootstrap_python.parents[2]
+        executable = (app_root / "runtime" / "venv" / "Scripts" / "python.exe").resolve()
+        if (not isinstance(receipt, dict) or receipt.get("product") != "Perennos Tempo"
+                or receipt.get("state") != "Verified complete"
+                or receipt.get("first_private_answer") is not True
+                or not isinstance(receipt.get("first_completion_receipt_id"), str)
+                or receipt.get("first_completion_receipt_id") == ""
+                or home_record != home or not isinstance(record, dict)
+                or type(record.get("port")) is not int or record["port"] != port
+                or record.get("home") != str(home)
+                or bootstrap_python != expected_python
+                or Path(record.get("launcher_path", "")).expanduser().resolve() != executable
+                or not isinstance(receipt.get("bootstrap_python_sha256"), str)):
+            raise ValueError("receipt does not bind this listener")
+        from tempo_bootstrap import _connection_owner_guard
+        return _connection_owner_guard(record, executable, port, python=bootstrap_python,
+                                       python_sha256=receipt["bootstrap_python_sha256"])
+    except Exception:
+        raise TempoAPIError("Perennos Tempo listener ownership could not be verified") from None
+
+
 def request_json(host, port, token, method, path, body=None, *, timeout=15, cancel_event=None,
                  on_connection=None):
     """Call one fixed API endpoint directly; never follows redirects or uses a proxy."""
@@ -171,7 +252,8 @@ def request_json(host, port, token, method, path, body=None, *, timeout=15, canc
         if len(raw_body) > MAX_REQUEST_BYTES:
             raise ValueError("Perennos Tempo gateway request exceeded its size limit")
         headers["Content-Type"] = "application/json; charset=utf-8"
-    if token:
+    is_health = (method, path) == ("GET", "/health")
+    if token and not is_health:
         headers["Authorization"] = "Bearer " + token
 
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
@@ -200,11 +282,48 @@ def request_json(host, port, token, method, path, body=None, *, timeout=15, canc
             interrupt_at_deadline()
             raise TempoAPIError("Perennos Tempo gateway request timed out")
         _remaining(conn, deadline, active_cancel)
+        supplied_owner_guard = _is_bootstrap_owner_guard(on_connection)
+        owner_guard = on_connection if supplied_owner_guard else _installed_windows_owner_guard(port)
+        active_request = _ActiveRequest(conn, deadline_socket, active_cancel)
+        if owner_guard is not None:
+            try:
+                owner_guard(_OwnershipRequest(conn))
+            except Exception:
+                raise TempoAPIError("Perennos Tempo gateway listener ownership could not be verified") from None
+            if conn.sock is None:
+                raise TempoAPIError("Perennos Tempo gateway listener ownership could not be verified")
         if on_connection is not None:
-            on_connection(_ActiveRequest(conn, deadline_socket, active_cancel))
+            if on_connection is not owner_guard:
+                try:
+                    on_connection(active_request)
+                except TempoAPIError:
+                    raise
+                except Exception:
+                    if _cancelled(active_cancel):
+                        raise TempoCancelled() from None
+                    raise TempoAPIError("Perennos Tempo gateway request could not be prepared") from None
             if active_cancel.is_set() or conn.sock is None:
                 raise TempoCancelled()
         _remaining(conn, deadline, active_cancel)
+        if not is_health:
+            nonce = secrets.token_urlsafe(32)
+            if not _CHALLENGE_RE.fullmatch(nonce):
+                raise TempoAPIError("Perennos Tempo gateway challenge could not be created")
+            conn.request("GET", "/health", headers={"Accept": "application/json", CHALLENGE_HEADER: nonce})
+            _remaining(conn, deadline, active_cancel)
+            challenge = conn.getresponse()
+            challenge_raw = _read_bounded(challenge, conn, deadline, active_cancel)
+            if challenge.status != 200:
+                raise TempoAPIError("Perennos Tempo gateway listener could not be verified")
+            proof = challenge.getheader(PROOF_HEADER)
+            expected_proof = _gateway_proof(token, nonce, port)
+            if (not isinstance(proof, str) or not re.fullmatch(r"[a-f0-9]{64}", proof)
+                    or not hmac.compare_digest(proof, expected_proof)
+                    or challenge.will_close or conn.sock is None):
+                raise TempoAPIError("Perennos Tempo gateway listener could not be verified")
+            # Consume the bounded secret-free challenge body before reusing this exact socket.
+            del challenge_raw
+            _remaining(conn, deadline, active_cancel)
         request_started = True
         conn.request(method, path, body=raw_body, headers=headers)
         _remaining(conn, deadline, active_cancel)
@@ -219,14 +338,15 @@ def request_json(host, port, token, method, path, body=None, *, timeout=15, canc
                     candidate = err.get("code") or err.get("type") if isinstance(err, dict) else None
                     if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", candidate):
                         kind = candidate
-                except (TempoAPIError, UnicodeDecodeError, json.JSONDecodeError, OSError, http.client.HTTPException):
+                except (TempoAPIError, UnicodeDecodeError, json.JSONDecodeError, RecursionError,
+                        OSError, http.client.HTTPException):
                     pass
             raise TempoAPIError(f"Perennos Tempo gateway returned HTTP {response.status} ({kind})",
                                 status=response.status, code=kind)
         raw = _read_bounded(response, conn, deadline, active_cancel)
         try:
             payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
             raise TempoAPIError("Perennos Tempo gateway returned invalid JSON", status=response.status) from None
         if not isinstance(payload, dict):
             raise TempoAPIError("Perennos Tempo gateway returned an invalid response", status=response.status)
@@ -272,9 +392,28 @@ def request_json(host, port, token, method, path, body=None, *, timeout=15, canc
 def chat(host, port, token, prompt, *, timeout=610, cancel_event=None, on_connection=None):
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS:
         raise ValueError("prompt must contain 1 to 32000 characters")
+    return chat_messages(host, port, token, [{"role": "user", "content": prompt}],
+                         timeout=timeout, cancel_event=cancel_event, on_connection=on_connection)
+
+
+def chat_messages(host, port, token, messages, *, timeout=610, cancel_event=None, on_connection=None):
+    """Send explicit text turns through the same private, authenticated boundary."""
+    if not isinstance(messages, list) or not 1 <= len(messages) <= 100:
+        raise ValueError("messages must contain 1 to 100 text messages")
+    clean = []
+    for message in messages:
+        if (not isinstance(message, dict) or not isinstance(message.get("role"), str)
+                or message["role"] not in {"system", "user", "assistant"}
+                or not isinstance(message.get("content"), str) or len(message["content"]) > MAX_PROMPT_CHARS):
+            raise ValueError("each message needs a supported role and at most 32000 text characters")
+        try:
+            message["content"].encode("utf-8")
+        except UnicodeError:
+            raise ValueError("message must be valid Unicode text") from None
+        clean.append({"role": message["role"], "content": message["content"]})
     body = {
         "model": "tempo/auto",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": clean,
         "metadata": {"privacy_class": "private"},
         "stream": False,
         "max_tokens": 1024,

@@ -127,7 +127,7 @@ class TempoMCP:
             return {"jsonrpc": "2.0", "id": request_id, "result": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "Perennos Tempo", "version": "1.0.0"},
+                "serverInfo": {"name": "Perennos Tempo", "version": "1.0.1"},
             }}
         if method == "ping":
             return {"jsonrpc": "2.0", "id": request_id, "result": {}}
@@ -157,7 +157,7 @@ def _response_bytes(server, raw):
         return server._error("Parse error", -32700)
     try:
         request = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return server._error("Parse error", -32700)
     return server.dispatch(request)
 
@@ -179,9 +179,9 @@ def serve(host, port, token, *, stdin=None, stdout=None):
         response = _response_bytes(server, raw.rstrip(b"\r\n"))
         if response is None:
             continue
-        encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(response, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > MAX_OUTPUT_BYTES:
             encoded = json.dumps(server._error("Response exceeded its size limit", -32603,
-                                                response.get("id")), separators=(",", ":")).encode("utf-8")
+                                                None), separators=(",", ":")).encode("utf-8")
         sink.write(encoded + b"\n")
         sink.flush()

@@ -12,6 +12,7 @@ import select
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import uuid
@@ -24,6 +25,8 @@ from tempo_home import DATA, LEDGER_DIR, T
 from tempo_receipts import append_receipt
 
 MAX_BODY = 1 << 20
+PREAUTH_READ_TIMEOUT = 10
+MAX_HANDLER_THREADS = 32
 MAX_MESSAGES = 100
 MAX_MESSAGE_CHARS = 32_000
 MAX_COMPLETION_TOKENS = 8192
@@ -42,9 +45,17 @@ def _sha(value):
 
 
 def authorized(header, token):
-    if not isinstance(header, str) or not header.startswith("Bearer ") or not token:
+    if not isinstance(header, str) or not header.startswith("Bearer ") or not isinstance(token, str) or not token:
         return False
-    return hmac.compare_digest(header[7:], token)
+    try:
+        return hmac.compare_digest(header[7:].encode("ascii"), token.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+
+
+def _gateway_proof(token, nonce, port):
+    message = f"PerennosTempoGateway-v1\n{port}\n{nonce}".encode("ascii")
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 MAX_TOOLS = 16
@@ -212,14 +223,15 @@ def qualified_engine_ids(data_dir):
         return set()
 
 
-def _ollama_chunks(url, model, messages, temperature, max_tokens, timeout, cpu=False, family=None, context_tokens=None, *, resident_policy=None, backend_witness=None, witness_provider=None):
+def _ollama_chunks(url, model, messages, temperature, max_tokens, timeout, cpu=False, family=None, context_tokens=None, *, resident_policy=None, backend_witness=None, witness_provider=None, release_after=False):
     from tempo_runtime import request,policy,visible_answer
     resident=resident_policy is not None or backend_witness is not None or witness_provider is not None
     extra={}
     if resident:
         if not callable(witness_provider):raise ValueError('trusted resident witness provider is required')
         extra=dict(resident_policy=resident_policy,backend_witness=backend_witness)
-    endpoint,payload=request(model,messages,temperature,max_tokens,cpu=cpu,family=family,**extra)
+    endpoint,payload=request(model,messages,temperature,max_tokens,cpu=cpu,family=family,
+                             release_after=release_after,**extra)
     if resident and context_tokens is not None and context_tokens!=payload['options']['num_ctx']:
         raise ValueError('resident context override is forbidden')
     if resident and backend_witness['valid_until']-time.time()<float(timeout):
@@ -227,7 +239,8 @@ def _ollama_chunks(url, model, messages, temperature, max_tokens, timeout, cpu=F
     if context_tokens:payload['options']['num_ctx']=context_tokens
     req = urllib.request.Request(url.rstrip("/") + endpoint, _canonical(payload), {"Content-Type": "application/json"})
     deadline=time.monotonic()+float(timeout)
-    response = urllib.request.urlopen(req, timeout=timeout)
+    from tempo_local_http import open_local
+    response = open_local(req, timeout=timeout)
     def iterator():
         buffered=[]
         qwen=policy(model,family).get('think') is False
@@ -443,7 +456,8 @@ class TempoGateway:
             from tempo_runtime import policy
             profile_context['runtime_policy']=policy(engine['model'],engine.get('family'))
             if self.device == "cpu":
-                tags = json.load(urllib.request.urlopen(self.ollama_url + '/api/tags', timeout=10))
+                from tempo_local_http import open_local
+                tags = json.load(open_local(self.ollama_url + '/api/tags', timeout=10))
                 live = next((e for e in tags.get('models', []) if e.get('name') == engine['model']), None)
                 if not live or live.get('digest') != engine.get('revision'):
                     raise RuntimeError('CPU engine digest changed; qualification is required')
@@ -460,7 +474,7 @@ class TempoGateway:
             if on_start:
                 on_start(started_receipt, job_id, engine["model"])
             if self.standalone:self.active_guard.dispatched()
-            extra={'context_tokens':self.active_guard.context_tokens} if self.standalone else {}
+            extra={'context_tokens':self.active_guard.context_tokens,'release_after':True} if self.standalone else {}
             remaining=self.timeout-(time.monotonic()-started)
             if self.standalone:remaining=min(remaining,self.active_guard.deadline-time.monotonic())
             if remaining<=0:raise TimeoutError('gateway request deadline exceeded before generation')
@@ -603,25 +617,37 @@ def make_handler(gateway, token, tools=None):
         server_version = "PerennosTempoGateway/1"
         protocol_version = "HTTP/1.1"
 
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(PREAUTH_READ_TIMEOUT)
+
         def log_message(self, fmt, *args):
             return
 
-        def _json(self, status, value, headers=None):
+        def _json(self, status, value, headers=None, *, close=True):
             body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Connection", "close")
+            self.send_header("Connection", "close" if close else "keep-alive")
             for key, value in (headers or {}).items():
                 self.send_header(key, str(value))
             self.end_headers()
             self.wfile.write(body)
-            self.close_connection = True
+            self.close_connection = close
 
         def do_GET(self):
             if self.path == "/health":
+                nonce = self.headers.get("X-Tempo-Gateway-Nonce")
+                if nonce is not None:
+                    if re.fullmatch(r"[A-Za-z0-9_-]{43}", nonce):
+                        port = int(self.server.server_address[1])
+                        proof = _gateway_proof(token, nonce, port)
+                        return self._json(200, {"status": "ok", "mode": "profile-gated"},
+                                          {"X-Tempo-Gateway-Proof": proof}, close=False)
+                    return self._json(400, {"error": {"message": "invalid challenge", "type": "invalid_request_error"}})
                 return self._json(200, {"status": "ok", "mode": "profile-gated"})
             if self.path == "/v1/tools":
                 return self._tools_listing()
@@ -629,6 +655,7 @@ def make_handler(gateway, token, tools=None):
                 return self._json(404, {"error": {"message": "not found", "type": "not_found_error"}})
             if not authorized(self.headers.get("Authorization"), token):
                 return self._json(401, {"error": {"message": "unauthorized", "type": "authentication_error"}})
+            self.connection.settimeout(None)
             models = gateway.models() if hasattr(gateway, "models") else []
             models += [{"id": name, "object": "model", "owned_by": "perennos-tempo"} for name in ALIASES]
             return self._json(200, {"object": "list", "data": models})
@@ -647,9 +674,10 @@ def make_handler(gateway, token, tools=None):
                 if length < 0 or length > MAX_BODY:
                     return self._json(413, {"error": {"message": "request body exceeds limit", "type": "invalid_request_error"}})
                 body = json.loads(self.rfile.read(length))
+                self.connection.settimeout(None)
                 cfg = json.loads((gateway.data_dir / "config.json").read_text(encoding="utf-8"))
                 route = classify_request(body, allowed_classes=set(cfg.get("task_classes", [])) or None)
-            except (ValueError, TypeError, OSError, json.JSONDecodeError):
+            except (ValueError, TypeError, OSError, json.JSONDecodeError, RecursionError):
                 return self._json(400, {"error": {"message": "invalid request", "type": "invalid_request_error"}})
             if route.get("tools") is not None:
                 return self._chat_with_tools(route, header)
@@ -758,6 +786,7 @@ def make_handler(gateway, token, tools=None):
                 if length < 0 or length > 4096:
                     return self._json(413, {"error": {"message": "feedback body exceeds limit", "type": "invalid_request_error"}})
                 body = json.loads(self.rfile.read(length))
+                self.connection.settimeout(None)
                 if not isinstance(body, dict) or not isinstance(body.get("attempt_id"), str):
                     raise ValueError("invalid feedback")
                 verdict = body.get("verdict")
@@ -776,7 +805,7 @@ def make_handler(gateway, token, tools=None):
                     "status": "verdict_recorded", "verdict": outcome["verdict"], "verdict_by": "owner",
                     **{k:matches[-1][k] for k in ('profile','profile_source','profile_policy_sha256','screen_result','hosted','requires_review') if k in matches[-1]}})
                 return self._json(200, {"ok": True, "attempt_id": attempt_id, "verdict": verdict})
-            except (ValueError, TypeError, OSError, json.JSONDecodeError):
+            except (ValueError, TypeError, OSError, json.JSONDecodeError, RecursionError):
                 return self._json(400, {"error": {"message": "invalid feedback", "type": "invalid_request_error"}})
 
         def _event(self, obj):
@@ -786,13 +815,41 @@ def make_handler(gateway, token, tools=None):
     return Handler
 
 
+class _CappedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 16
+
+    def __init__(self, *args, max_handlers=MAX_HANDLER_THREADS, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._handler_slots = threading.BoundedSemaphore(max_handlers)
+
+    def process_request(self, request, client_address):
+        if not self._handler_slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n")
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._handler_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._handler_slots.release()
+
+
 def serve(host, port, gateway, token, tools=None):
     if host not in {"127.0.0.1", "::1", "localhost"}:
         raise ValueError("gateway must bind to loopback")
-    class Server(ThreadingHTTPServer):
-        daemon_threads = True
-        request_queue_size = 16
-    server = Server((host, port), make_handler(gateway, token, tools))
+    server = _CappedThreadingHTTPServer((host, port), make_handler(gateway, token, tools))
     server.serve_forever(poll_interval=0.25)
 
 

@@ -28,15 +28,16 @@ def _resident_options(config, witness, model, family, cpu):
     return validate(config, witness, model, family, cpu)
 
 
-def request(model, messages, temperature, max_tokens, *, cpu=False, family=None, stream=True, final_only=True, resident_policy=None, backend_witness=None):
+def request(model, messages, temperature, max_tokens, *, cpu=False, family=None, stream=True, final_only=True, resident_policy=None, backend_witness=None, release_after=False):
     resident = None
     if resident_policy is not None or backend_witness is not None:
         resident = _resident_options(resident_policy,backend_witness,model,family,cpu)
     controls = policy(model,family)
     body = {'model':model,'stream':stream,'options':{'temperature':temperature,'num_predict':max_tokens}}
     if 'think' in controls: body['think'] = controls['think']
-    if cpu:
+    if cpu or release_after:
         body['keep_alive'] = -1 if resident is not None else 0
+    if cpu:
         body['options'].update(resident if resident is not None else {'num_gpu':0,'num_thread':2,'num_ctx':8192})
     if controls['wire']=='qwen3-empty-think':
         last_user=max((i for i,m in enumerate(messages) if m['role']=='user'),default=-1)

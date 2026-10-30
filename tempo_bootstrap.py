@@ -9,7 +9,9 @@ PATH, firewall, or machine-wide configuration.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
+import errno
 import hashlib
 import http.client
 import json
@@ -51,6 +53,10 @@ class BootstrapError(RuntimeError):
     pass
 
 
+class _TransientTransportError(BootstrapError):
+    """A bounded local-engine transport failure that readiness may retry."""
+
+
 def emit(kind: str, **details):
     row = {"type": kind, **details}
     print(json.dumps(row, separators=(",", ":")), flush=True)
@@ -59,6 +65,16 @@ def emit(kind: str, **details):
 def _private_error(exc: BaseException) -> str:
     if isinstance(exc, BootstrapError):
         return str(exc)[:400]
+    from tempo_client import TempoAPIError
+    if isinstance(exc, TempoAPIError):
+        safe_codes = {"GuardError", "RuntimeError", "ValueError", "TimeoutError", "ConnectionError",
+                      "OSError", "ImportError", "PermissionError", "server_error", "authentication_error"}
+        code = exc.code if isinstance(exc.code, str) and exc.code in safe_codes else "gateway_error"
+        status = str(exc.status) if type(exc.status) is int and 100 <= exc.status <= 599 else "unknown"
+        message = f"Local gateway request failed (HTTP {status}, {code})."
+        if exc.request_may_continue:
+            message += " The request outcome is unknown; inspect receipts before retrying."
+        return message
     return type(exc).__name__
 
 
@@ -745,7 +761,7 @@ def plan(python: Path, app_root: Path, home: Path, models_root: Path, code: Path
     }
 
 
-def _child_env(*, home=None, ollama_host=None, ollama_models=None):
+def _child_env(*, home=None, ollama_host=None, ollama_models=None, ollama_runtime=None):
     env = dict(os.environ)
     for key in list(env):
         if key.upper().startswith(("OLLAMA_", "TEMPO_", "PIP_", "PYTHON")):
@@ -758,6 +774,13 @@ def _child_env(*, home=None, ollama_host=None, ollama_models=None):
         env["OLLAMA_HOST"] = ollama_host
     if ollama_models:
         env["OLLAMA_MODELS"] = str(ollama_models)
+    if ollama_runtime is not None:
+        system_root = env.get("SystemRoot") or env.get("SYSTEMROOT") or env.get("WINDIR")
+        if not system_root:
+            raise BootstrapError("The Windows system path is unavailable for the bundled local engine.")
+        runtime_path = str(Path(ollama_runtime).resolve())
+        windows_paths = (str(Path(system_root) / "System32"), system_root)
+        env["PATH"] = os.pathsep.join(dict.fromkeys((runtime_path, *windows_paths)))
     env["PYTHONUTF8"] = "1"
     return env
 
@@ -890,6 +913,8 @@ def _process_identity(pid: int):
     kernel.GetProcessTimes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                                        ctypes.c_void_p, ctypes.c_void_p]
     kernel.GetProcessTimes.restype = ctypes.c_int
+    kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel.GetExitCodeProcess.restype = ctypes.c_int
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel.CloseHandle.restype = ctypes.c_int
     handle = kernel.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -898,6 +923,11 @@ def _process_identity(pid: int):
         # or any other failure is unknown, so callers must fail closed.
         return None if ctypes.get_last_error() == 87 else {"unavailable": True}
     try:
+        exit_code = ctypes.c_ulong()
+        if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return {"unavailable": True}
+        if exit_code.value != 259:  # A retained handle can outlive its process.
+            return None
         size = ctypes.c_ulong(32768)
         buffer = ctypes.create_unicode_buffer(size.value)
         if not kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
@@ -1123,7 +1153,52 @@ def _guarded_gateway_request(record, executable: Path, token: str, method: str, 
                                                               python=python, python_sha256=python_sha256))
 
 
-def _local_json(url: str, *, timeout=5, method="GET", body=None, owner_record=None, owner_exe=None):
+def _probe_error_details(exc: BaseException):
+    details = [type(exc).__name__[:80]]
+    for key in ("errno", "winerror"):
+        value = getattr(exc, key, None)
+        if type(value) is int and -(1 << 31) <= value < (1 << 31):
+            details.append(f"{key}={value}")
+    return ", ".join(details)
+
+
+def _record_probe_error(path: Path | None, stage: str, exc: BaseException):
+    if path is None:
+        return
+    record = {
+        "service": "ollama",
+        "stage": stage,
+        "error_type": type(exc).__name__[:80],
+        "recorded_at": int(time.time()),
+    }
+    for key in ("errno", "winerror"):
+        value = getattr(exc, key, None)
+        if type(value) is int and -(1 << 31) <= value < (1 << 31):
+            record[key] = value
+    try:
+        _atomic_json(path, record)
+    except OSError:
+        pass
+
+
+def _is_transient_transport_error(exc: BaseException):
+    if isinstance(exc, (TimeoutError, ConnectionError, http.client.IncompleteRead)):
+        return True
+    return (isinstance(exc, OSError)
+            and (getattr(exc, "errno", None) in {
+                errno.ECONNABORTED, errno.ECONNREFUSED, errno.ECONNRESET,
+                errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ETIMEDOUT,
+            } or getattr(exc, "winerror", None) in {10053, 10054, 10060, 10061, 10065}))
+
+
+def _raise_probe_error(stage: str, exc: BaseException, diagnostic_path: Path | None = None, *, transient=False):
+    _record_probe_error(diagnostic_path, stage, exc)
+    error_type = _TransientTransportError if transient else BootstrapError
+    raise error_type(f"Local engine probe failed at {stage}: {_probe_error_details(exc)}.") from exc
+
+
+def _local_json(url: str, *, timeout=5, method="GET", body=None, owner_record=None, owner_exe=None,
+                diagnostic_path: Path | None = None):
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password
             or parsed.query or parsed.fragment or parsed.path not in {"/api/version", "/api/tags"}
@@ -1131,11 +1206,27 @@ def _local_json(url: str, *, timeout=5, method="GET", body=None, owner_record=No
         raise BootstrapError("Local service request must use the app's loopback address.")
     if not isinstance(parsed.port, int) or owner_record is None or owner_exe is None:
         raise BootstrapError("Local engine requests require a verified app-owned listener record.")
-    _assert_owned_listener(owner_record, owner_exe, parsed.port)
     try:
-        with socket.create_connection(("127.0.0.1", parsed.port), timeout=timeout) as connection:
-            connection.settimeout(timeout)
-            _assert_connected_peer(connection, owner_record, owner_exe, parsed.port)
+        _assert_owned_listener(owner_record, owner_exe, parsed.port)
+    except BootstrapError as exc:
+        _raise_probe_error("ownership", exc, diagnostic_path)
+    try:
+        connection = socket.create_connection(("127.0.0.1", parsed.port), timeout=timeout)
+    except OSError as exc:
+        _raise_probe_error("connect", exc, diagnostic_path, transient=_is_transient_transport_error(exc))
+    try:
+        with connection:
+            try:
+                connection.settimeout(timeout)
+            except OSError as exc:
+                _raise_probe_error("connect", exc, diagnostic_path,
+                                   transient=_is_transient_transport_error(exc))
+            try:
+                _assert_connected_peer(connection, owner_record, owner_exe, parsed.port)
+            except BootstrapError as exc:
+                _raise_probe_error("ownership", exc, diagnostic_path)
+            except OSError as exc:
+                _raise_probe_error("ownership", exc, diagnostic_path)
             request_path = parsed.path
             request = (f"GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{parsed.port}\r\n"
                        "Accept: application/json\r\nConnection: close\r\n\r\n").encode("ascii")
@@ -1143,37 +1234,57 @@ def _local_json(url: str, *, timeout=5, method="GET", body=None, owner_record=No
             response = http.client.HTTPResponse(connection)
             response.begin()
             if response.status < 200 or response.status >= 300:
-                raise BootstrapError("The recorded local engine returned an unsuccessful response.")
+                exc = RuntimeError("The recorded local engine returned an unsuccessful response.")
+                _raise_probe_error("HTTP", exc, diagnostic_path)
             raw = response.read((1 << 20) + 1)
             response.close()
-        if len(raw) > 1 << 20:
-            raise BootstrapError("The local runtime returned an oversized response.")
-        return json.loads(raw.decode("utf-8"))
     except BootstrapError:
         raise
-    except (OSError, http.client.HTTPException, UnicodeError, ValueError):
-        raise BootstrapError("The verified local engine did not return a valid JSON response.") from None
+    except (OSError, http.client.HTTPException) as exc:
+        _raise_probe_error("HTTP", exc, diagnostic_path, transient=_is_transient_transport_error(exc))
+    if len(raw) > 1 << 20:
+        _raise_probe_error("HTTP", RuntimeError("The local runtime returned an oversized response."), diagnostic_path)
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        _raise_probe_error("JSON", exc, diagnostic_path)
+    if not isinstance(result, dict):
+        _raise_probe_error("JSON", TypeError("The local runtime response must be an object."), diagnostic_path)
+    return result
 
 
-def _wait_ollama(url: str, deadline: float, record=None, executable: Path | None = None):
+def _wait_ollama(url: str, deadline: float, record=None, executable: Path | None = None,
+                 diagnostic_path: Path | None = None):
     port = urllib.parse.urlsplit(url).port
     if record is None or executable is None or not isinstance(port, int):
         raise BootstrapError("The local engine cannot be probed without its recorded child identity.")
+    last_transport_error = None
     while time.time() < deadline:
         try:
-            if not _assert_owned_listener(record, executable, port, allow_absent=True):
-                time.sleep(0.5)
+            try:
+                listening = _assert_owned_listener(record, executable, port, allow_absent=True)
+            except BootstrapError as exc:
+                _raise_probe_error("ownership", exc, diagnostic_path)
+            if not listening:
+                time.sleep(min(0.5, max(0, deadline - time.time())))
                 continue
-            result = _local_json(url + "/api/version", timeout=3,
-                                 owner_record=record, owner_exe=executable)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            result = _local_json(url + "/api/version", timeout=min(3, remaining),
+                                 owner_record=record, owner_exe=executable,
+                                 diagnostic_path=diagnostic_path)
             if isinstance(result.get("version"), str):
                 return
-        except BootstrapError:
-            raise
-        except Exception:
-            pass
-        time.sleep(1)
-    raise BootstrapError("The app-owned local engine did not become ready; no other Ollama process was stopped.")
+            _raise_probe_error("JSON", TypeError("The version response has no string version."), diagnostic_path)
+        except _TransientTransportError as exc:
+            last_transport_error = exc
+        if time.time() < deadline:
+            time.sleep(min(1, max(0, deadline - time.time())))
+    message = "The app-owned local engine did not become ready; no other Ollama process was stopped."
+    if last_transport_error is not None:
+        raise BootstrapError(f"{message} Last probe: {last_transport_error}") from last_transport_error
+    raise BootstrapError(message)
 
 
 def _model_tags(url: str, record, executable: Path):
@@ -1226,22 +1337,28 @@ def _start_or_reuse_ollama(state: dict, app_root: Path, models_root: Path, code:
     if not _verified_ollama_runtime(ollama_exe.parent):
         raise BootstrapError("The app-owned Ollama runtime is missing or changed.")
     old = state.get("ollama")
-    if (_owned_process(old, ollama_exe) and isinstance(old.get("port"), int)
-            and old.get("models_root") == str(models.resolve())):
-        url = f"http://127.0.0.1:{old['port']}"
-        try:
-            _assert_owned_listener(old, ollama_exe, old["port"])
-            _wait_ollama(url, time.time() + 4, old, ollama_exe)
+    if old is not None:
+        if not isinstance(old, dict) or type(old.get("pid")) is not int or old["pid"] < 1:
+            raise BootstrapError("The saved local engine identity is incomplete; no replacement was started.")
+        if _process_identity(old["pid"]) is not None:
+            if (not _owned_process(old, ollama_exe) or type(old.get("port")) is not int
+                    or old.get("models_root") != str(models.resolve())):
+                raise BootstrapError("The saved local engine identity is unknown or mismatched; no replacement was started.")
+            url = f"http://127.0.0.1:{old['port']}"
+            _wait_ollama(url, time.time() + 180, old, ollama_exe,
+                         diagnostic_path=app_root / "logs" / "ollama-probe-diagnostic.json")
             return old, url
-        except BootstrapError:
-            pass
     port = _choose_port(11434, 11520)
     host = f"127.0.0.1:{port}"
     rec = _launch_owned(ollama_exe, ["serve"], cwd=ollama_exe.parent,
-                        env=_child_env(ollama_host=host, ollama_models=models),
+                        env=_child_env(ollama_host=host, ollama_models=models,
+                                       ollama_runtime=ollama_exe.parent),
                         log_path=app_root / "logs" / "ollama.log", role="local engine", port=port)
     rec["models_root"] = str(models.resolve())
-    _wait_ollama(f"http://{host}", time.time() + 180, rec, ollama_exe)
+    state["ollama"] = rec
+    _atomic_json(app_root / STATE_NAME, state)
+    _wait_ollama(f"http://{host}", time.time() + 180, rec, ollama_exe,
+                 diagnostic_path=app_root / "logs" / "ollama-probe-diagnostic.json")
     return rec, f"http://{host}"
 
 
@@ -1344,49 +1461,62 @@ def install(python: Path, app_root: Path, home: Path, models_root: Path, code: P
     _atomic_json(state_path, state)
     _update_owned_tenant_url(home, models_root, ollama_url, previous_ollama_url)
 
-    venv, vpy = Path(plan_doc["venv"]), Path(plan_doc["venv_python"])
-    pip_report = Path(plan_doc["pip_report"])
-    wheelhouse = app_root / "runtime" / "wheelhouse"
-    wheelhouse.mkdir(parents=True, exist_ok=True)
-    wheel_files = []
-    for item in plan_doc["downloads"]["wheels"]:
-        dest = wheelhouse / item["sha256"][:16] / item["filename"]
-        if not _valid_pinned_file(dest, item["sha256"]):
-            emit("progress", phase="Downloading a hash-checked Python dependency wheel")
-            downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
-            if downloaded["bytes"] != item["bytes"]:
-                raise BootstrapError("A dependency wheel size changed after confirmation; setup stopped.")
-        wheel_files.append(str(dest))
-    install_env = _child_env()
-    install_env["PIP_CONFIG_FILE"] = os.devnull
-    install_env["PIP_INDEX_URL"] = "https://pypi.org/simple"
-    install_env["PIP_EXTRA_INDEX_URL"] = "https://download.pytorch.org/whl/cpu"
-    if wheel_files:
-        _run_checked([str(vpy), "-I", "-B", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir",
-                      "--no-index", "--no-deps", "--only-binary=:all:", *wheel_files],
-                     env=install_env, cwd=code, timeout=7200, label="Installing the resolved local dependencies")
-    try:
-        pip_report.unlink()
-    except OSError:
-        pass
-
     emit("progress", phase=f"Verifying the selected local {ENGINE} engine")
-    _assert_owned_listener(ollama_rec, ollama_dir / "ollama.exe", ollama_rec["port"])
-    _run_checked([str(ollama_dir / "ollama.exe"), "pull", ENGINE],
-                 env=_child_env(ollama_host=ollama_url.removeprefix("http://"),
-                                ollama_models=models_root / "ollama"),
-                 cwd=ollama_dir, timeout=7200, label=f"Downloading or verifying {ENGINE}")
+    from tempo_pull import PullError, pull_owned_model
+
+    cancel_pull = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pull_executor:
+        try:
+            pull_future = pull_executor.submit(
+                pull_owned_model, ENGINE, ollama_rec["port"], ollama_rec, ollama_dir / "ollama.exe",
+                assert_owned_listener=_assert_owned_listener,
+                assert_connected_peer=_assert_connected_peer,
+                cancel_event=cancel_pull,
+            )
+            venv, vpy = Path(plan_doc["venv"]), Path(plan_doc["venv_python"])
+            pip_report = Path(plan_doc["pip_report"])
+            wheelhouse = app_root / "runtime" / "wheelhouse"
+            wheelhouse.mkdir(parents=True, exist_ok=True)
+            wheel_files = []
+            for item in plan_doc["downloads"]["wheels"]:
+                dest = wheelhouse / item["sha256"][:16] / item["filename"]
+                if not _valid_pinned_file(dest, item["sha256"]):
+                    emit("progress", phase="Downloading a hash-checked Python dependency wheel")
+                    downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
+                    if downloaded["bytes"] != item["bytes"]:
+                        raise BootstrapError("A dependency wheel size changed after confirmation; setup stopped.")
+                wheel_files.append(str(dest))
+            install_env = _child_env()
+            install_env["PIP_CONFIG_FILE"] = os.devnull
+            install_env["PIP_INDEX_URL"] = "https://pypi.org/simple"
+            install_env["PIP_EXTRA_INDEX_URL"] = "https://download.pytorch.org/whl/cpu"
+            if wheel_files:
+                _run_checked([str(vpy), "-I", "-B", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir",
+                              "--no-index", "--no-deps", "--only-binary=:all:", *wheel_files],
+                             env=install_env, cwd=code, timeout=7200,
+                             label="Installing the resolved local dependencies")
+            try:
+                pip_report.unlink()
+            except OSError:
+                pass
+
+            for item in plan_doc["downloads"]["decision_files"]:
+                dest = Path(item["path"])
+                if not _valid_pinned_file(dest, item["sha256"]):
+                    emit("progress", phase="Downloading a hash-checked decision-model file")
+                    downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
+                    if downloaded["bytes"] != item["bytes"]:
+                        raise BootstrapError("A pinned decision-model file size changed after confirmation; setup stopped.")
+            try:
+                pull_future.result()
+            except PullError as exc:
+                raise BootstrapError(str(exc)) from exc
+        finally:
+            cancel_pull.set()
+
     engine_model = _engine_model(ollama_url, ollama_rec, ollama_dir / "ollama.exe")
     if not isinstance(engine_model, dict) or engine_model.get("digest") != plan_doc["engine_digest"]:
         raise BootstrapError("The downloaded local engine revision differs from the pinned app catalog.")
-
-    for item in plan_doc["downloads"]["decision_files"]:
-        dest = Path(item["path"])
-        if not _valid_pinned_file(dest, item["sha256"]):
-            emit("progress", phase="Downloading a hash-checked decision-model file")
-            downloaded = _download(item["url"], dest, item["sha256"], expected_bytes=item["bytes"])
-            if downloaded["bytes"] != item["bytes"]:
-                raise BootstrapError("A pinned decision-model file size changed after confirmation; setup stopped.")
 
     setup_env = _child_env(home=home)
     setup_env["OLLAMA_HOST"] = ollama_url.removeprefix("http://")

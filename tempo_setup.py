@@ -20,8 +20,9 @@ Rules: --offline refuses downloads and upstream registry checks. Provider keys a
 the owner must explicitly allow a provider. Local-only privacy classes remain local in every mode. The public core
 starts with neutral routing priors and does not include benchmark datasets or owner-specific prior maps.
 """
-import argparse, json, os, platform, shutil, subprocess, sys, time, urllib.request
+import argparse, ipaddress, json, os, platform, shutil, subprocess, sys, time, urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 CODE = Path(__file__).resolve().parent
 
@@ -63,6 +64,21 @@ def _existing(p):
     return p
 
 
+def _offline_loopback_url(url):
+    """Allow offline inventory probes only to parsed numeric loopback or localhost."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return False
+        _ = parsed.port
+        host = parsed.hostname.lower()
+        if host == "localhost":
+            return True
+        return ipaddress.ip_address(host).is_loopback
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def inventory(home, ollama_url, offline):
     """Read-only. Never creates the home folder."""
     gpus = []
@@ -71,9 +87,10 @@ def inventory(home, ollama_url, offline):
         name, total, free = [x.strip() for x in line.rsplit(",", 2)]
         gpus.append({"name": name, "vram_gb": round(int(total) / 1024, 1), "vram_free_gb": round(int(free) / 1024, 1)})
     ver = None
-    if not offline or ollama_url.startswith(("http://127.0.0.1", "http://localhost")):
+    if not offline or _offline_loopback_url(ollama_url):
         try:
-            ver = json.load(urllib.request.urlopen(ollama_url.rstrip("/") + "/api/version", timeout=5)).get("version")
+            from tempo_local_http import open_local
+            ver = json.load(open_local(ollama_url.rstrip("/") + "/api/version", timeout=5)).get("version")
         except Exception:
             ver = None
     return {"os": f"{platform.system()} {platform.release()}", "machine": platform.machine(),
@@ -211,7 +228,8 @@ def qualify(home, ollama_url, wanted, lease_script, env, uncensored=False, lease
                      gpu_lease(lease_script, "tempo-setup-qualify", int(lease_need_mib), ttl_min=15, wait_min=0))
             with guard as admitted:
                 effective=admitted.device if standalone else device
-                tags = json.load(urllib.request.urlopen(ollama_url.rstrip('/') + '/api/tags', timeout=10))
+                from tempo_local_http import open_local
+                tags = json.load(open_local(ollama_url.rstrip('/') + '/api/tags', timeout=10))
                 live = next((m for m in tags.get('models', []) if m.get('name') == e['model']), None)
                 if not live or live.get('digest') != e.get('revision'):
                     raise ValueError('installed engine digest differs from catalogue')
@@ -223,14 +241,16 @@ def qualify(home, ollama_url, wanted, lease_script, env, uncensored=False, lease
                         e.get('revision'),cpu_booking,cpu_until,180)
                     extra=dict(resident_policy=resident_policy,backend_witness=witness)
                 endpoint,payload=request(e['model'],[{'role':'user','content':'Reply with the single word OK.'}],.2,512,
-                                         cpu=effective=='cpu',family=e.get('family'),stream=False,**extra)
+                                         cpu=effective=='cpu',family=e.get('family'),stream=False,
+                                         release_after=standalone,**extra)
                 if standalone:
                     payload['options']['num_ctx']=admitted.context_tokens
                     admitted.dispatched()
                 body=json.dumps(payload).encode()
                 t0 = time.perf_counter()
                 deadline=time.monotonic()+180 if resident_policy is not None else None
-                stream = urllib.request.urlopen(
+                from tempo_local_http import open_local
+                stream = open_local(
                     urllib.request.Request(ollama_url.rstrip("/") + endpoint, body,
                                            {"Content-Type": "application/json"}), timeout=180 if effective == "cpu" or standalone else 600)
                 try:
