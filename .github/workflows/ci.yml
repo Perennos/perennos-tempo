@@ -2,9 +2,21 @@ name: ci
 on: [push, pull_request]
 permissions:
   contents: read
+concurrency:
+  group: source-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: Source checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -19,11 +31,17 @@ jobs:
       - name: Installer acceptance fixtures
         run: python -m unittest discover -s acceptance -p 'test_*.py' -v
       - name: Ratings self-test (synthetic, offline)
+        shell: python
         run: |
-          export TEMPO_HOME="$(mktemp -d)"
-          python tempo_ratings.py selftest | python -c "import json,sys; d=json.load(sys.stdin); print(d['passed'], 'passed,', d['failed'], 'failed'); sys.exit(1 if d['failed'] or not d['passed'] else 0)"
+          import json, os, subprocess, sys, tempfile
+          with tempfile.TemporaryDirectory() as folder:
+              result = subprocess.check_output([sys.executable, "tempo_ratings.py", "selftest"],
+                                               env=dict(os.environ, TEMPO_HOME=folder), text=True)
+              data = json.loads(result)
+              print(data["passed"], "passed,", data["failed"], "failed")
+              sys.exit(1 if data["failed"] or not data["passed"] else 0)
       - name: Leak scan (keys, tokens, private addresses)
         run: |
-          if grep -rInE --exclude-dir=.git 'sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|192\.168\.[1-9][0-9]*\.[0-9]+|\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+' .; then
+          if git grep -InE 'sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|192\.168\.[1-9][0-9]*\.[0-9]+|\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+' -- .; then
             echo "Possible secret or private address found"; exit 1
           fi

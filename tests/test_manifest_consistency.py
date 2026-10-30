@@ -11,6 +11,11 @@ from prepare_payload import clean_name, confined_source
 
 
 class ManifestConsistency(unittest.TestCase):
+    def test_every_root_runtime_module_is_in_payload(self):
+        files = json.loads((ROOT / "MANIFEST.json").read_text())["files"]
+        required = {path.name for path in ROOT.glob("tempo*.py")}
+        self.assertTrue(required <= set(files), "runtime module omitted from the native payload")
+
     def test_every_manifest_input_matches(self):
         manifest = json.loads((ROOT / "MANIFEST.json").read_text())
         for name, digest in manifest["files"].items():

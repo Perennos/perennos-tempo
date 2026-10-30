@@ -33,6 +33,25 @@ def server(handler):
 
 
 class SecurityRoundtrip(unittest.TestCase):
+    def test_private_followup_preserves_context_through_authenticated_gateway(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / "config.json").write_text("{}")
+            def answer(route, **_):
+                seen.append(route)
+                return {"model": "synthetic", "choices": [{"message": {"content": "Alex"}, "finish_reason": "stop"}],
+                        "_tempo": {"receipt_id": "a" * 32, "completion_receipt_id": "b" * 32, "job_id": "c" * 32}}
+            gateway = SimpleNamespace(data_dir=home, run=answer, models=lambda: [])
+            messages = [{"role": "user", "content": "My name is Alex"},
+                        {"role": "assistant", "content": "Hello Alex"},
+                        {"role": "user", "content": "What is my name?"}]
+            with server(tempo_gateway.make_handler(gateway, TOKEN)) as port, patch.dict(os.environ, {"TEMPO_HOME": folder}):
+                result, _ = tempo_client.chat_messages("127.0.0.1", port, TOKEN, messages, timeout=3)
+            self.assertEqual(seen[0]["messages"], messages)
+            self.assertEqual(seen[0]["privacy_class"], "private")
+            self.assertEqual(result["choices"][0]["message"]["content"], "Alex")
+
     def test_source_headless_client_and_real_gateway_complete_private_request(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
