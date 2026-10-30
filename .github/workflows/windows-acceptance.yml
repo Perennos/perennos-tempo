@@ -30,6 +30,12 @@ jobs:
         run: python -I -B acceptance/build_python_runtime.py
       - name: Build native unsigned setup
         run: C:/TempoCI/build-python/python.exe -I -B build_desktop_installer.py --package C:/TempoCI/payload --out C:/TempoCI/build --python-runtime C:/TempoCI/python-runtime.zip
+      - name: Verify pull cancellation on the bundled Windows Python
+        timeout-minutes: 2
+        run: C:/TempoCI/build-python/python.exe -B -m unittest discover -s tests -p test_pull_progress.py -v
+      - name: Verify setup overlap on the bundled Windows Python
+        timeout-minutes: 2
+        run: C:/TempoCI/build-python/python.exe -B -m unittest discover -s tests -p test_install_overlap.py -v
       - name: Verify and extract without claiming installation
         run: C:/TempoCI/build-python/python.exe -I -B acceptance/windows_acceptance.py verify-build
       - name: Install through own native UI and exercise actual local runtime
