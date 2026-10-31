@@ -7,6 +7,14 @@ import sys
 from tempo_client import TempoAPIError, chat, gateway_status, list_models
 
 PROTOCOL_VERSION = "2025-06-18"
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", PROTOCOL_VERSION)
+SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
+PROTOCOL_VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
+CLIENT_INFO_KEY = "io.modelcontextprotocol/clientInfo"
+CLIENT_CAPABILITIES_KEY = "io.modelcontextprotocol/clientCapabilities"
+SERVER_INFO_KEY = "io.modelcontextprotocol/serverInfo"
+SERVER_INFO = {"name": "Perennos Tempo", "version": "1.0.1"}
 MAX_MESSAGE_BYTES = 1 << 20
 MAX_OUTPUT_BYTES = 1 << 20
 MAX_MODEL_ROWS = 100
@@ -46,8 +54,42 @@ class TempoMCP:
         self.token = token
 
     @staticmethod
-    def _error(message, code, request_id=None):
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+    def _error(message, code, request_id=None, data=None):
+        error = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+    @staticmethod
+    def _result(request_id, value, *, modern=False):
+        result = dict(value)
+        if modern:
+            result["resultType"] = "complete"
+            result["_meta"] = {SERVER_INFO_KEY: dict(SERVER_INFO)}
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    def _modern_metadata_error(self, metadata, request_id):
+        if not isinstance(metadata, dict):
+            return self._error("Invalid params", -32602, request_id)
+        version = metadata.get(PROTOCOL_VERSION_KEY)
+        capabilities = metadata.get(CLIENT_CAPABILITIES_KEY)
+        if (not isinstance(version, str) or len(version) > 32 or
+                not isinstance(capabilities, dict)):
+            return self._error("Invalid params", -32602, request_id)
+        if CLIENT_INFO_KEY in metadata:
+            client_info = metadata[CLIENT_INFO_KEY]
+            if (not isinstance(client_info, dict) or
+                    not isinstance(client_info.get("name"), str) or
+                    not isinstance(client_info.get("version"), str)):
+                return self._error("Invalid params", -32602, request_id)
+        if version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return self._error(
+                "Unsupported protocol version", -32022, request_id,
+                data={"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "requested": version},
+            )
+        if version != MODERN_PROTOCOL_VERSION:
+            return self._error("Legacy protocol versions require initialize", -32602, request_id)
+        return None
 
     def _call_tool(self, params):
         if not isinstance(params, dict) or set(params) - {"name", "arguments"}:
@@ -110,7 +152,7 @@ class TempoMCP:
             return self._error("Invalid Request", -32600)
         request_id = request.get("id")
         has_id = "id" in request
-        if has_id and (isinstance(request_id, bool) or not isinstance(request_id, (str, int, type(None)))):
+        if has_id and (request_id is None or isinstance(request_id, bool) or not isinstance(request_id, (str, int))):
             return self._error("Invalid Request", -32600, None)
         method = request["method"]
         params = request.get("params", {})
@@ -119,22 +161,58 @@ class TempoMCP:
                 return None
             return None
         if method == "initialize":
+            metadata = params.get("_meta") if isinstance(params, dict) else None
+            if isinstance(metadata, dict) and any(key in metadata for key in (
+                PROTOCOL_VERSION_KEY, CLIENT_INFO_KEY, CLIENT_CAPABILITIES_KEY,
+            )):
+                return self._error("Method not found", -32601, request_id)
             if not isinstance(params, dict):
                 return self._error("Invalid params", -32602, request_id)
             version = params.get("protocolVersion", PROTOCOL_VERSION)
             if not isinstance(version, str) or len(version) > 32:
                 return self._error("Invalid params", -32602, request_id)
-            return {"jsonrpc": "2.0", "id": request_id, "result": {
-                "protocolVersion": PROTOCOL_VERSION,
+            negotiated = version if version in LEGACY_PROTOCOL_VERSIONS else LEGACY_PROTOCOL_VERSIONS[0]
+            return self._result(request_id, {
+                "protocolVersion": negotiated,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "Perennos Tempo", "version": "1.0.1"},
-            }}
+                "serverInfo": SERVER_INFO,
+            })
+
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return self._error("Invalid params", -32602, request_id)
+
+        metadata = params.get("_meta")
+        if "_meta" in params and not isinstance(metadata, dict):
+            return self._error("Invalid params", -32602, request_id)
+        modern = method == "server/discover"
+        if isinstance(metadata, dict):
+            modern = modern or any(key in metadata for key in (
+                PROTOCOL_VERSION_KEY, CLIENT_INFO_KEY, CLIENT_CAPABILITIES_KEY,
+            ))
+        if modern:
+            error = self._modern_metadata_error(metadata, request_id)
+            if error is not None:
+                return error
+            params = {key: value for key, value in params.items() if key != "_meta"}
+        elif "_meta" in params:
+            # Legacy clients may carry unrelated metadata. It is not a tool argument.
+            params = {key: value for key, value in params.items() if key != "_meta"}
+
+        if method == "initialize" and modern:
+            return self._error("Method not found", -32601, request_id)
+        if method == "server/discover":
+            return self._result(request_id, {
+                "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "capabilities": {"tools": {"listChanged": False}},
+            }, modern=True)
         if method == "ping":
-            return {"jsonrpc": "2.0", "id": request_id, "result": {}}
+            return self._result(request_id, {}, modern=modern)
         if method == "tools/list":
             if params not in ({}, None):
                 return self._error("Invalid params", -32602, request_id)
-            return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": TOOLS}}
+            return self._result(request_id, {"tools": TOOLS}, modern=modern)
         if method == "tools/call":
             try:
                 result = self._call_tool(params)
@@ -148,7 +226,7 @@ class TempoMCP:
                 result = self._tool_result({"error": message}, is_error=True)
             except (OSError, TypeError, KeyError):
                 result = self._tool_result({"error": "Perennos Tempo gateway response was invalid"}, is_error=True)
-            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+            return self._result(request_id, result, modern=modern)
         return self._error("Method not found", -32601, request_id)
 
 
