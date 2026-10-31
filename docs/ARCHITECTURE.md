@@ -10,7 +10,7 @@ Tempo keeps its existing root-level entry points so installed launchers and impo
 | Request validation, resource admission, local inference | `tempo_gateway.py`, `tempo_standalone.py`, `tempo_runtime.py`, `tempo_local_http.py` |
 | Profiles, privacy and hosted boundaries | `tempo_profile_gateway.py`, `tempo_profiles.py`, `tempo_content_screen.py`, `tempo_hosted.py` |
 | Routing quality and receipts | `tempo_decision_head.py`, `tempo_ratings.py`, `tempo_verdicts.py`, `tempo_receipts.py` |
-| MCP stdio adapter | `tempo_mcp.py` |
+| MCP stdio adapter | `tempo_mcp.py` — stateless 2026-07-28 plus 2025-11-25/2025-06-18 handshakes; bounded `status`, `listmodels`, and `ask` tools |
 | Native installation, qualified setup and downloads | `desktop/Bootstrap.cs`, `tempo_bootstrap.py`, `tempo_setup.py`, `tempo_pull.py`, `fetch_models.py` |
 | Closed delivery payload | `MANIFEST.json`, `acceptance/prepare_payload.py`, `build_desktop_installer.py` |
 

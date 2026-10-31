@@ -9,5 +9,6 @@
 | 5 | Hardware-aware context | Tokenizer/engine-specific context admission including output reserve; report truncation explicitly. No guessed memory or speed claims. |
 | 6 | Accessible desktop | Native screenshots at supported sizes/scales, keyboard and screen-reader tests, long-text and failure-state checks. |
 | 7 | More providers and backends | Explicit owner-selected credentials, budgets, reviewed endpoints and protocol fixtures; no private-to-hosted failover. |
+| 8 | MCP client interoperability | Run the exact packaged build with a current official SDK and one 2025-era client; verify modern discovery and legacy fallback without expanding the tool surface. |
 
-The current patch implements read-only diagnostics, bounded follow-ups, desktop utility controls, documentation and a source CI matrix. These do not complete the native release gates above. Persistent chat storage, silent automatic summarization, telemetry collection and arbitrary remote tools are outside this change.
+The current source branch implements read-only diagnostics, bounded follow-ups, desktop utility controls, dual-era MCP stdio, documentation and a source CI matrix. These do not complete the native release gates above. Persistent chat storage, silent automatic summarization, telemetry collection and arbitrary remote tools are outside this change.
