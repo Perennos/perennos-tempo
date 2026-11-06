@@ -37,3 +37,7 @@ jobs:
         run: cargo test --locked
       - name: Clippy, warnings are errors
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: perennos-tempo-local-agent tests (standalone crate)
+        run: cargo test --locked --manifest-path perennos-tempo-local-agent/Cargo.toml
+      - name: perennos-tempo-local-agent clippy
+        run: cargo clippy --locked --all-targets --manifest-path perennos-tempo-local-agent/Cargo.toml -- -D warnings
