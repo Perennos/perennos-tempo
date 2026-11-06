@@ -1021,7 +1021,7 @@ mod tests {
             "a block cut off by a cap is still hidden"
         );
         assert_eq!(
-            redact("clone https://alex:hunter2pass@git.example.com/repo.git now"),
+            redact("clone https://sam:hunter2pass@git.example.com/repo.git now"),
             "clone https://[REDACTED]@git.example.com/repo.git now"
         );
         // Ordinary text is left alone.

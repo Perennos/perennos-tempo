@@ -1701,7 +1701,7 @@ mod tests {
     fn guest_conversations_get_no_tools_memory_or_owner_context() {
         let d = tmpdir("guest");
         let f = d.join("private.md");
-        std::fs::write(&f, "The safe code is 4512 and Alex's address is secret.").unwrap();
+        std::fs::write(&f, "The safe code is 4512 and Sam's address is secret.").unwrap();
         let core = d.join("core.md");
         std::fs::write(&core, "PINNED PRIVATE CORE").unwrap();
         let (fp, cp) = (
@@ -1717,7 +1717,7 @@ mod tests {
         let (mut a, mut conv) = agent(&m, |c| {
             c.rag_files = vec![fp];
             c.core_file = Some(cp);
-            c.owner_context = "Owner is Alex, private details.".into();
+            c.owner_context = "Owner is Sam, private details.".into();
         });
         conv.guest = true;
         conv.wf_update(Some(&json!([{"text": "private plan"}])), None);
@@ -1738,7 +1738,7 @@ mod tests {
             for secret in [
                 "4512",
                 "PINNED PRIVATE CORE",
-                "Owner is Alex",
+                "Owner is Sam",
                 "private plan",
             ] {
                 assert!(!all.contains(secret), "{secret} leaked into a guest prompt");

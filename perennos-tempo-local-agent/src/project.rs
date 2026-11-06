@@ -247,7 +247,7 @@ mod tests {
         .unwrap();
         let home = d.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("AGENTS.md"), "Alex prefers plain words.").unwrap();
+        std::fs::write(home.join("AGENTS.md"), "The owner prefers plain words.").unwrap();
         let t = instructions(&sub, Some(&home));
         let (a, b, c) = (
             t.find("plain words").unwrap(),
@@ -276,9 +276,9 @@ mod tests {
         let d = tmpdir("proj-mention");
         std::fs::write(d.join("notes.md"), "line one\nline two").unwrap();
         std::fs::write(d.join(".env"), "SECRET=1").unwrap();
-        let (t, files) = attach_mentions("Fix @notes.md, mail @alex and look at @.env", &d);
+        let (t, files) = attach_mentions("Fix @notes.md, mail @sam and look at @.env", &d);
         assert_eq!(files, ["notes.md"]);
-        assert!(t.starts_with("Fix @notes.md, mail @alex and look at @.env\n\n[file notes.md]\n```\nline one\nline two\n```"), "{t}");
+        assert!(t.starts_with("Fix @notes.md, mail @sam and look at @.env\n\n[file notes.md]\n```\nline one\nline two\n```"), "{t}");
         assert!(!t.contains("SECRET"), "secret files are never attached");
     }
 
