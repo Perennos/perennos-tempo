@@ -1,6 +1,6 @@
 # Perennos Tempo
 
-Perennos Tempo is a local-first open-source core for routing requests to local engines, applying privacy and admission rules, and recording route receipts. It includes a desktop chat, a native bootstrap source, a loopback HTTP API, headless operation, and an MCP stdio bridge.
+Perennos Tempo is a local-first, source-available core for routing requests to local engines, applying privacy and admission rules, and recording route receipts. It includes a desktop chat, a native bootstrap source, a loopback HTTP API, headless operation, and an MCP stdio bridge.
 
 Download Windows builds from [GitHub Releases](https://github.com/Perennos/perennos-tempo/releases). Each release records its tested Windows image, installer checksum, and acceptance results. A source snapshot alone does not establish a working installation. The installer is unsigned; multi-user security and shared office deployment are outside this core release.
 
@@ -8,10 +8,10 @@ Project links: [Perennos](https://perennos.com) · [Perennos Tempo](https://pere
 
 ## What is in the public core
 
-- Generic routing, profiles, local inference, privacy screening, receipts, append-only ledgers, and resource admission/lease controls.
+- Generic routing, profiles, local inference, privacy screening, receipts, append-only records, and resource admission/lease controls.
 - Desktop chat and bootstrap source, plus the headless API, status command, and MCP stdio adapter.
 - Generic profile infrastructure. The built-ins contain no customer prompts; the default is `private`, and the `offline` profile requires loopback inference.
-- Apache-2.0 terms for Perennos-authored core files. Third-party source, runtimes, dependencies, and model files keep their separate terms; see [NOTICE.md](NOTICE.md).
+- PolyForm Shield 1.0.0 terms for Perennos-authored core files: free to use, change and share, for yourself or your business, and open to contributions; not for building a competing product. Releases before 6 November 2026 keep their Apache-2.0 terms. Third-party source, runtimes, dependencies, and model files keep their separate terms; see [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
 
 The package excludes private onboarding interviews, customer or office profile packs, vertical-specific setup choices, desks and approvals UX, owner configuration and history, owner priors, benchmark data, model weights, the private resident adapter, and optional workspace integrations. The export manifest records its exact file set and exclusions.
 
