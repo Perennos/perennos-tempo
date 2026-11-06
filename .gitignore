@@ -14,3 +14,5 @@ models/
 *.exe
 payload.zip
 python-runtime.zip
+# Rust build output
+target/

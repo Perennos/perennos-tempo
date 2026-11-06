@@ -1,0 +1,20 @@
+[package]
+name = "tempo-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "Apache-2.0"
+description = "Perennos Tempo local agent: an Ollama tool-calling loop with fast/heavy lanes and an MCP stdio host"
+publish = false
+
+[lib]
+name = "tempo_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tempo-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
