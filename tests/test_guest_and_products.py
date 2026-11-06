@@ -151,10 +151,17 @@ class GuestAndProductsTest(unittest.TestCase):
             self.assertEqual(sorted(servers), ["orders", "room"])
             self.assertTrue(servers["room"]["command"].endswith("tempo-room" + EXE), "the product stays")
             self.assertIn(("room", "room_post"), confirm)
-            self.assertIn(("orders", "refund"), confirm)
-            for want in ['ignored "spend_cap"', 'ignored "engines"', 'ignored "approvals"', "connector room skipped (packs can only add", "connector pay skipped (a pack must not carry keys"]:
+            self.assertIn(("orders", "*"), confirm, "every tool of a pack's connector asks first")
+            for want in ['ignored "spend_cap"', 'ignored "engines"', 'ignored "approvals"', "connector room skipped (packs can only add", "connector pay skipped (a pack must not carry keys", "(every tool asks first)"]:
                 self.assertTrue(any(want in n for n in notes), (want, notes))
             self.assertFalse(any(key in n for n in notes))
+            # the owner (never the pack) lets one tool through; a named "ask first" still asks
+            trust = self.mh.trust_pairs({"mcp_trust": [["orders", "list_orders"], ["orders", "export"], ["bad"], "x"]})
+            self.assertEqual(trust, {("orders", "list_orders"), ("orders", "export")})
+            ask = lambda tool: self.mh.needs_confirm(confirm | {("orders", "export")}, trust, "orders", tool)
+            self.assertEqual([ask(t) for t in ("refund", "anything_new", "list_orders", "export")], [True, True, False, True])
+            self.assertTrue(self.mh.needs_confirm(confirm, trust, "room", "room_post"))
+            self.assertFalse(self.mh.needs_confirm(confirm, trust, "room", "room_read"))
         finally:
             os.environ["TEMPO_HOME"] = os.path.join(self.tmp, "tempo-home")
 

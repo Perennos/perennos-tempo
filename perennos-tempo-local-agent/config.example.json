@@ -36,6 +36,7 @@
   "mcp_skip": [],
   "mcp_blocked": {"some-server": ["tool_to_hide"]},
   "mcp_confirm": [["some-server", "tool_that_needs_approval"]],
+  "mcp_trust": [["some-pack-server", "tool_that_may_run_without_asking"]],
   "mcp_hints": {"some-server": "keyword|another keyword"},
   "mcp_start_timeout_s": 90,
   "mcp_call_timeout_s": 600,

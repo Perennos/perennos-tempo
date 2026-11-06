@@ -349,6 +349,7 @@ BLOCKED_MCP = {  # replaced by guarded builtins or unsafe offline/spending
     "playwright-isolated": {"browser_run_code_unsafe", "browser_evaluate", "browser_file_upload"},
 }
 CONFIRM_MCP = {("comfy-media", "run_workflow"), ("perennos_tempo", "memory"), ("perennos_tempo", "web_extract")}
+TRUST_MCP = set()  # the owner's "mcp_trust": pack tools allowed to run without asking
 HINTS = {"comfy-media": r"image|picture|photo|comfy|render|draw|video|workflow|generate", "playwright-isolated": r"browse|browser|web|page|site|url|http|click|screenshot",
          "perennos_tempo": r"tempo|kanban|memory|research|status|job|route|lint|todo|house|engine|home ?assistant|\bha\b|search"}
 
@@ -439,6 +440,7 @@ class Tools:
             print(f"[tools: {n}]", file=sys.stderr)
         self.cfgs = {**found, **self.cfgs}
         CONFIRM_MCP.update(confirm)
+        TRUST_MCP.update(mcphost.trust_pairs(CFG))
         self.catalog = None  # [(server, tool dict)]
 
     def server(self, name):
@@ -959,7 +961,7 @@ def agent_turn(conv, text):
                         r = BUILTIN[name][0](conv, **args)
                     elif name in route:
                         srv, tn = route[name]
-                        if (srv, tn) in CONFIRM_MCP and not conv.confirm(f"MCP {srv}:{tn}", json.dumps(args)[:300]):
+                        if mcphost.needs_confirm(CONFIRM_MCP, TRUST_MCP, srv, tn) and not conv.confirm(f"MCP {srv}:{tn}", json.dumps(args)[:300]):
                             r = "denied by user"
                         else:
                             r = TOOLS.server(srv).call(tn, args, 600)

@@ -50,6 +50,8 @@ pub struct Config {
     pub mcp_skip: Vec<String>,
     pub mcp_blocked: BTreeMap<String, Vec<String>>,
     pub mcp_confirm: Vec<(String, String)>,
+    /// Tools of pack connectors the owner lets run without asking (packs ask for every tool).
+    pub mcp_trust: Vec<(String, String)>,
     pub mcp_hints: BTreeMap<String, String>,
     pub mcp_start_timeout_s: f64,
     pub mcp_call_timeout_s: f64,
@@ -155,6 +157,7 @@ impl Config {
             mcp_skip: vec![],
             mcp_blocked: BTreeMap::new(),
             mcp_confirm: vec![],
+            mcp_trust: vec![],
             mcp_hints: BTreeMap::new(),
             mcp_start_timeout_s: 90.0,
             mcp_call_timeout_s: 600.0,
@@ -300,18 +303,23 @@ impl Config {
                 );
             }
         }
-        if let Some(a) = v.get("mcp_confirm").and_then(|x| x.as_array()) {
-            for e in a {
-                if let Some(p) = e.as_array() {
-                    if let (Some(s), Some(t)) = (
-                        p.first().and_then(|x| x.as_str()),
-                        p.get(1).and_then(|x| x.as_str()),
-                    ) {
-                        c.mcp_confirm.push((s.into(), t.into()));
-                    }
-                }
-            }
-        }
+        // [["server", "tool"], ...]
+        let pairs = |key: &str| -> Vec<(String, String)> {
+            v.get(key)
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    let p = e.as_array()?;
+                    Some((
+                        p.first()?.as_str()?.to_string(),
+                        p.get(1)?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        };
+        c.mcp_confirm.extend(pairs("mcp_confirm"));
+        c.mcp_trust.extend(pairs("mcp_trust"));
         if let Some(m) = v.get("mcp_hints").and_then(|x| x.as_object()) {
             for (k, r) in m {
                 if let Some(r) = r.as_str() {

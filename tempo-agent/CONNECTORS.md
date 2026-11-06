@@ -59,6 +59,9 @@ A pack can only add:
   stays, with its approval rules, and a note says the pack's connector was skipped.
 - A pack connector whose `env` holds something that looks like a key is refused; the program
   should read its own config.
+- Every tool of a pack's connector asks before it runs, whatever the pack lists. To let one run
+  without asking, name it in your own agent config: `"mcp_trust": [["orders", "list_orders"]]`.
+  A pack can never do this, and a tool named in `mcp_confirm` always asks.
 - `pack.json` may have `name`, `description`, `version` and `enabled`. Anything else (engines,
   spend caps, approvals, privacy) is never read, and a note says it was ignored. So a pack cannot
   turn on a cloud engine, raise a spend cap or switch off an approval.

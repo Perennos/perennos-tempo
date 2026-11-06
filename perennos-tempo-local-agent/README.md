@@ -68,7 +68,7 @@ All keys are optional. See `config.example.json` for placeholders.
 | `write_roots`, `trash_dir`, `protect_regex`, `command_cwd`, `command_timeout_s` | Safety and shell settings |
 | `offline_probe` | `host:port` for the quick offline check (env `TEMPO_OFFLINE` forces offline) |
 | `hosts` | Name to `{"urls": [...], "models": [...]}` for `delegate`; an implicit `local` host is the main Ollama |
-| `mcp_config`, `mcp_skip`, `mcp_blocked`, `mcp_confirm`, `mcp_hints`, `mcp_*_timeout_s` | MCP settings |
+| `mcp_config`, `mcp_skip`, `mcp_blocked`, `mcp_confirm`, `mcp_trust`, `mcp_hints`, `mcp_*_timeout_s` | MCP settings (`mcp_trust`: pack tools you let run without asking; every pack tool asks first otherwise) |
 | `comfy_url`, `comfy_output_dir`, `comfy_start_cmd`, `comfy_stop_cmd`, `lease_status_cmd`, `lease_acquire_cmd`, `lease_release_cmd` | ComfyUI and optional GPU lease commands |
 
 ## Test

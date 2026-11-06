@@ -6,7 +6,8 @@
 //! Order of precedence: products, then connector files (they may replace a product), then the
 //! explicit `mcpServers` config (it always wins). `TEMPO_AUTO_TOOLS=0` or `"auto_tools": false`
 //! turns all of this off. The tools that change or send something ask first: overwriting,
-//! renaming or trashing a note, and posting into a chat room.
+//! renaming or trashing a note, and posting into a chat room. Every tool of a pack's connector
+//! asks first; the owner can let one through with `mcp_trust` in their own config.
 use crate::config::{expand_home, home_dir, Config};
 use crate::mcp::ServerCfg;
 use serde_json::Value;
@@ -278,11 +279,14 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
                     {
                         f.notes.push(format!("pack {pack}: connector {name} skipped (a pack must not carry keys; the program reads its own config)"));
                     }
-                    Ok(Some((name, sc, confirm))) => {
-                        f.confirm
-                            .extend(confirm.into_iter().map(|t| (name.clone(), t)));
-                        f.notes
-                            .push(format!("pack {pack}: connector {name}: {}", s(&file)));
+                    // A pack comes from someone else: every one of its tools asks first. The
+                    // owner can let a tool through in their own config (`mcp_trust`), never the pack.
+                    Ok(Some((name, sc, _))) => {
+                        f.confirm.push((name.clone(), "*".into()));
+                        f.notes.push(format!(
+                            "pack {pack}: connector {name}: {} (every tool asks first)",
+                            s(&file)
+                        ));
                         f.servers.insert(name, sc);
                     }
                     Ok(None) => {}
@@ -466,13 +470,19 @@ mod tests {
             f.confirm.contains(&("room".into(), "room_post".into())),
             "its approval rule stays"
         );
-        assert!(f.confirm.contains(&("orders".into(), "refund".into())));
+        assert!(
+            f.confirm.contains(&("orders".into(), "*".into())),
+            "every tool of a pack's connector asks first: {:?}",
+            f.confirm
+        );
         for want in [
             "ignored \"spend_cap\"",
             "ignored \"engines\"",
             "ignored \"approvals\"",
             "connector room skipped (packs can only add",
             "connector pay skipped (a pack must not carry keys",
+            "connector orders: ",
+            "(every tool asks first)",
         ] {
             assert!(
                 f.notes.iter().any(|n| n.contains(want)),
@@ -579,5 +589,53 @@ mod tests {
             explicit.contains_key("clio")
                 && cfg.mcp_confirm.contains(&("comfy".into(), "render".into()))
         );
+    }
+
+    #[test]
+    fn pack_tools_ask_first_unless_the_owner_trusts_them() {
+        let d = tmpdir("pack-trust");
+        let home = d.join("home");
+        std::fs::create_dir_all(home.join("connectors")).unwrap();
+        std::fs::write(
+            home.join("connectors/comfy.json"),
+            r#"{"command": "comfy-mcp", "confirm": ["render"]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join("packs/shop/connectors")).unwrap();
+        // the pack lists one tool, and even tries to wave the rest through
+        std::fs::write(
+            home.join("packs/shop/connectors/orders.json"),
+            r#"{"command": "orders-mcp", "confirm": ["refund"], "trust": ["list_orders", "refund"]}"#,
+        )
+        .unwrap();
+        // the owner's own config lets one pack tool through, and names one that must still ask
+        let mut cfg = Config::from_json(
+            &serde_json::json!({"mcp_trust": [["orders", "list_orders"], ["orders", "export"]],
+                                "mcp_confirm": [["orders", "export"]]}),
+            Some(d.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        assert_eq!(cfg.mcp_trust.len(), 2);
+        let f = discover(
+            &cfg,
+            &env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]),
+            &[],
+        );
+        let mut servers = BTreeMap::new();
+        merge(&mut servers, &mut cfg, f);
+        let host = crate::mcp::McpHost::new(&cfg, servers);
+        for (tool, asks) in [
+            ("refund", true),
+            ("cancel", true),
+            ("anything_new", true),
+            ("list_orders", false),
+            ("export", true),
+        ] {
+            assert_eq!(host.needs_confirm("orders", tool), asks, "orders: {tool}");
+        }
+        // your own connector: only the tools it names ask, as before
+        assert!(host.needs_confirm("comfy", "render"));
+        assert!(!host.needs_confirm("comfy", "status"));
+        assert!(!host.needs_confirm("nobody", "anything"));
     }
 }

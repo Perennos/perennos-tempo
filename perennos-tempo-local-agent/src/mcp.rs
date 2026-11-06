@@ -305,6 +305,7 @@ pub struct McpHost {
     catalog: Option<Vec<(String, Value)>>,
     blocked: BTreeMap<String, HashSet<String>>,
     confirm: Vec<(String, String)>,
+    trust: Vec<(String, String)>,
     hints: BTreeMap<String, String>,
     skip: Vec<String>,
     start_timeout: Duration,
@@ -340,6 +341,7 @@ impl McpHost {
                 .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
                 .collect(),
             confirm: cfg.mcp_confirm.clone(),
+            trust: cfg.mcp_trust.clone(),
             hints: cfg.mcp_hints.clone(),
             skip: cfg.mcp_skip.clone(),
             start_timeout: Duration::from_secs_f64(cfg.mcp_start_timeout_s),
@@ -458,8 +460,13 @@ impl McpHost {
             .collect()
     }
 
+    /// Whether a tool asks the owner first. A named (server, tool) always asks. (server, "*"),
+    /// which every pack connector gets, asks for each of its tools unless the owner's own
+    /// `mcp_trust` names that tool; a pack can never set that.
     pub fn needs_confirm(&self, server: &str, tool: &str) -> bool {
-        self.confirm.iter().any(|(s, t)| s == server && t == tool)
+        let named =
+            |list: &[(String, String)], t: &str| list.iter().any(|(s, x)| s == server && x == t);
+        named(&self.confirm, tool) || (named(&self.confirm, "*") && !named(&self.trust, tool))
     }
 
     pub fn call(&mut self, server: &str, tool: &str, args: &Value) -> Result<String, String> {

@@ -68,6 +68,19 @@ def _json(path):
         return json.load(f)
 
 
+def needs_confirm(confirm, trust, server, tool):
+    """Whether a tool asks the owner first. A named (server, tool) always asks. (server, "*"),
+    which every pack connector gets, asks for each of its tools unless the owner's own
+    "mcp_trust" names that tool; a pack can never set that. Same rule as the Rust agent."""
+    return (server, tool) in confirm or ((server, "*") in confirm and (server, tool) not in trust)
+
+
+def trust_pairs(cfg):
+    """The owner's "mcp_trust": [["server", "tool"], ...] as a set of pairs."""
+    return {(p[0], p[1]) for p in (cfg or {}).get("mcp_trust") or []
+            if isinstance(p, (list, tuple)) and len(p) == 2 and all(isinstance(x, str) for x in p)}
+
+
 def discover(cfg=None, dirs=None):
     """(servers, confirm, notes): what Tempo connects by itself on this machine."""
     cfg = cfg or {}
@@ -152,9 +165,10 @@ def discover(cfg=None, dirs=None):
             elif any(redact(str(v)) != str(v) for v in srv["env"].values()):
                 notes.append(f"pack {pack}: connector {name} skipped (a pack must not carry keys; the program reads its own config)")
             else:
+                # a pack comes from someone else: every one of its tools asks first
                 servers[name] = srv
-                confirm |= {(name, t) for t in tools}
-                notes.append(f"pack {pack}: connector {name}: {f}")
+                confirm.add((name, "*"))
+                notes.append(f"pack {pack}: connector {name}: {f} (every tool asks first)")
     return servers, confirm, notes
 
 
