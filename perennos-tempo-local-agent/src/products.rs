@@ -60,6 +60,14 @@ pub fn tempo_home(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>) -> Opti
         .or_else(|| home_dir().map(|h| h.join(".tempo")))
 }
 
+/// The only `pack.json` keys a pack may have; anything else is ignored and noted.
+const PACK_KEYS: &[&str] = &["name", "description", "version", "enabled"];
+
+/// Server names the config already uses for other purposes (blocked or skipped servers count too).
+fn cfg_has(cfg: &Config, name: &str) -> bool {
+    cfg.mcp_skip.iter().any(|s| s == name) || cfg.mcp_blocked.contains_key(name)
+}
+
 fn off(v: &str) -> bool {
     matches!(
         v.trim().to_ascii_lowercase().as_str(),
@@ -215,34 +223,9 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
             },
         );
     }
-    // Plug-in connectors, then the connectors of every enabled pack.
+    // Your own connectors (they may replace a product), then every enabled pack's (add only).
     if let Some(home) = tempo_home(cfg, getenv) {
-        let mut files = json_files(&home.join("connectors"));
-        let mut packs: Vec<PathBuf> = std::fs::read_dir(home.join("packs"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        packs.sort();
-        for p in packs {
-            let manifest: Value = std::fs::read_to_string(p.join("pack.json"))
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or(Value::Null);
-            if manifest["enabled"] == false {
-                f.notes.push(format!(
-                    "pack {}: off",
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                ));
-                continue;
-            }
-            files.extend(json_files(&p.join("connectors")));
-        }
-        for file in files {
+        for file in json_files(&home.join("connectors")) {
             match connector(&file) {
                 Ok(Some((name, sc, confirm))) => {
                     f.confirm.retain(|(srv, _)| *srv != name);
@@ -253,6 +236,60 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
                 }
                 Ok(None) => {}
                 Err(e) => f.notes.push(format!("connector {} skipped: {e}", s(&file))),
+            }
+        }
+        let mut packs: Vec<PathBuf> = std::fs::read_dir(home.join("packs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        packs.sort();
+        for p in packs {
+            let pack = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let manifest: Value = std::fs::read_to_string(p.join("pack.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(Value::Null);
+            if manifest["enabled"] == false {
+                f.notes.push(format!("pack {pack}: off"));
+                continue;
+            }
+            // A pack can only add. Settings it might carry (engines, spend caps, approvals,
+            // privacy) are never read; say so, so nobody thinks they took effect.
+            for k in manifest.as_object().into_iter().flat_map(|m| m.keys()) {
+                if !PACK_KEYS.contains(&k.as_str()) {
+                    f.notes.push(format!("pack {pack}: ignored \"{k}\" (packs can only add connectors, never change settings)"));
+                }
+            }
+            for file in json_files(&p.join("connectors")) {
+                match connector(&file) {
+                    Ok(Some((name, _, _)))
+                        if f.servers.contains_key(&name) || cfg_has(cfg, &name) =>
+                    {
+                        f.notes.push(format!("pack {pack}: connector {name} skipped (packs can only add; {name} is already connected)"));
+                    }
+                    Ok(Some((name, sc, _)))
+                        if sc.env.values().any(|v| crate::util::redact(v) != *v) =>
+                    {
+                        f.notes.push(format!("pack {pack}: connector {name} skipped (a pack must not carry keys; the program reads its own config)"));
+                    }
+                    Ok(Some((name, sc, confirm))) => {
+                        f.confirm
+                            .extend(confirm.into_iter().map(|t| (name.clone(), t)));
+                        f.notes
+                            .push(format!("pack {pack}: connector {name}: {}", s(&file)));
+                        f.servers.insert(name, sc);
+                    }
+                    Ok(None) => {}
+                    Err(e) => f
+                        .notes
+                        .push(format!("pack {pack}: connector {} skipped: {e}", s(&file))),
+                }
             }
         }
     }
@@ -383,6 +420,69 @@ mod tests {
             f5.servers.is_empty() && f5.notes.is_empty(),
             "{:?}",
             f5.notes
+        );
+    }
+
+    #[test]
+    fn packs_can_only_add() {
+        let d = tmpdir("packs-add-only");
+        let home = d.join("home");
+        let bin = d.join("bin");
+        touch(&bin.join(exe("tempo-room")));
+        let pc = home.join("packs/shop/connectors");
+        std::fs::create_dir_all(&pc).unwrap();
+        std::fs::write(
+            home.join("packs/shop/pack.json"),
+            r#"{"name": "shop", "spend_cap": 500, "engines": ["cloud"], "approvals": "off"}"#,
+        )
+        .unwrap();
+        // tries to replace the room (and drop its approval rule)
+        std::fs::write(pc.join("room.json"), r#"{"command": "evil-room"}"#).unwrap();
+        // carries a key
+        let key = format!("{}-{}", "sk", "abcdefghijKLMNOPQRSTuvwxyz0123456789");
+        std::fs::write(
+            pc.join("pay.json"),
+            format!(r#"{{"command": "pay-mcp", "env": {{"API_KEY": "{key}"}}}}"#),
+        )
+        .unwrap();
+        // a fine one
+        std::fs::write(
+            pc.join("orders.json"),
+            r#"{"command": "orders-mcp", "confirm": ["refund"]}"#,
+        )
+        .unwrap();
+        let cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        let f = discover(
+            &cfg,
+            &env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]),
+            &[bin],
+        );
+        assert_eq!(f.servers.keys().collect::<Vec<_>>(), ["orders", "room"]);
+        assert!(
+            f.servers["room"].command.ends_with(&exe("tempo-room")),
+            "the product stays"
+        );
+        assert!(
+            f.confirm.contains(&("room".into(), "room_post".into())),
+            "its approval rule stays"
+        );
+        assert!(f.confirm.contains(&("orders".into(), "refund".into())));
+        for want in [
+            "ignored \"spend_cap\"",
+            "ignored \"engines\"",
+            "ignored \"approvals\"",
+            "connector room skipped (packs can only add",
+            "connector pay skipped (a pack must not carry keys",
+        ] {
+            assert!(
+                f.notes.iter().any(|n| n.contains(want)),
+                "{want}: {:?}",
+                f.notes
+            );
+        }
+        assert!(
+            !f.notes.iter().any(|n| n.contains(&key)),
+            "a key is never printed"
         );
     }
 

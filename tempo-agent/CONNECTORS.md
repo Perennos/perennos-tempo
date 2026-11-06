@@ -53,6 +53,16 @@ A pack is a folder in `<tempo home>/packs/<name>/` with its own `connectors/`. F
 `{"enabled": false}`. This is how a business setup ships its tools without touching anyone else's
 config: drop the folder in, or take it out.
 
+A pack can only add:
+
+- Its connectors never replace a product, your own connectors or another pack's. The existing one
+  stays, with its approval rules, and a note says the pack's connector was skipped.
+- A pack connector whose `env` holds something that looks like a key is refused; the program
+  should read its own config.
+- `pack.json` may have `name`, `description`, `version` and `enabled`. Anything else (engines,
+  spend caps, approvals, privacy) is never read, and a note says it was ignored. So a pack cannot
+  turn on a cloud engine, raise a spend cap or switch off an approval.
+
 ## Guest conversations (chat rooms)
 
 `POST /agent/new {"mode": "guest"}` makes a conversation for other people, for example a family

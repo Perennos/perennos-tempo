@@ -433,6 +433,7 @@ class Tools:
     def __init__(self):
         self.servers, self.lock, self.cfgs = {}, threading.Lock(), mcphost.load_server_configs()
         # Perennos Tempo's own products and plug-in connectors connect by themselves; explicit wins.
+        mcphost.redact = redact  # pack connectors carrying keys are refused
         found, confirm, notes = mcphost.discover(CFG)
         for n in notes:
             print(f"[tools: {n}]", file=sys.stderr)

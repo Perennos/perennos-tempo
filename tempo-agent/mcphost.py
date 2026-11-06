@@ -58,6 +58,11 @@ def tempo_home(cfg):
     return os.path.expanduser(os.environ.get("TEMPO_HOME") or cfg.get("tempo_home") or "~/.tempo")
 
 
+# The only pack.json keys a pack may have; anything else is ignored and noted.
+PACK_KEYS = ("name", "description", "version", "enabled")
+redact = lambda s: s  # tempo_agent.py sets this to its own redact() at import
+
+
 def _json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -101,31 +106,55 @@ def discover(cfg=None, dirs=None):
         confirm.add(("room", "room_post"))
         notes.append(f"room: {rb}")
     home = tempo_home(cfg)
-    files = sorted(glob.glob(os.path.join(home, "connectors", "*.json")))
+
+    def read_connector(f, where):
+        try:
+            j = _json(f)
+        except Exception:
+            notes.append(f"{where}connector {f} skipped: not JSON")
+            return None
+        if j.get("enabled") is False:
+            return None
+        name = j.get("name") or os.path.splitext(os.path.basename(f))[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name) or not j.get("command"):
+            notes.append(f"{where}connector {f} skipped: it needs a simple name and a command")
+            return None
+        return name, {"command": os.path.expanduser(j["command"]), "args": list(j.get("args") or []), "env": dict(j.get("env") or {})}, set(j.get("confirm") or [])
+
+    # your own connectors may replace a product
+    for f in sorted(glob.glob(os.path.join(home, "connectors", "*.json"))):
+        c = read_connector(f, "")
+        if c:
+            name, srv, tools = c
+            confirm = {x for x in confirm if x[0] != name} | {(name, t) for t in tools}
+            servers[name] = srv
+            notes.append(f"connector {name}: {f}")
+    # a pack can only add: no replacing, no keys, and no settings
     for p in sorted(glob.glob(os.path.join(home, "packs", "*", ""))):
+        pack = os.path.basename(os.path.normpath(p))
         try:
             man = _json(os.path.join(p, "pack.json"))
         except Exception:
             man = {}
         if man.get("enabled") is False:
-            notes.append(f"pack {os.path.basename(os.path.normpath(p))}: off")
+            notes.append(f"pack {pack}: off")
             continue
-        files += sorted(glob.glob(os.path.join(p, "connectors", "*.json")))
-    for f in files:
-        try:
-            j = _json(f)
-        except Exception:
-            notes.append(f"connector {f} skipped: not JSON")
-            continue
-        if j.get("enabled") is False:
-            continue
-        name = j.get("name") or os.path.splitext(os.path.basename(f))[0]
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name) or not j.get("command"):
-            notes.append(f"connector {f} skipped: it needs a simple name and a command")
-            continue
-        confirm = {c for c in confirm if c[0] != name} | {(name, t) for t in j.get("confirm") or []}
-        servers[name] = {"command": os.path.expanduser(j["command"]), "args": list(j.get("args") or []), "env": dict(j.get("env") or {})}
-        notes.append(f"connector {name}: {f}")
+        for k in man:
+            if k not in PACK_KEYS:
+                notes.append(f'pack {pack}: ignored "{k}" (packs can only add connectors, never change settings)')
+        for f in sorted(glob.glob(os.path.join(p, "connectors", "*.json"))):
+            c = read_connector(f, f"pack {pack}: ")
+            if not c:
+                continue
+            name, srv, tools = c
+            if name in servers:
+                notes.append(f"pack {pack}: connector {name} skipped (packs can only add; {name} is already connected)")
+            elif any(redact(str(v)) != str(v) for v in srv["env"].values()):
+                notes.append(f"pack {pack}: connector {name} skipped (a pack must not carry keys; the program reads its own config)")
+            else:
+                servers[name] = srv
+                confirm |= {(name, t) for t in tools}
+                notes.append(f"pack {pack}: connector {name}: {f}")
     return servers, confirm, notes
 
 
