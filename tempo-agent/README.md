@@ -9,4 +9,6 @@ The harness that lets a local model (Ollama) work like a frontier coding agent: 
 - `gui-chat/`: the CHAT surface module for the Tempo GUI
 
 Private data (memory files, the retrieval index, conversations, workflows) is never committed; it is built locally at run time.
-Next: port the loop into the Rust crate (perennos-tempo-agent).
+Machine settings (folders, hosts, memory files, owner) come from a local, git-ignored `agent-config.json`; see `agent-config.example.json`.
+
+The Rust port of the loop and the MCP host lives in this folder too (`Cargo.toml`, `src/`): see [RUST-PORT.md](RUST-PORT.md) for what is ported, how to build and test it, and what is left. `tempo agent` runs it.

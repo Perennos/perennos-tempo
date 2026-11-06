@@ -27,3 +27,13 @@ jobs:
           if grep -rInE --exclude-dir=.git 'sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|192\.168\.[1-9][0-9]*\.[0-9]+|\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+' .; then
             echo "Possible secret or private address found"; exit 1
           fi
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: tempo-agent tests (mock Ollama and MCP servers, no GPU)
+        run: cargo test --locked
+      - name: Clippy, warnings are errors
+        run: cargo clippy --locked --all-targets -- -D warnings
