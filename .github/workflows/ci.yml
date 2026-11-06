@@ -35,5 +35,7 @@ jobs:
           persist-credentials: false
       - name: perennos-tempo-local-agent tests (mock Ollama and MCP servers, no GPU)
         run: cargo test --locked --manifest-path perennos-tempo-local-agent/Cargo.toml
+      - name: Formatting (cargo fmt --check)
+        run: cargo fmt --check --manifest-path perennos-tempo-local-agent/Cargo.toml
       - name: Clippy, warnings are errors
         run: cargo clippy --locked --all-targets --manifest-path perennos-tempo-local-agent/Cargo.toml -- -D warnings
