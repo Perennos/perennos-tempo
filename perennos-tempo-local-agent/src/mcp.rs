@@ -51,13 +51,26 @@ pub fn parse_server_configs_for(
     let v: Value = serde_json::from_str(txt).map_err(|e| format!("bad mcp config JSON: {e}"))?;
     let mut raw: BTreeMap<String, Value> = BTreeMap::new();
     let mut merge = |doc: &Value| {
-        for (name, s) in doc.get("mcpServers").and_then(|m| m.as_object()).into_iter().flatten() {
+        for (name, s) in doc
+            .get("mcpServers")
+            .and_then(|m| m.as_object())
+            .into_iter()
+            .flatten()
+        {
             raw.insert(name.clone(), s.clone());
         }
     };
     merge(&v);
-    let wanted: Vec<String> = project_dirs.iter().map(|d| norm_dir(&d.to_string_lossy())).collect();
-    for (dir, p) in v.get("projects").and_then(|p| p.as_object()).into_iter().flatten() {
+    let wanted: Vec<String> = project_dirs
+        .iter()
+        .map(|d| norm_dir(&d.to_string_lossy()))
+        .collect();
+    for (dir, p) in v
+        .get("projects")
+        .and_then(|p| p.as_object())
+        .into_iter()
+        .flatten()
+    {
         if wanted.contains(&norm_dir(dir)) {
             merge(p);
         }
@@ -69,7 +82,10 @@ pub fn parse_server_configs_for(
             }
         }
     }
-    Ok(raw.iter().filter_map(|(name, s)| server_cfg(s).map(|c| (name.clone(), c))).collect())
+    Ok(raw
+        .iter()
+        .filter_map(|(name, s)| server_cfg(s).map(|c| (name.clone(), c)))
+        .collect())
 }
 
 fn server_cfg(s: &Value) -> Option<ServerCfg> {
@@ -606,7 +622,11 @@ mod tests {
         let d = crate::util::testutil::tmpdir("mcpproj");
         let proj = d.join("proj");
         std::fs::create_dir_all(&proj).unwrap();
-        std::fs::write(proj.join(".mcp.json"), r#"{"mcpServers":{"d":{"command":"srv-d"}}}"#).unwrap();
+        std::fs::write(
+            proj.join(".mcp.json"),
+            r#"{"mcpServers":{"d":{"command":"srv-d"}}}"#,
+        )
+        .unwrap();
         // Project keys in .claude.json may use backslashes and a trailing slash.
         let key = format!("{}/", proj.to_string_lossy().replace('/', "\\"));
         let doc = json!({
@@ -618,7 +638,10 @@ mod tests {
         std::fs::write(&file, doc.to_string()).unwrap();
         let got = load_server_configs(&file, std::slice::from_ref(&proj)).unwrap();
         assert_eq!(got.keys().collect::<Vec<_>>(), ["a", "b", "d"]);
-        assert_eq!(got["a"].command, "srv-a2", "project entries override global ones");
+        assert_eq!(
+            got["a"].command, "srv-a2",
+            "project entries override global ones"
+        );
         // Without project dirs only the global servers load.
         let global = load_server_configs(&file, &[]).unwrap();
         assert_eq!(global.keys().collect::<Vec<_>>(), ["a"]);

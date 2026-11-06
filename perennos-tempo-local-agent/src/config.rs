@@ -328,9 +328,11 @@ impl Config {
                 Config::from_json(&v, data_env)?
             }
         };
-        let url = ["OLLAMA_URL", "TEMPO_OLLAMA"]
-            .iter()
-            .find_map(|k| env(k).map(|u| u.trim().to_string()).filter(|u| !u.is_empty()));
+        let url = ["OLLAMA_URL", "TEMPO_OLLAMA"].iter().find_map(|k| {
+            env(k)
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+        });
         if let Some(u) = url {
             c.ollama_url = u.trim_end_matches('/').to_string();
         }
@@ -473,10 +475,19 @@ mod tests {
         );
         assert_eq!(mcp_path(None, None, &c), None);
         let home = Some(PathBuf::from("/home/u"));
-        assert_eq!(expand_home("~/.claude.json", home.clone()), PathBuf::from("/home/u/.claude.json"));
+        assert_eq!(
+            expand_home("~/.claude.json", home.clone()),
+            PathBuf::from("/home/u/.claude.json")
+        );
         assert_eq!(expand_home("~", home.clone()), PathBuf::from("/home/u"));
-        assert_eq!(expand_home("~other/x", home.clone()), PathBuf::from("~other/x"));
-        assert_eq!(expand_home("/abs/m.json", home), PathBuf::from("/abs/m.json"));
+        assert_eq!(
+            expand_home("~other/x", home.clone()),
+            PathBuf::from("~other/x")
+        );
+        assert_eq!(
+            expand_home("/abs/m.json", home),
+            PathBuf::from("/abs/m.json")
+        );
     }
 
     #[test]
@@ -486,15 +497,24 @@ mod tests {
             "TEMPO_OLLAMA" => Some("http://127.0.0.1:9".to_string()),
             _ => None,
         };
-        assert_eq!(Config::load(None, None, &both).unwrap().ollama_url, "http://gpu-box.local:11434");
+        assert_eq!(
+            Config::load(None, None, &both).unwrap().ollama_url,
+            "http://gpu-box.local:11434"
+        );
         let blank = |k: &str| match k {
             "OLLAMA_URL" => Some("  ".to_string()),
             "TEMPO_OLLAMA" => Some("http://127.0.0.1:9".to_string()),
             _ => None,
         };
-        assert_eq!(Config::load(None, None, &blank).unwrap().ollama_url, "http://127.0.0.1:9");
+        assert_eq!(
+            Config::load(None, None, &blank).unwrap().ollama_url,
+            "http://127.0.0.1:9"
+        );
         let none = |_: &str| None;
-        assert_eq!(Config::load(None, None, &none).unwrap().ollama_url, "http://127.0.0.1:11434");
+        assert_eq!(
+            Config::load(None, None, &none).unwrap().ollama_url,
+            "http://127.0.0.1:11434"
+        );
     }
 
     #[test]
