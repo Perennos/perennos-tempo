@@ -226,6 +226,7 @@ impl Agent {
         let builtins = builtin_schemas();
         let cfg = self.cfg();
         let mut host = self.env.mcp.borrow_mut();
+        host.retry_failed();
         let mut sel: Vec<Offered> = host.select(text, builtins.len(), cfg.tool_cap);
         if cfg.prefix_stable {
             // Sticky and sorted: tools offered earlier in this conversation stay offered (the tool

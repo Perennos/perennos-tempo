@@ -32,6 +32,7 @@
       "trust_reads": false
     }
   },
+  "fetch_allow_hosts": [],
   "fetch_allow_private": [],
   "packs_allow": [],
 

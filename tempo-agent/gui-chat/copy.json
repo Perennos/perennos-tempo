@@ -43,5 +43,6 @@
     "core": "Core",
     "memory": "Notes",
     "pack": "Knowledge pack"
-  }
+  },
+  "signIn": "This page needs Tempo's key. Open it from Perennos Tempo (or run tempo-launch open agent)."
 }

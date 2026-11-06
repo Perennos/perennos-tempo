@@ -93,6 +93,50 @@ pub fn secret_id() -> String {
         .collect()
 }
 
+/// 32 random bytes as 64 hex characters: the system's random source where there is one, else
+/// the per-process random keys `secret_id` uses.
+pub fn new_key() -> String {
+    #[cfg(unix)]
+    {
+        let mut b = [0u8; 32];
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut b))
+            .is_ok()
+        {
+            return b.iter().map(|x| format!("{x:02x}")).collect();
+        }
+    }
+    format!("{}{}", secret_id(), secret_id())
+}
+
+/// Equal without telling, by its timing, how much of a secret was right.
+pub fn same_secret(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Write `<dir>/control.key` whole (a temporary file renamed into place), readable by its owner
+/// only on Unix.
+pub fn write_key(dir: &Path, key: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let path = dir.join("control.key");
+    let tmp = dir.join(format!("control.key.{}.tmp", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    {
+        let mut f = o
+            .open(&tmp)
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        std::io::Write::write_all(&mut f, key.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 pub fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }

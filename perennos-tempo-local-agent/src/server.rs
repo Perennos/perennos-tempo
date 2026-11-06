@@ -44,6 +44,11 @@ pub struct ServeOpts {
     pub gui_port: Option<u16>,
     /// How long a confirmation waits for the GUI before it counts as denied.
     pub confirm_timeout: Duration,
+    /// The agent's key: every request but `GET /agent/health`, the page and its files must send
+    /// it as `X-Tempo-Key`. `serve` makes a fresh one at each start (tests may leave it unset).
+    pub key: Option<String>,
+    /// Listening on an address other than loopback needs this (and the key still applies).
+    pub allow_remote: bool,
 }
 
 impl Default for ServeOpts {
@@ -55,6 +60,8 @@ impl Default for ServeOpts {
             chat_dir: None,
             gui_port: None,
             confirm_timeout: Duration::from_secs(900),
+            key: None,
+            allow_remote: false,
         }
     }
 }
@@ -343,8 +350,19 @@ pub fn start(
     ]
     .into_iter()
     .collect();
+    // bound to one particular address (a tailnet IP): that address is ours too
+    if !opts.bind.is_loopback() && !opts.bind.is_unspecified() {
+        allowed.insert(match opts.bind {
+            IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+            v4 => format!("{v4}:{port}"),
+        });
+    }
     for h in &opts.allow_hosts {
         let h = h.to_lowercase();
+        // behind `tailscale serve` on 443 (or 80) the browser sends a Host with no port
+        if let Some(bare) = h.strip_suffix(":443").or_else(|| h.strip_suffix(":80")) {
+            allowed.insert(bare.to_string());
+        }
         allowed.insert(if h.contains(':') && !h.ends_with(']') {
             h
         } else {
@@ -383,15 +401,35 @@ pub fn start(
     Ok(Running { addr, accept })
 }
 
-/// Serve until the process ends.
+/// Serve until the process ends. A fresh key is written to `<data>/control.key` first; every
+/// client (the page, Tempo Room, the Vault's Tempo tab, the launcher) sends it.
 pub fn serve(
     cfg: Config,
     servers: BTreeMap<String, ServerCfg>,
-    opts: ServeOpts,
+    mut opts: ServeOpts,
 ) -> Result<(), String> {
+    check_bind(&opts)?;
+    let key = util::new_key();
+    let path = util::write_key(&cfg.data_dir, &key)?;
+    opts.key = Some(key);
     let r = start(cfg, servers, opts)?;
-    eprintln!("[serving the agent API on http://{}/agent/]", r.addr);
+    eprintln!(
+        "[serving the agent API on http://{}/agent/; its key is in {} (open Perennos Tempo, or run tempo-launch open agent)]",
+        r.addr,
+        path.display()
+    );
     r.wait();
+    Ok(())
+}
+
+/// Only loopback, unless the owner asked for more (and then the key still applies).
+pub fn check_bind(opts: &ServeOpts) -> Result<(), String> {
+    if !opts.bind.is_loopback() && !opts.allow_remote {
+        return Err(format!(
+            "the agent listens only on this computer; to listen on {} pass --allow-remote (every request still needs the key)",
+            opts.bind
+        ));
+    }
     Ok(())
 }
 
@@ -551,6 +589,7 @@ fn check(sh: &Shared, req: &Req) -> Result<(), (u16, &'static str)> {
         let o = o.to_ascii_lowercase();
         let ours = o
             .strip_prefix("http://")
+            .or_else(|| o.strip_prefix("https://"))
             .is_some_and(|h| sh.allowed.contains(h));
         if !ours {
             return Err((403, "cross-origin request refused"));
@@ -587,6 +626,18 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
         return refuse(&mut s, code, why);
     }
     if let Some(api) = req.path.strip_prefix("/agent/") {
+        // everything but health needs the key (the page and its files do not)
+        if let Some(key) = &sh.opts.key {
+            let open = req.method == "GET" && api == "health";
+            let given = req.header("x-tempo-key").unwrap_or("");
+            if !open && !util::same_secret(given.trim().as_bytes(), key.as_bytes()) {
+                return send_json(
+                    &mut s,
+                    401,
+                    &json!({"error": "this needs the agent's key", "hint": "open Perennos Tempo, or run tempo-launch open agent"}),
+                );
+            }
+        }
         let body: Value = if req.method == "POST" {
             match serde_json::from_slice(&req.body) {
                 Ok(v) => v,
@@ -795,7 +846,8 @@ fn health(sh: &Shared) -> Value {
     let embed = lock(&sh.state).embed_ok;
     // `stream: true` tells the chat surface it can use /agent/stream instead of polling.
     // `guest: true`: POST /agent/new {"mode":"guest"} makes a room-safe conversation.
-    json!({"net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true})
+    // `auth: "key"`: every other call needs X-Tempo-Key (see `serve`).
+    json!({"net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "auth": if sh.opts.key.is_some() { "key" } else { "none" }})
 }
 
 fn convs(cfg: &Config) -> Vec<String> {
@@ -1226,6 +1278,104 @@ mod tests {
             );
             assert_eq!(c, 200, "{site}");
         }
+    }
+
+    #[test]
+    fn every_call_but_health_needs_the_key() {
+        let chat = tmpdir("chat-key");
+        std::fs::write(chat.join("chat.mjs"), "export {}").unwrap();
+        let srv = server(vec![], |_, o| {
+            o.key = Some("k3y".repeat(20));
+            o.chat_dir = Some(chat.clone());
+        });
+        let p = srv.addr.port();
+        let get = |path: &str, extra: &str| {
+            raw(
+                srv.addr,
+                &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{extra}\r\n"),
+            )
+        };
+        let (c, b) = get("/agent/convs", "");
+        assert_eq!(c, 401);
+        assert!(b.contains("tempo-launch open agent"), "{b}");
+        assert_eq!(get("/agent/convs", "X-Tempo-Key: wrong\r\n").0, 401);
+        assert_eq!(
+            get(
+                "/agent/convs",
+                &format!("X-Tempo-Key: {}\r\n", "k3y".repeat(20))
+            )
+            .0,
+            200
+        );
+        let (c, b) = get("/agent/health", "");
+        assert_eq!(c, 200);
+        assert!(b.contains("\"auth\":\"key\""), "{b}");
+        // the page's own files need no key
+        assert_eq!(get("/chat/chat.mjs", "").0, 200);
+        // a POST without the key changes nothing
+        let body = "{}";
+        let (c, _) = raw(srv.addr, &format!("POST /agent/new HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
+        assert_eq!(c, 401);
+    }
+
+    #[test]
+    fn listening_beyond_this_computer_is_asked_for() {
+        let o = ServeOpts {
+            bind: "0.0.0.0".parse().unwrap(),
+            ..ServeOpts::default()
+        };
+        assert!(check_bind(&o).unwrap_err().contains("--allow-remote"));
+        assert!(check_bind(&ServeOpts {
+            allow_remote: true,
+            ..o
+        })
+        .is_ok());
+        assert!(check_bind(&ServeOpts::default()).is_ok());
+        let d = tmpdir("key-file");
+        let k = util::new_key();
+        assert!(k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) && k != util::new_key());
+        let p = util::write_key(&d, &k).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), k);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(
+            util::same_secret(b"abc", b"abc")
+                && !util::same_secret(b"abc", b"abd")
+                && !util::same_secret(b"abc", b"ab")
+        );
+    }
+
+    #[test]
+    fn a_host_behind_tailscale_serve_has_no_port_and_https_origin_is_ours() {
+        let srv = server(vec![], |_, o| {
+            o.allow_hosts = vec!["tempo.local:443".into()]
+        });
+        let req = |extra: &str| {
+            raw(
+                srv.addr,
+                &format!("GET /agent/convs HTTP/1.1\r\n{extra}\r\n"),
+            )
+        };
+        assert_eq!(
+            req("Host: tempo.local\r\n").0,
+            200,
+            "the bare name from the HTTPS front"
+        );
+        assert_eq!(
+            req("Host: tempo.local\r\nOrigin: https://tempo.local\r\n").0,
+            200
+        );
+        assert_eq!(
+            req("Host: tempo.local\r\nOrigin: https://evil.example\r\n").0,
+            403
+        );
+        assert_eq!(req("Host: evil.example\r\n").0, 403);
     }
 
     #[test]

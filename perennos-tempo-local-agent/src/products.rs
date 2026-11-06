@@ -52,13 +52,9 @@ pub fn find_bin(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// `TEMPO_HOME`, then the config's `tempo_home`, then `~/.tempo`.
+/// The Tempo home, found as every Perennos Tempo product finds it (`crate::home`).
 pub fn tempo_home(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    getenv("TEMPO_HOME")
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| cfg.tempo_home.clone())
-        .map(|h| expand_home(&h, home_dir()))
-        .or_else(|| home_dir().map(|h| h.join(".tempo")))
+    crate::home::tempo_home(getenv, cfg.tempo_home.as_deref())
 }
 
 /// The only `pack.json` keys a pack may have; anything else is ignored and noted.

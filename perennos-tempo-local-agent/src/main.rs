@@ -29,11 +29,15 @@ Risky actions (overwrite, trash, shell commands that write) ask y/N on the
 terminal. When stdin is not a terminal they are denied.
 
 SERVE: the HTTP API the Tempo GUI chat surface uses (/agent/*, plus an SSE
-stream at /agent/stream?conv=ID). Loopback only unless --bind says otherwise.
+stream at /agent/stream?conv=ID). Loopback only unless --bind and --allow-remote say
+otherwise. Each start writes a fresh key to <data>/control.key; every call but
+GET /agent/health must send it as X-Tempo-Key (the page takes it from #key=...).
 Approvals come from the GUI and are denied after --confirm-timeout.
     --port N            listen port (default 8765)
     --bind ADDR         listen address (default 127.0.0.1)
-    --allow-host NAME   also accept this Host header (repeatable)
+    --allow-host NAME   also accept this Host header (repeatable; NAME:443 also accepts the
+                        bare NAME that `tailscale serve` sends)
+    --allow-remote      allow --bind to an address other than loopback (the key still applies)
     --chat-dir DIR      serve the chat surface files at /chat/
     --gui-port N        pass every other path to the Tempo GUI server on 127.0.0.1:N
     --confirm-timeout S seconds an approval waits before it is denied (default 900)
@@ -94,6 +98,7 @@ fn parse_serve(args: &mut Vec<String>) -> Result<ServeOpts, String> {
                     .map_err(|_| "--bind needs an IP address")?
             }
             "--allow-host" => o.allow_hosts.push(val("--allow-host")?),
+            "--allow-remote" => o.allow_remote = true,
             "--chat-dir" => o.chat_dir = Some(val("--chat-dir")?.into()),
             "--gui-port" => {
                 o.gui_port = Some(
@@ -165,8 +170,8 @@ fn real_main() -> Result<(), String> {
         if !args.prompt.is_empty() || args.conv.is_some() || args.reindex {
             return Err("serve takes no prompt, --conv or --reindex".into());
         }
-        if !opts.bind.is_loopback() {
-            eprintln!("[warning: listening on {}, not loopback; anyone who can reach it can drive this agent]", opts.bind);
+        if !opts.bind.is_loopback() && opts.allow_remote {
+            eprintln!("[warning: listening on {}, not loopback; anyone who can reach it and has the key can drive this agent]", opts.bind);
         }
         return server::serve(cfg, servers, opts);
     }

@@ -175,7 +175,15 @@ pub struct McpServer {
     next_id: u64,
     pub tools: Vec<Value>,
     pub error: Option<String>,
+    /// When it was last started (a server that failed is tried again a minute later).
+    pub started: std::time::Instant,
+    /// The last lines it wrote to stderr, for the error message (and its log file).
+    stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
+    log: Option<std::path::PathBuf>,
 }
+
+/// How long a server that failed waits before it is started again.
+pub const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 fn write_line(stdin: &Arc<Mutex<ChildStdin>>, msg: &Value) -> Result<(), String> {
     let mut g = stdin.lock().map_err(|_| "stdin poisoned".to_string())?;
@@ -186,6 +194,16 @@ fn write_line(stdin: &Arc<Mutex<ChildStdin>>, msg: &Value) -> Result<(), String>
 
 impl McpServer {
     pub fn start(name: &str, cfg: &ServerCfg, timeout: Duration) -> McpServer {
+        McpServer::start_logged(name, cfg, timeout, None)
+    }
+
+    /// Start it; what it writes to stderr is kept (the last lines) and appended to `log`.
+    pub fn start_logged(
+        name: &str,
+        cfg: &ServerCfg,
+        timeout: Duration,
+        log: Option<std::path::PathBuf>,
+    ) -> McpServer {
         let mut s = McpServer {
             name: name.into(),
             child: None,
@@ -194,12 +212,37 @@ impl McpServer {
             next_id: 1,
             tools: vec![],
             error: None,
+            started: std::time::Instant::now(),
+            stderr_tail: Arc::default(),
+            log,
         };
         if let Err(e) = s.boot(cfg, timeout) {
-            s.error = Some(crate::util::head_chars(&e, 200));
+            // give its last words a moment to arrive: they usually say why (ssh: host is down)
+            std::thread::sleep(Duration::from_millis(150));
+            let said = s.last_said();
+            s.error = Some(crate::util::head_chars(
+                &match said {
+                    Some(l) => format!("{e} (it said: {l})"),
+                    None => e,
+                },
+                300,
+            ));
             s.stop();
         }
         s
+    }
+
+    /// The last line it wrote to stderr.
+    pub fn last_said(&self) -> Option<String> {
+        self.stderr_tail.lock().ok()?.back().cloned()
+    }
+
+    /// Still running (it may have stopped after it started: a remote machine went away).
+    pub fn alive(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 
     fn boot(&mut self, cfg: &ServerCfg, timeout: Duration) -> Result<(), String> {
@@ -217,7 +260,7 @@ impl McpServer {
             .envs(&cfg.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -228,6 +271,38 @@ impl McpServer {
             .map_err(|e| format!("spawn {}: {}", cfg.command, e.kind()))?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no stdin")?));
         let stdout = child.stdout.take().ok_or("no stdout")?;
+        if let Some(err) = child.stderr.take() {
+            let tail = self.stderr_tail.clone();
+            let log = self.log.clone();
+            std::thread::spawn(move || {
+                let mut file = log.and_then(|p| {
+                    if let Some(d) = p.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    // a log past 1 MB starts over beside the old one (renamed, never removed)
+                    if std::fs::metadata(&p).is_ok_and(|m| m.len() > 1 << 20) {
+                        let _ = std::fs::rename(&p, p.with_extension("log.old"));
+                    }
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(p)
+                        .ok()
+                });
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    let line = crate::util::redact(&line);
+                    if let Some(f) = file.as_mut() {
+                        let _ = writeln!(f, "{} {line}", crate::util::now_str());
+                    }
+                    if let Ok(mut t) = tail.lock() {
+                        if t.len() >= 20 {
+                            t.pop_front();
+                        }
+                        t.push_back(crate::util::head_chars(&line, 300));
+                    }
+                }
+            });
+        }
         self.child = Some(child);
         self.stdin = Some(stdin.clone());
         let pending = self.pending.clone();
@@ -273,15 +348,33 @@ impl McpServer {
             self.stdin.as_ref().ok_or("server not running")?,
             &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
         );
-        let got = sent.and_then(|_| {
-            rx.recv_timeout(timeout).map_err(|_| {
-                format!(
-                    "{} {} timed out after {:.1}s",
-                    self.name,
-                    method,
-                    timeout.as_secs_f64()
-                )
-            })
+        // wait for the answer, but not for a program that has already ended (an ssh to a machine
+        // that is off ends at once; waiting the whole start timeout would only delay the turn)
+        let deadline = std::time::Instant::now() + timeout;
+        let got = sent.and_then(|_| loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                Ok(m) => break Ok(m),
+                Err(mpsc::RecvTimeoutError::Timeout) if left.is_zero() => {
+                    break Err(format!(
+                        "{} {} timed out after {:.1}s",
+                        self.name,
+                        method,
+                        timeout.as_secs_f64()
+                    ))
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(Ok(Some(st))) = self.child.as_mut().map(|c| c.try_wait()) {
+                        break Err(format!(
+                            "{} ended before answering {method} ({st})",
+                            self.name
+                        ));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(format!("{} {method}: no answer", self.name))
+                }
+            }
         });
         if let Ok(mut p) = self.pending.lock() {
             p.remove(&id);
@@ -355,6 +448,8 @@ pub struct McpHost {
     skip: Vec<String>,
     start_timeout: Duration,
     pub call_timeout: Duration,
+    /// Where each server's stderr is kept (`<data>/logs/mcp-<name>.log`).
+    logs: Option<std::path::PathBuf>,
 }
 
 pub fn tok(s: &str) -> HashSet<String> {
@@ -391,6 +486,7 @@ impl McpHost {
             skip: cfg.mcp_skip.clone(),
             start_timeout: Duration::from_secs_f64(cfg.mcp_start_timeout_s),
             call_timeout: Duration::from_secs_f64(cfg.mcp_call_timeout_s),
+            logs: Some(cfg.logs_dir()),
         }
     }
 
@@ -401,12 +497,48 @@ impl McpHost {
     fn server(&mut self, name: &str) -> Option<&mut McpServer> {
         if !self.running.contains_key(name) {
             let cfg = self.cfgs.get(name)?.clone();
-            self.running.insert(
-                name.to_string(),
-                McpServer::start(name, &cfg, self.start_timeout),
-            );
+            let s = McpServer::start_logged(name, &cfg, self.start_timeout, self.log_for(name));
+            self.running.insert(name.to_string(), s);
         }
         self.running.get_mut(name)
+    }
+
+    fn log_for(&self, name: &str) -> Option<std::path::PathBuf> {
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.logs
+            .as_ref()
+            .map(|d| d.join(format!("mcp-{safe}.log")))
+    }
+
+    /// Start again, at most once a minute, a server that failed to start or has stopped since (a
+    /// machine reached through `ssh` that was down or restarted). Its tools come back on the next
+    /// turn. Called at the start of every turn.
+    pub fn retry_failed(&mut self) {
+        let names: Vec<String> = self
+            .running
+            .iter_mut()
+            .filter(|(_, s)| s.started.elapsed() >= RETRY_AFTER)
+            .filter_map(|(n, s)| (s.error.is_some() || !s.alive()).then(|| n.clone()))
+            .collect();
+        for n in names {
+            let Some(cfg) = self.cfgs.get(&n).cloned() else {
+                continue;
+            };
+            let s = McpServer::start_logged(&n, &cfg, self.start_timeout, self.log_for(&n));
+            if s.error.is_none() {
+                self.catalog = None; // its tools join the catalog again
+            }
+            self.running.insert(n, s);
+        }
     }
 
     pub fn load_catalog(&mut self) -> Vec<(String, Value)> {
@@ -520,9 +652,20 @@ impl McpHost {
             .server(server)
             .ok_or_else(|| format!("unknown MCP server {server}"))?;
         if let Some(e) = &s.error {
-            return Err(format!("MCP server {server} is not running: {e}"));
+            return Err(format!(
+                "MCP server {server} is not running: {e} (tried again within a minute)"
+            ));
         }
-        s.call(tool, args, timeout)
+        let r = s.call(tool, args, timeout);
+        if r.is_err() && !s.alive() {
+            // it went away mid-call: say so, with its last words; it is started again later
+            let said = s
+                .last_said()
+                .map(|l| format!(" (it said: {l})"))
+                .unwrap_or_default();
+            s.error = Some(format!("stopped{said}"));
+        }
+        r
     }
 
     pub fn stop_all(&mut self) {
@@ -571,6 +714,46 @@ mod tests {
     use super::*;
 
     /// When TLA_MCP_MOCK is set this "test" is re-invoked as a stdio MCP server (see `mock_cfg`).
+    #[cfg(unix)]
+    #[test]
+    fn a_server_that_was_down_is_started_again_and_says_why() {
+        let d = crate::util::testutil::tmpdir("mcp-retry");
+        let flag = d.join("up");
+        // like `ssh zeus tempo-vault mcp` while Zeus is off, then on
+        let script = format!(
+            r#"if [ -f '{}' ]; then read a; echo '{{"jsonrpc":"2.0","id":1,"result":{{}}}}'; read b; read c; echo '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"vault_search","description":"search"}}]}}}}'; sleep 5; else echo 'ssh: connect to host zeus port 22: Connection refused' >&2; exit 255; fi"#,
+            flag.display()
+        );
+        let cfg = ServerCfg {
+            command: "sh".into(),
+            args: vec!["-c".into(), script],
+            env: BTreeMap::new(),
+        };
+        let mut c = crate::config::Config::defaults(Some(d.to_string_lossy().into_owned()));
+        c.mcp_start_timeout_s = 5.0;
+        let mut host = McpHost::new(&c, BTreeMap::from([("zeus".to_string(), cfg)]));
+        assert!(host.route().is_empty());
+        let errs = host.errors();
+        assert!(
+            errs[0].1.contains("it said: ssh: connect to host zeus"),
+            "{errs:?}"
+        );
+        let log = std::fs::read_to_string(d.join("logs/mcp-zeus.log")).unwrap();
+        assert!(log.contains("Connection refused"), "{log}");
+        // within the minute it is not tried again; after it, it is, and its tools come back
+        std::fs::write(&flag, "").unwrap();
+        host.retry_failed();
+        assert!(host.route().is_empty(), "not before a minute has passed");
+        host.running.get_mut("zeus").unwrap().started -= RETRY_AFTER;
+        host.retry_failed();
+        assert!(
+            host.route().contains_key(&exposed("zeus", "vault_search")),
+            "{:?}",
+            host.errors()
+        );
+        host.stop_all();
+    }
+
     #[cfg(unix)]
     #[test]
     fn third_party_servers_do_not_inherit_the_agents_secrets() {

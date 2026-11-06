@@ -10,6 +10,7 @@ use crate::util::{self, cap, head_chars, http_json, is_secret_path, resolve, Gua
 use regex::Regex;
 use serde_json::{json, Value};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,27 @@ pub struct Env {
     pub rag: RefCell<Rag>,
     pub mcp: RefCell<McpHost>,
     protect: Option<Regex>,
+    /// Hosts the owner let `fetch_url` read, per conversation (asked once each).
+    fetch_ok: RefCell<HashMap<String, HashSet<String>>>,
+}
+
+/// The host of an http(s) address, lower case, without the port.
+fn host_of(url: &str) -> Option<String> {
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    Some(
+        uri.host()?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase(),
+    )
+}
+
+/// A host the owner listed in `fetch_allow_hosts` (`*.example.com` covers its subdomains).
+fn pre_approved(host: &str, list: &[String]) -> bool {
+    list.iter().any(|a| match a.strip_prefix("*.") {
+        Some(base) => host == base || host.ends_with(&format!(".{base}")),
+        None => host == a,
+    })
 }
 
 fn s(d: &str) -> Value {
@@ -450,6 +472,7 @@ impl Env {
             rag: RefCell::new(Rag::new()),
             mcp: RefCell::new(mcp),
             protect,
+            fetch_ok: RefCell::new(HashMap::new()),
         }
     }
 
@@ -482,7 +505,7 @@ impl Env {
             "write_file" => self.write_file(a),
             "trash" => self.trash(a),
             "run_command" => self.run_command(a),
-            "fetch_url" => self.fetch_url(a),
+            "fetch_url" => self.fetch_url(conv, a),
             "search_memory" => self.search_memory(a),
             "workflow_update" => {
                 Ok(conv.wf_update(a.get("tasks"), a.get("note").and_then(|n| n.as_str())))
@@ -650,7 +673,30 @@ impl Env {
         Ok(format!("[exit {rc}]\n{out}"))
     }
 
-    fn fetch_url(&self, a: &Value) -> Result<String, String> {
+    /// The first read of a host in a conversation asks the owner; yes covers that host for the
+    /// rest of the conversation. Hosts in `fetch_allow_hosts` never ask. Each redirect is checked
+    /// the same way, so a page cannot send the agent on to a host nobody approved.
+    fn host_ok(&self, conv: &Conv, url: &str) -> Result<(), String> {
+        let host = host_of(url).ok_or("refused: no host in that address")?;
+        if pre_approved(&host, &self.cfg.fetch_allow_hosts)
+            || self
+                .fetch_ok
+                .borrow()
+                .get(&conv.id)
+                .is_some_and(|s| s.contains(&host))
+        {
+            return Ok(());
+        }
+        self.ask(&format!("Tempo wants to read {host}"), url)?;
+        self.fetch_ok
+            .borrow_mut()
+            .entry(conv.id.clone())
+            .or_default()
+            .insert(host);
+        Ok(())
+    }
+
+    fn fetch_url(&self, conv: &Conv, a: &Value) -> Result<String, String> {
         let url = sarg(a, "url")?;
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok("refused: http(s) only".into());
@@ -659,9 +705,13 @@ impl Env {
             return Ok("offline: no internet right now. Use local memory (search_memory) or tell the user.".into());
         }
         let allow = &self.cfg.fetch_allow_private;
-        let raw = util::get_text_checked(url, Duration::from_secs(20), 400_000, &|u| {
-            check_fetch_target(u, allow)
-        })
+        let raw = match util::get_text_checked(url, Duration::from_secs(20), 400_000, &|u| {
+            check_fetch_target(u, allow)?;
+            self.host_ok(conv, u)
+        }) {
+            Err(e) if e == "denied by user" || e.starts_with("refused: too long") => return Ok(e),
+            r => r,
+        }
         .map_err(|e| {
             if e.starts_with("refused") {
                 e
@@ -1449,6 +1499,7 @@ mod tests {
         let (e, c, _d) = env_with(Box::new(DenyAll), |c| {
             c.offline_probe = probe_addr.clone();
             c.fetch_allow_private = vec!["127.0.0.1".into()];
+            c.fetch_allow_hosts = vec!["127.0.0.1".into()];
         });
         assert!(run(&e, &c, "fetch_url", json!({"url": "ftp://x"}))
             .starts_with("refused: http(s) only"));
@@ -1467,6 +1518,99 @@ mod tests {
         )
         .starts_with("offline:"));
         assert!(!probe("127.0.0.1:1"));
+    }
+
+    /// Approves everything and keeps what it was asked.
+    struct Ask(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl Confirm for Ask {
+        fn confirm(&self, what: &str, detail: &str) -> bool {
+            self.0.lock().unwrap().push(format!("{what} | {detail}"));
+            true
+        }
+    }
+
+    #[test]
+    fn a_new_website_asks_once_per_conversation() {
+        let m = Mock::start(|_| (200, "<p>the page</p>".into()));
+        let probe_addr = m.url.trim_start_matches("http://").to_string();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let (e, c, _d) = env_with(Box::new(Ask(asked.clone())), |c| {
+            c.offline_probe = probe_addr.clone();
+            c.fetch_allow_private = vec!["127.0.0.1".into(), "localhost".into()];
+        });
+        let url = format!("{}/a", m.url);
+        assert_eq!(run(&e, &c, "fetch_url", json!({"url": url})), "the page");
+        assert_eq!(
+            run(&e, &c, "fetch_url", json!({"url": format!("{}/b", m.url)})),
+            "the page"
+        );
+        {
+            let a = asked.lock().unwrap();
+            assert_eq!(a.len(), 1, "one yes covers the host: {a:?}");
+            assert!(
+                a[0].starts_with(&format!("Tempo wants to read 127.0.0.1 | {url}")),
+                "{a:?}"
+            );
+        }
+        // another conversation asks for itself
+        let c2 = Conv::open(&e.cfg, None).unwrap();
+        assert_eq!(run(&e, &c2, "fetch_url", json!({"url": url})), "the page");
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        // a redirect to another host is asked about too
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop = format!("http://{}", l.local_addr().unwrap());
+        let to = format!("http://localhost:{}/c", m.url.rsplit(':').next().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = l.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = std::io::Write::write_all(&mut s, format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
+            }
+        });
+        assert_eq!(
+            run(&e, &c, "fetch_url", json!({"url": format!("{hop}/start")})),
+            "the page"
+        );
+        let a = asked.lock().unwrap();
+        assert!(
+            a.last()
+                .unwrap()
+                .starts_with("Tempo wants to read localhost"),
+            "{a:?}"
+        );
+    }
+
+    #[test]
+    fn a_website_the_owner_did_not_approve_is_never_read() {
+        let m = Mock::start(|_| (200, "secret".into()));
+        let probe_addr = m.url.trim_start_matches("http://").to_string();
+        let (e, c, _d) = env_with(Box::new(DenyAll), |c| {
+            c.offline_probe = probe_addr.clone();
+            c.fetch_allow_private = vec!["127.0.0.1".into()];
+        });
+        assert_eq!(
+            run(
+                &e,
+                &c,
+                "fetch_url",
+                json!({"url": format!("{}/secret", m.url)})
+            ),
+            "denied by user"
+        );
+        assert!(
+            !m.reqs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.path.contains("secret")),
+            "nothing was requested"
+        );
+        assert!(pre_approved("docs.example.com", &["*.example.com".into()]));
+        assert!(pre_approved("example.com", &["*.example.com".into()]));
+        assert!(!pre_approved("badexample.com", &["*.example.com".into()]));
+        assert!(
+            pre_approved("a.org", &["a.org".into()]) && !pre_approved("b.a.org", &["a.org".into()])
+        );
     }
 
     #[test]

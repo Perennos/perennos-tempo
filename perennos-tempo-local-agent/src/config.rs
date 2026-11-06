@@ -51,6 +51,9 @@ pub struct Config {
     /// Host names `fetch_url` may reach even though they are on this computer or its network
     /// (everything private, loopback or link-local, such as the cloud metadata address, is refused).
     pub fetch_allow_private: Vec<String>,
+    /// Hosts `fetch_url` may read without asking (`example.com`, or `*.example.com` for its
+    /// subdomains). Any other host asks the owner once per conversation.
+    pub fetch_allow_hosts: Vec<String>,
     /// Packs (`<tempo home>/packs/<name>/`) whose connectors may be started. A pack comes from
     /// someone else and its connectors are programs it supplies, so none runs until listed here.
     pub packs_allow: Vec<String>,
@@ -123,9 +126,12 @@ fn path_list(v: &Value, k: &str) -> Vec<(String, usize)> {
 }
 
 impl Config {
-    /// Defaults only. `data_dir_env` is the value of TEMPO_AGENT_DATA, if any.
+    /// Defaults only. `data_dir_env` is the value of TEMPO_AGENT_DATA, if any; without it the data
+    /// lives in `<tempo home>/agent` (see `home`).
     pub fn defaults(data_dir_env: Option<String>) -> Config {
-        let data_dir = PathBuf::from(data_dir_env.unwrap_or_else(|| "./tempo-agent-data".into()));
+        let data_dir = data_dir_env
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::home::agent_data(&|k| std::env::var(k).ok(), None));
         Config {
             ollama_url: "http://127.0.0.1:11434".into(),
             models: vec!["local-heavy".into()],
@@ -157,6 +163,7 @@ impl Config {
             command_timeout_s: 60.0,
             offline_probe: "1.1.1.1:443".into(),
             fetch_allow_private: vec![],
+            fetch_allow_hosts: vec![],
             packs_allow: vec![],
             hosts: BTreeMap::new(),
             mcp_config: None,
@@ -183,16 +190,28 @@ impl Config {
         }
     }
 
+    fn set_data_dir(&mut self, d: PathBuf) {
+        self.data_dir = d;
+        self.write_roots = vec![self.data_dir.to_string_lossy().into_owned()];
+        self.trash_dir = self.data_dir.join("trash");
+        self.command_cwd = self.data_dir.clone();
+    }
+
     pub fn from_json(v: &Value, data_dir_env: Option<String>) -> Result<Config, String> {
         if !v.is_object() {
             return Err("config must be a JSON object".into());
         }
-        let mut c = Config::defaults(data_dir_env);
+        let mut c = Config::defaults(data_dir_env.clone());
         if let Some(d) = string(v, "data_dir") {
-            c.data_dir = PathBuf::from(d);
-            c.write_roots = vec![c.data_dir.to_string_lossy().into_owned()];
-            c.trash_dir = c.data_dir.join("trash");
-            c.command_cwd = c.data_dir.clone();
+            c.set_data_dir(PathBuf::from(d));
+        } else if data_dir_env.is_none() {
+            // a config that names the Tempo home keeps the agent's data in <home>/agent
+            if let Some(th) = string(v, "tempo_home") {
+                c.set_data_dir(crate::home::agent_data(
+                    &|k| std::env::var(k).ok(),
+                    Some(&th),
+                ));
+            }
         }
         if let Some(x) = string(v, "ollama_url") {
             c.ollama_url = x.trim_end_matches('/').to_string();
@@ -257,6 +276,12 @@ impl Config {
         c.pinned_current_files = path_list(v, "pinned_current_files");
         if let Some(x) = strs(v, "packs_allow") {
             c.packs_allow = x;
+        }
+        if let Some(x) = strs(v, "fetch_allow_hosts") {
+            c.fetch_allow_hosts = x
+                .into_iter()
+                .map(|h| h.trim().to_ascii_lowercase())
+                .collect();
         }
         if let Some(x) = strs(v, "fetch_allow_private") {
             c.fetch_allow_private = x;
@@ -478,7 +503,15 @@ mod tests {
     fn defaults_are_generic() {
         let c = Config::defaults(None);
         assert_eq!(c.ollama_url, "http://127.0.0.1:11434");
-        assert_eq!(c.data_dir, PathBuf::from("./tempo-agent-data"));
+        // without TEMPO_AGENT_DATA the data lives in <tempo home>/agent
+        assert_eq!(
+            c.data_dir,
+            crate::home::agent_data(&|k| std::env::var(k).ok(), None)
+        );
+        assert!(
+            c.data_dir.ends_with("agent")
+                || c.data_dir.as_path() == Path::new("./tempo-agent-data")
+        );
         assert_eq!(c.embed_model, "embeddinggemma");
         assert_eq!(c.max_steps, 40);
         let c = Config::defaults(Some("/x/data".into()));

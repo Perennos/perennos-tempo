@@ -4,6 +4,7 @@ pub mod agent;
 pub mod config;
 pub mod conv;
 pub mod fstools;
+pub mod home;
 pub mod mcp;
 pub mod ollama;
 pub mod products;

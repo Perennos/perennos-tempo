@@ -1,8 +1,10 @@
 // CHAT surface: the local agent loop (Ollama engine, MCP tools, memory RAG, delegate, workflow file).
 // Talks only to the same origin at /agent/*. Every visible string comes from copy.json.
 // The second-brain graph (memgraph.mjs, three.js) is imported only when it is opened.
-// Events arrive over /agent/stream (server-sent events) when /agent/health says the server has it
-// (the Rust server does), else by polling (the Python harness).
+// Events arrive over /agent/stream (server-sent events, read with fetch so the key can go along)
+// when /agent/health says the server has it (the Rust server does), else by polling.
+// The agent's key comes from #key=... when Perennos Tempo opens this page; it is kept for this tab
+// only (sessionStorage), cleared from the address bar, and sent as X-Tempo-Key on every call.
 const h = (tag, a = {}, ...kids) => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(a)) {
@@ -15,7 +17,26 @@ const h = (tag, a = {}, ...kids) => {
   e.append(...kids.flat().filter(k => k != null && k !== false));
   return e;
 };
-const api = (p, b) => fetch('/agent/' + p, b ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) } : {}).then(r => r.json());
+const KEY_SLOT = 'tempo-agent-key';
+let memKey = null;
+(function takeKey() {
+  const m = location.hash.match(/(?:^#|&)key=([0-9a-fA-F]{16,128})(?=&|$)/);
+  if (!m) return;
+  memKey = m[1];
+  try { sessionStorage.setItem(KEY_SLOT, m[1]); } catch { /* private window: kept in memory */ }
+  const rest = location.hash.slice(1).split('&').filter(x => !x.startsWith('key=')).join('&');
+  history.replaceState(null, '', location.pathname + location.search + (rest ? '#' + rest : ''));
+})();
+const key = () => { try { return sessionStorage.getItem(KEY_SLOT) || memKey; } catch { return memKey; } };
+const keyHeaders = () => { const k = key(); return k ? { 'X-Tempo-Key': k } : {}; };
+// Every call but health needs the key: a 401 says how to get it (open the page from Perennos Tempo).
+const api = (p, b) => fetch('/agent/' + p, b
+  ? { method: 'POST', headers: { 'Content-Type': 'application/json', ...keyHeaders() }, body: JSON.stringify(b) }
+  : { headers: keyHeaders() }).then(async r => {
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) { const e = new Error(j.hint || 'needs the key'); e.status = 401; throw e; }
+  return j;
+});
 const KINDS = ['current', 'core', 'memory', 'pack'];
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
@@ -139,11 +160,42 @@ export async function mount(el, ctx) {
   function stream() {
     if (!sse || !conv || dead) return;
     let heard = false;
-    const s = new EventSource(`/agent/stream?conv=${encodeURIComponent(conv)}&since=${since}`);
-    es = s;
-    s.onmessage = m => { heard = true; const e = JSON.parse(m.data); if (e.n >= since) { render(e); since = e.n + 1; } if (e.type === 'tool_result' || e.type === 'assistant') refreshWf(); };
-    s.addEventListener('state', m => { heard = true; setBusy(JSON.parse(m.data).busy); });
-    s.onerror = () => { if (!heard || s.readyState === EventSource.CLOSED) { s.close(); if (es === s) es = null; if (!heard) sse = false; poll(); } };
+    const ctl = new AbortController();
+    const me = { close: () => ctl.abort() };
+    es = me;
+    const take = block => {
+      let ev = 'message', data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+      if (!data) return;
+      heard = true;
+      const e = JSON.parse(data);
+      if (ev === 'state') return setBusy(e.busy);
+      if (e.n >= since) { render(e); since = e.n + 1; }
+      if (e.type === 'tool_result' || e.type === 'assistant') refreshWf();
+    };
+    fetch(`/agent/stream?conv=${encodeURIComponent(conv)}&since=${since}`, { headers: keyHeaders(), signal: ctl.signal })
+      .then(async r => {
+        if (!r.ok || !r.body) throw new Error(`stream ${r.status}`);
+        const rd = r.body.getReader(), dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) { take(buf.slice(0, i)); buf = buf.slice(i + 2); }
+        }
+        throw new Error('stream closed');
+      })
+      .catch(() => {
+        if (es === me) es = null;
+        if (dead || ctl.signal.aborted) return;
+        // it worked before: pick up again where it stopped; it never worked: poll instead
+        if (heard) setTimeout(() => { if (!es && !dead) stream(); }, 1500); else { sse = false; poll(); }
+      });
   }
   async function open_(id) {
     await ready;
@@ -156,7 +208,7 @@ export async function mount(el, ctx) {
     try {
       const l = await api('convs');
       list.replaceChildren(...l.slice(0, 8).map(id => h('button', { class: 'ch-conv', type: 'button', 'aria-current': id === conv ? 'true' : null, text: id, onclick: () => open_(id) })));
-    } catch { list.replaceChildren(h('p', { class: 'ch-empty', text: c.failed })); }
+    } catch (e) { list.replaceChildren(h('p', { class: 'ch-empty', text: e.status === 401 ? (c.signIn || e.message) : c.failed })); }
   }
   async function send() {
     const t = input.value.trim();
@@ -170,7 +222,7 @@ export async function mount(el, ctx) {
     try {
       const x = await api('health');
       heavyModel = x.models[0];
-      sse = x.stream === true && 'EventSource' in window;
+      sse = x.stream === true && 'ReadableStream' in window;
       const up = Object.entries(x.hosts).filter(([, v]) => v === 'up').map(([k]) => k);
       strip.replaceChildren(
         h('span', { class: 'ch-pair' }, lab(c.engine), h('span', { class: 'ch-v', text: x.models[0] })),
