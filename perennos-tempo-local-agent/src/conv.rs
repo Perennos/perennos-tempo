@@ -92,6 +92,8 @@ pub struct Conv {
     pub mcp_offered: Vec<String>,
     /// Called with every event as it is emitted (the HTTP server streams them live).
     pub on_event: Option<EventHook>,
+    /// A guest conversation (a chat room, other people): no tools, no memory, no owner context.
+    pub guest: bool,
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -133,12 +135,14 @@ impl Conv {
             seen_calls: HashMap::new(),
             mcp_offered: vec![],
             on_event: None,
+            guest: false,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)
                 .map_err(|e| format!("conversation file {} is corrupt: {e}", c.path.display()))?;
             c.messages = d["messages"].as_array().cloned().unwrap_or_default();
             c.events = d["events"].as_array().cloned().unwrap_or_default();
+            c.guest = d["mode"] == "guest";
             c.mcp_offered = d["mcp_offered"]
                 .as_array()
                 .map(|a| {
@@ -164,7 +168,7 @@ impl Conv {
         }
         if std::fs::write(
             &tmp,
-            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered}).to_string(),
+            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" }}).to_string(),
         )
         .is_ok()
         {

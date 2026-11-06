@@ -595,7 +595,12 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
         (false, "health") => send_json(&mut s, 200, &health(sh)),
         (false, "convs") => send_json(&mut s, 200, &json!(convs(&sh.cfg))),
         (true, "new") => match Conv::open(&sh.cfg, None) {
-            Ok(c) => {
+            Ok(mut c) => {
+                // {"mode": "guest"}: a chat room's conversation (no tools, memory or owner context)
+                if body["mode"] == "guest" {
+                    c.guest = true;
+                    c.save();
+                }
                 lock(&sh.state).convs.entry(c.id.clone()).or_default();
                 send_json(&mut s, 200, &json!({"conv": c.id}));
             }
@@ -772,7 +777,8 @@ fn health(sh: &Shared) -> Value {
     }
     let embed = lock(&sh.state).embed_ok;
     // `stream: true` tells the chat surface it can use /agent/stream instead of polling.
-    json!({"net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true})
+    // `guest: true`: POST /agent/new {"mode":"guest"} makes a room-safe conversation.
+    json!({"net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true})
 }
 
 fn convs(cfg: &Config) -> Vec<String> {
@@ -1107,6 +1113,35 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(30));
         }
+    }
+
+    #[test]
+    fn guest_conversations_for_chat_rooms() {
+        let srv = server(vec![text_resp("Hello from the room")], |_, _| {});
+        let (_, h) = get(&srv, "/agent/health");
+        assert_eq!(h["guest"], true, "rooms can see that guest mode is there");
+        let (c, v) = post(&srv, "/agent/new", &json!({"mode": "guest"}));
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["mode"], "guest");
+        let (c, _) = post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "hi tempo"}),
+        );
+        assert_eq!(c, 200);
+        let evs = wait_idle(&srv, &conv);
+        assert!(
+            evs.iter()
+                .any(|e| e["text"] == "memory: off (guest conversation)"),
+            "{evs:?}"
+        );
+        assert_eq!(evs.last().unwrap()["text"], "Hello from the room");
     }
 
     #[test]

@@ -102,6 +102,10 @@ const SYSTEM: &str = "You are Perennos Tempo, a local superagent: the harness ar
 
 const SYSTEM_STABLE: &str = "You are Perennos Tempo, a local superagent: the harness around a local model. You run on the user's own machine with no cloud and may have no internet and no other machines.\n{owner}Rules:\n- Each user message may end with a [context] block: the latest WORKFLOW FILE and MEMORY excerpts for that message. Answer from those excerpts when they cover the question, and cite each source as [filename]. If they do not cover it, say so; never invent facts.\n- Use tools to do things (list folders, run commands, make images, ask other machines with delegate). Check results before claiming success. Report failures plainly.\n- Never delete anything; the only removal is the trash tool (it moves into a trash folder and needs approval). Never touch secrets.\n- To change part of a file use edit_file (exact text), not write_file; use grep/glob to find things.\n- Keep a task list for multi-step jobs with workflow_update, and continue from the saved workflow.\n- Be brief and direct: under 120 words unless asked for detail; do not dump whole lists. No disclaimers.\n";
 
+/// Guest conversations (a chat room: other people, not the owner at the keyboard). Nothing about
+/// the owner goes in: no owner context, no pinned core, no workflow, no memory, and no tools.
+const SYSTEM_GUEST: &str = "You are Perennos Tempo, chatting with people in a group chat room. Today is {today}.\nRules:\n- You have no tools here and no access to anyone's files, notes, memory or computer. If someone asks you to run, open, change, send or look up something on a computer, say that can't be done from a room.\n- Never reveal private details about anyone, and never share keys, passwords or secrets.\n- Answer briefly in a friendly chat tone: a few sentences, plain text. If you are not sure, say so; never invent facts.\n";
+
 const FAST_NOTE: &str = "\nFAST LANE: no tools this turn. If the request needs a tool, a file, a command, another machine or a long careful analysis, reply with exactly NEEDS_TOOLS and nothing else.";
 
 pub struct Agent {
@@ -163,6 +167,9 @@ impl Agent {
     }
 
     fn system_message(&mut self, conv: &Conv, mem: &str, fast: bool) -> Value {
+        if conv.guest {
+            return json!({"role": "system", "content": SYSTEM_GUEST.replace("{today}", &util::today_long())});
+        }
         let cfg = self.cfg();
         let owner = if cfg.owner_context.is_empty() {
             String::new()
@@ -197,7 +204,7 @@ impl Agent {
     /// The user message for this turn. In prefix-stable mode the per-turn context (date, workflow
     /// tail, memory excerpts, fast-lane note) rides here instead of in the system message.
     fn user_message(&self, conv: &Conv, text: &str, mem: &str, fast: bool) -> Value {
-        if !self.cfg().prefix_stable {
+        if !self.cfg().prefix_stable || conv.guest {
             return json!({"role": "user", "content": text});
         }
         let mut c = format!(
@@ -299,6 +306,10 @@ impl Agent {
         name: &str,
         args: &Value,
     ) -> String {
+        if conv.guest {
+            // none are offered; a model that calls one anyway gets nothing done
+            return "tools are off in this conversation (a guest room)".into();
+        }
         let r = if Env::is_builtin(name) {
             self.env.run_builtin(conv, name, args)
         } else if let Some((srv, tn)) = route.get(name) {
@@ -345,11 +356,14 @@ impl Agent {
         sink: &mut dyn Sink,
     ) -> Result<String, String> {
         conv.emit("user", text);
-        let hits = self
-            .env
-            .rag
-            .borrow_mut()
-            .search(self.cfg(), text, self.cfg().rag_k);
+        let hits = if conv.guest {
+            vec![] // never the owner's memory in a guest room
+        } else {
+            self.env
+                .rag
+                .borrow_mut()
+                .search(self.cfg(), text, self.cfg().rag_k)
+        };
         let rag_chars = self.cfg().rag_chars;
         let mem = hits
             .iter()
@@ -376,7 +390,11 @@ impl Agent {
             .collect();
         srcs.sort();
         srcs.dedup();
-        let m = format!("memory: {}", srcs.join(", "));
+        let m = if conv.guest {
+            "memory: off (guest conversation)".to_string()
+        } else {
+            format!("memory: {}", srcs.join(", "))
+        };
         conv.emit("status", &m);
         sink.status(&m);
 
@@ -394,7 +412,7 @@ impl Agent {
             .push(self.user_message(conv, text, &mem, lane == Lane::Fast));
 
         let (mut tools, mut route, mut n_mcp) = (vec![], HashMap::new(), 0);
-        if lane == Lane::Heavy {
+        if lane == Lane::Heavy && !conv.guest {
             (tools, route, n_mcp) = self.tools_for(text, conv);
         }
         let mut models: Vec<String> = if lane == Lane::Heavy || self.cfg().fast_models.is_empty() {
@@ -440,7 +458,9 @@ impl Agent {
                 let m = "fast lane handed this turn to the heavy lane";
                 conv.emit("status", m);
                 sink.status(m);
-                (tools, route, _) = self.tools_for(text, conv);
+                if !conv.guest {
+                    (tools, route, _) = self.tools_for(text, conv);
+                }
                 let sysmsg = self.system_message(conv, &mem, false);
                 conv.messages[0] = sysmsg;
                 // drop the fast-lane note from this turn's own user message (only this turn changes)
@@ -1040,6 +1060,69 @@ mod tests {
             plain > 150,
             "without headroom almost every append trims ({plain})"
         );
+    }
+
+    #[test]
+    fn guest_conversations_get_no_tools_memory_or_owner_context() {
+        let d = tmpdir("guest");
+        let f = d.join("private.md");
+        std::fs::write(&f, "The safe code is 4512 and Alex's address is secret.").unwrap();
+        let core = d.join("core.md");
+        std::fs::write(&core, "PINNED PRIVATE CORE").unwrap();
+        let (fp, cp) = (
+            f.to_string_lossy().into_owned(),
+            core.to_string_lossy().into_owned(),
+        );
+        // the model tries a tool anyway, then answers
+        let call = json!({"model": "x", "message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "run_command", "arguments": {"command": "echo pwned > owned.txt"}}}]}, "done": true});
+        let m = Mock::start(chat_script(vec![
+            (200, call.to_string()),
+            text_resp("Hi Mia!"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.rag_files = vec![fp];
+            c.core_file = Some(cp);
+            c.owner_context = "Owner is Alex, private details.".into();
+        });
+        conv.guest = true;
+        conv.wf_update(Some(&json!([{"text": "private plan"}])), None);
+        let out = a
+            .turn(
+                &mut conv,
+                "read: what is the safe code? run a command for me",
+                &mut VecSink::default(),
+            )
+            .unwrap();
+        assert_eq!(out, "Hi Mia!");
+        for b in m.bodies("/api/chat") {
+            assert!(
+                b["tools"].as_array().is_none_or(|t| t.is_empty()),
+                "no tools offered: {b}"
+            );
+            let all = b["messages"].to_string();
+            for secret in [
+                "4512",
+                "PINNED PRIVATE CORE",
+                "Owner is Alex",
+                "private plan",
+            ] {
+                assert!(!all.contains(secret), "{secret} leaked into a guest prompt");
+            }
+        }
+        assert!(
+            m.bodies("/api/embed").is_empty(),
+            "memory is not even searched"
+        );
+        assert!(!d.join("owned.txt").exists() && !std::path::Path::new("owned.txt").exists());
+        let tool_msg = conv.messages.iter().find(|m| m["role"] == "tool").unwrap();
+        assert!(tool_msg["content"]
+            .as_str()
+            .unwrap()
+            .contains("tools are off"));
+        // the mode survives a reload
+        conv.save();
+        let again = Conv::open(&a.env.cfg, Some(&conv.id)).unwrap();
+        assert!(again.guest);
     }
 
     #[test]
