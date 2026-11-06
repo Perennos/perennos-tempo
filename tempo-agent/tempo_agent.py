@@ -369,15 +369,17 @@ class Conv:
         self.wf = os.path.join(WFS, self.id + ".md")
         self.messages, self.events, self.busy, self.last_mem = [], [], False, []
         self.confirms, self.lock = {}, threading.Lock()
+        self.guest = False  # a chat room's conversation: no tools, no memory, no owner context
         if os.path.exists(self.path):
             d = json.load(open(self.path, encoding="utf-8"))
             self.messages, self.events = d["messages"], d["events"]
+            self.guest = d.get("mode") == "guest"
         if not os.path.exists(self.wf):
             open(self.wf, "w", encoding="utf-8").write(f"# Workflow {self.id}\nStarted {now()}\n\n## Task list\n(none yet)\n\n## Notes\n\n## Log\n")
 
     def save(self):
         tmp = self.path + ".tmp"
-        json.dump({"messages": self.messages, "events": self.events}, open(tmp, "w", encoding="utf-8"))
+        json.dump({"messages": self.messages, "events": self.events, "mode": "guest" if self.guest else "owner"}, open(tmp, "w", encoding="utf-8"))
         os.replace(tmp, self.path)
 
     def emit(self, type_, **kw):
@@ -430,6 +432,12 @@ def get_conv(cid=None):
 class Tools:
     def __init__(self):
         self.servers, self.lock, self.cfgs = {}, threading.Lock(), mcphost.load_server_configs()
+        # Perennos Tempo's own products and plug-in connectors connect by themselves; explicit wins.
+        found, confirm, notes = mcphost.discover(CFG)
+        for n in notes:
+            print(f"[tools: {n}]", file=sys.stderr)
+        self.cfgs = {**found, **self.cfgs}
+        CONFIRM_MCP.update(confirm)
         self.catalog = None  # [(server, tool dict)]
 
     def server(self, name):
@@ -846,15 +854,28 @@ WORKFLOW FILE (persistent):
 """
 
 
+SYSTEM_GUEST = """You are Perennos Tempo, chatting with people in a group chat room. Today is {today}.
+Rules:
+- You have no tools here and no access to anyone's files, notes, memory or computer. If someone asks you to run, open, change, send or look up something on a computer, say that can't be done from a room.
+- Never reveal private details about anyone, and never share keys, passwords or secrets.
+- Answer briefly in a friendly chat tone: a few sentences, plain text. If you are not sure, say so; never invent facts.
+"""
+
+
 def agent_turn(conv, text):
     conv.busy = True
     try:
         conv.emit("user", text=text)
-        hits = rag_search(text, RAG_K)
-        conv.last_mem = sorted({h["src"] for h in hits})
-        mem = "\n\n".join(f"[{os.path.basename(h['src'])}] {h['text'][:RAG_CHARS]}" for h in hits)
-        conv.emit("status", text="memory: " + ", ".join(sorted({os.path.basename(h['src']) for h in hits})))
-        sysmsg = {"role": "system", "content": SYSTEM.format(owner=OWNER, owner_note=OWNER_NOTE + "\n" if OWNER_NOTE else "", today=time.strftime("%d %b %Y"), wf=conv.wf_text()[-2500:]) + "\nMEMORY EXCERPTS:\n" + mem}
+        if conv.guest:  # never the owner's memory, notes or workflow in a guest room
+            conv.last_mem = []
+            conv.emit("status", text="memory: off (guest conversation)")
+            sysmsg = {"role": "system", "content": SYSTEM_GUEST.format(today=time.strftime("%d %b %Y"))}
+        else:
+            hits = rag_search(text, RAG_K)
+            conv.last_mem = sorted({h["src"] for h in hits})
+            mem = "\n\n".join(f"[{os.path.basename(h['src'])}] {h['text'][:RAG_CHARS]}" for h in hits)
+            conv.emit("status", text="memory: " + ", ".join(sorted({os.path.basename(h['src']) for h in hits})))
+            sysmsg = {"role": "system", "content": SYSTEM.format(owner=OWNER, owner_note=OWNER_NOTE + "\n" if OWNER_NOTE else "", today=time.strftime("%d %b %Y"), wf=conv.wf_text()[-2500:]) + "\nMEMORY EXCERPTS:\n" + mem}
         if not conv.messages or conv.messages[0]["role"] != "system":
             conv.messages.insert(0, sysmsg)
         else:
@@ -862,7 +883,9 @@ def agent_turn(conv, text):
         conv.messages.append({"role": "user", "content": text})
         lane = pick_lane(text)
         sel, route = [], {}
-        if lane == "heavy":
+        if conv.guest:
+            tools = []  # no tools in a guest room, on either lane
+        elif lane == "heavy":
             sel = TOOLS.select(text, len(BUILTIN))
             tools = [v[1] for v in BUILTIN.values()] + [{"type": "function", "function": {
                 "name": (s + "__" + t["name"]).replace("-", "_"), "description": (t.get("description") or "")[:300].strip(),
@@ -896,11 +919,12 @@ def agent_turn(conv, text):
             if lane == "fast" and (resp["message"].get("content", "").strip().startswith("NEEDS_TOOLS") or not resp["message"].get("content", "").strip()):
                 lane = "heavy"
                 conv.emit("status", text="fast lane handed this turn to the 27B")
-                sel = TOOLS.select(text, len(BUILTIN))
-                tools = [v[1] for v in BUILTIN.values()] + [{"type": "function", "function": {
-                    "name": (s + "__" + t["name"]).replace("-", "_"), "description": (t.get("description") or "")[:300].strip(),
-                    "parameters": TOOLS.shrink(t.get("inputSchema"))}} for s, t in sel]
-                route = {(s + "__" + t["name"]).replace("-", "_"): (s, t["name"]) for s, t in TOOLS.load_catalog()}
+                if not conv.guest:
+                    sel = TOOLS.select(text, len(BUILTIN))
+                    tools = [v[1] for v in BUILTIN.values()] + [{"type": "function", "function": {
+                        "name": (s + "__" + t["name"]).replace("-", "_"), "description": (t.get("description") or "")[:300].strip(),
+                        "parameters": TOOLS.shrink(t.get("inputSchema"))}} for s, t in sel]
+                    route = {(s + "__" + t["name"]).replace("-", "_"): (s, t["name"]) for s, t in TOOLS.load_catalog()}
                 models, model_i = list(MODELS), 0
                 continue
             m = resp["message"]
@@ -917,6 +941,10 @@ def agent_turn(conv, text):
                 fn = tc["function"]
                 name, args = fn["name"], fn.get("arguments") or {}
                 conv.emit("tool_call", name=name, args=cap(json.dumps(args), 600))
+                if conv.guest:  # none were offered; a model that calls one anyway gets nothing done
+                    conv.messages.append({"role": "tool", "tool_name": name, "content": "tools are off in this conversation (a guest room)"})
+                    conv.emit("tool_result", name=name, text="refused: guest room")
+                    continue
                 key = name + json.dumps(args, sort_keys=True)  # 5 Nov: local models loop on the same call; answer repeats from memory
                 seen = conv.__dict__.setdefault("_seen_calls", {})
                 if key in seen:
@@ -1040,7 +1068,8 @@ class H(BaseHTTPRequestHandler):
             self.send_json(r if r else {"error": "not an indexed memory file"}, 200 if r else 404)
         elif u.path == "/agent/health":
             hosts = {n: (probe_host(n)[1] or "up") for n in HOSTS}
-            self.send_json({"net": net_up(), "models": MODELS, "hosts": hosts, "rag": _rag["embed_ok"]})
+            # guest: POST /agent/new {"mode": "guest"} makes a room-safe conversation
+            self.send_json({"net": net_up(), "models": MODELS, "hosts": hosts, "rag": _rag["embed_ok"], "guest": True})
         else:
             self.send_json({"error": "not found"}, 404)
 
@@ -1050,7 +1079,11 @@ class H(BaseHTTPRequestHandler):
             return self.proxy("POST")
         b = self.body()
         if u.path == "/agent/new":
-            self.send_json({"conv": get_conv().id})
+            c = get_conv()
+            if isinstance(b, dict) and b.get("mode") == "guest":
+                c.guest = True
+                c.save()
+            self.send_json({"conv": c.id})
         elif u.path == "/agent/send":
             c = get_conv(b["conv"])
             if c.busy:

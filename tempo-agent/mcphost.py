@@ -1,6 +1,6 @@
 """Minimal stdio MCP client (stdlib only). Loads the same mcpServers Claude Code uses.
 Never prints env values. One reader thread per server; calls are matched by JSON-RPC id."""
-import json, os, subprocess, threading, itertools, queue, time
+import glob, json, os, re, subprocess, threading, itertools, queue, time
 
 CLAUDE_JSON = os.path.expanduser(os.environ.get("TEMPO_CLAUDE_JSON") or "~/.claude.json")
 # Project folders whose MCP servers load too (TEMPO_MCP_PROJECT_DIRS, os.pathsep-separated).
@@ -28,6 +28,105 @@ def load_server_configs():
             except Exception:
                 pass
     return {k: v for k, v in out.items() if v.get("command")}  # stdio only
+
+
+# ---------------------------------------------------------------- Perennos Tempo products, no setup
+# tempo-vault, tempo-studio and tempo-room found next to this harness (then TEMPO_BIN, then PATH)
+# connect as MCP servers with fixed arguments; <tempo home>/connectors/*.json, and the same in each
+# pack (<tempo home>/packs/<name>/), add more. Explicit mcpServers always win. TEMPO_AUTO_TOOLS=0
+# or "auto_tools": false turns it off. Overwriting, renaming or trashing a note, and posting into a
+# chat room, ask first. Same rules as perennos-tempo-local-agent/src/products.rs.
+
+def bin_dirs():
+    d = [os.path.dirname(os.path.abspath(__file__))]
+    for var in ("TEMPO_BIN", "PATH"):
+        d += [p for p in os.environ.get(var, "").split(os.pathsep) if p]
+    return d
+
+
+def find_bin(name, dirs=None):
+    names = [name + ".exe", name] if os.name == "nt" else [name]
+    for d in (bin_dirs() if dirs is None else dirs):
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def tempo_home(cfg):
+    return os.path.expanduser(os.environ.get("TEMPO_HOME") or cfg.get("tempo_home") or "~/.tempo")
+
+
+def _json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def discover(cfg=None, dirs=None):
+    """(servers, confirm, notes): what Tempo connects by itself on this machine."""
+    cfg = cfg or {}
+    servers, confirm, notes = {}, set(), []
+    if cfg.get("auto_tools") is False or os.environ.get("TEMPO_AUTO_TOOLS", "1").strip().lower() in ("0", "false", "off", "no"):
+        return servers, confirm, ["automatic tools are off"]
+    vault, vb = os.environ.get("TEMPO_VAULT") or cfg.get("vault"), find_bin("tempo-vault", dirs)
+    if vb and vault:
+        v = os.path.expanduser(vault)
+        if os.path.isdir(v):
+            args = ["mcp"]
+            if cfg.get("vault_write", True):
+                args.append("--write")
+                confirm |= {("vault", "vault_write"), ("vault", "vault_rename"), ("vault", "vault_trash")}
+            servers["vault"] = {"command": vb, "args": args + ["--vault", v]}
+            notes.append(f"vault: {v} ({vb})" + ("" if cfg.get("vault_write", True) else ", read-only"))
+        else:
+            notes.append(f"vault: not connected, {v} is not a folder")
+    elif vb:
+        notes.append('vault: tempo-vault is here; set TEMPO_VAULT (or "vault" in agent-config.json) to connect it')
+    elif vault:
+        notes.append("vault: a vault is set but tempo-vault was not found next to Tempo, in TEMPO_BIN or on PATH")
+    sb = find_bin("tempo-studio", dirs)
+    if sb:
+        env_roots = os.environ.get("TEMPO_STUDIO_ROOTS")
+        roots = env_roots.split(os.pathsep) if env_roots else (cfg.get("studio_roots") or [os.path.join(os.path.expanduser("~"), "Music")])
+        roots = [os.path.expanduser(r) for r in roots if r and os.path.isdir(os.path.expanduser(r))]
+        if roots:
+            servers["studio"] = {"command": sb, "args": ["mcp"] + [a for r in roots for a in ("--allow-root", r)]}
+            notes.append(f"studio: {', '.join(roots)} ({sb})")
+        else:
+            notes.append('studio: tempo-studio is here; set TEMPO_STUDIO_ROOTS (or "studio_roots") to the folders it may use')
+    rb = find_bin("tempo-room", dirs)
+    if rb:
+        servers["room"] = {"command": rb, "args": ["mcp"]}
+        confirm.add(("room", "room_post"))
+        notes.append(f"room: {rb}")
+    home = tempo_home(cfg)
+    files = sorted(glob.glob(os.path.join(home, "connectors", "*.json")))
+    for p in sorted(glob.glob(os.path.join(home, "packs", "*", ""))):
+        try:
+            man = _json(os.path.join(p, "pack.json"))
+        except Exception:
+            man = {}
+        if man.get("enabled") is False:
+            notes.append(f"pack {os.path.basename(os.path.normpath(p))}: off")
+            continue
+        files += sorted(glob.glob(os.path.join(p, "connectors", "*.json")))
+    for f in files:
+        try:
+            j = _json(f)
+        except Exception:
+            notes.append(f"connector {f} skipped: not JSON")
+            continue
+        if j.get("enabled") is False:
+            continue
+        name = j.get("name") or os.path.splitext(os.path.basename(f))[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name) or not j.get("command"):
+            notes.append(f"connector {f} skipped: it needs a simple name and a command")
+            continue
+        confirm = {c for c in confirm if c[0] != name} | {(name, t) for t in j.get("confirm") or []}
+        servers[name] = {"command": os.path.expanduser(j["command"]), "args": list(j.get("args") or []), "env": dict(j.get("env") or {})}
+        notes.append(f"connector {name}: {f}")
+    return servers, confirm, notes
 
 
 class McpServer:

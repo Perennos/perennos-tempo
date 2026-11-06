@@ -60,6 +60,16 @@ pub struct Config {
     pub lease_status_cmd: Option<String>,
     pub lease_acquire_cmd: Option<String>,
     pub lease_release_cmd: Option<String>,
+    /// Connect Perennos Tempo's own products and connector files by themselves (products.rs).
+    pub auto_tools: bool,
+    /// The Tempo Vault folder (env TEMPO_VAULT wins).
+    pub vault: Option<String>,
+    /// Let Tempo write to the vault (history is kept; overwrite, rename and trash ask first).
+    pub vault_write: bool,
+    /// Folders Tempo Studio may read and write (env TEMPO_STUDIO_ROOTS wins; default ~/Music).
+    pub studio_roots: Vec<String>,
+    /// Where connectors/ and packs/ live (env TEMPO_HOME wins; default ~/.tempo).
+    pub tempo_home: Option<String>,
 }
 
 fn strs(v: &Value, k: &str) -> Option<Vec<String>> {
@@ -137,6 +147,11 @@ impl Config {
             offline_probe: "1.1.1.1:443".into(),
             hosts: BTreeMap::new(),
             mcp_config: None,
+            auto_tools: true,
+            vault: None,
+            vault_write: true,
+            studio_roots: vec![],
+            tempo_home: None,
             mcp_skip: vec![],
             mcp_blocked: BTreeMap::new(),
             mcp_confirm: vec![],
@@ -257,6 +272,17 @@ impl Config {
             }
         }
         c.mcp_config = string(v, "mcp_config");
+        if let Some(b) = v.get("auto_tools").and_then(|x| x.as_bool()) {
+            c.auto_tools = b;
+        }
+        c.vault = string(v, "vault");
+        if let Some(b) = v.get("vault_write").and_then(|x| x.as_bool()) {
+            c.vault_write = b;
+        }
+        if let Some(x) = strs(v, "studio_roots") {
+            c.studio_roots = x;
+        }
+        c.tempo_home = string(v, "tempo_home");
         if let Some(x) = strs(v, "mcp_skip") {
             c.mcp_skip = x;
         }

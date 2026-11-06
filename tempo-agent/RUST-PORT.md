@@ -58,7 +58,8 @@ Nothing machine-specific is in the code.
 | Engine URL | `OLLAMA_URL` (or `TEMPO_OLLAMA`), else `ollama_url` in the config file, else `http://127.0.0.1:11434` |
 | Config file | `--config PATH` or `TEMPO_AGENT_CONFIG`; see `perennos-tempo-local-agent/config.example.json` |
 | Run-time data | `data_dir`, or `TEMPO_AGENT_DATA`, else `./tempo-agent-data` (git-ignored) |
-| MCP servers | Only from a file you name: `--mcp-config`, `TEMPO_MCP_CONFIG` or `mcp_config`. It may be a `{"mcpServers": {...}}` file or your `~/.claude.json`; with the latter, the per-project servers and `.mcp.json` of the folders in `TEMPO_MCP_PROJECT_DIRS` load too. Nothing loads implicitly, because those files can hold tokens in `env` blocks. |
+| MCP servers | From a file you name: `--mcp-config`, `TEMPO_MCP_CONFIG` or `mcp_config`. It may be a `{"mcpServers": {...}}` file or your `~/.claude.json`; with the latter, the per-project servers and `.mcp.json` of the folders in `TEMPO_MCP_PROJECT_DIRS` load too. Those files are never read implicitly, because they can hold tokens in `env` blocks. |
+| Tempo's own tools | Automatic: `tempo-vault`, `tempo-studio` and `tempo-room` next to the agent (or in `TEMPO_BIN`, or on PATH) connect themselves with fixed arguments; connector files in `~/.tempo/connectors/` and packs add more. Explicit servers win; `TEMPO_AUTO_TOOLS=0` or `"auto_tools": false` turns it off. See [CONNECTORS.md](CONNECTORS.md). |
 
 The Python harness reads `agent-config.json` in this folder (see `agent-config.example.json`) and `TEMPO_CLAUDE_JSON`
 for its MCP servers. The two config files have different keys; keep both local, never committed.
@@ -78,6 +79,8 @@ Everything the harness does in its agent loop, plus a few things the Python vers
 | `Conv`, workflow file | `conv.rs` | Conversations saved atomically; `workflows/<conv>.md` with task list, notes and log |
 | Built-in tools | `tools.rs`, `fstools.rs` | `list_dir`, `read_file`, `write_file`, `trash`, `run_command`, `fetch_url`, `search_memory`, `workflow_update`, `delegate`, `comfy_image`, plus new `edit_file`, `grep`, `glob` |
 | `redact`, `cap`, offline probe | `util.rs` | |
+| (new, both) product tools and connectors | `products.rs`, `mcphost.discover` | Tempo's own products and plug-in connector files, with no setup ([CONNECTORS.md](CONNECTORS.md)) |
+| (new, both) guest conversations | `agent.rs`, `conv.rs`, `server.rs`; `agent_turn` | `POST /agent/new {"mode":"guest"}`: no tools, no memory, no owner context, for chat rooms |
 
 ## What is left
 

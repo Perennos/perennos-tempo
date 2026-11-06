@@ -135,7 +135,9 @@ fn real_main() -> Result<(), String> {
         &getenv,
     )?;
     config::ensure_dirs(&cfg)?;
-    let servers = match config::mcp_path(args.mcp.as_deref(), getenv("TEMPO_MCP_CONFIG"), &cfg) {
+    let mut cfg = cfg;
+    let mut servers = match config::mcp_path(args.mcp.as_deref(), getenv("TEMPO_MCP_CONFIG"), &cfg)
+    {
         Some(p) => {
             let project_dirs: Vec<std::path::PathBuf> = std::env::var_os("TEMPO_MCP_PROJECT_DIRS")
                 .map(|v| {
@@ -149,6 +151,16 @@ fn real_main() -> Result<(), String> {
         }
         None => Default::default(),
     };
+    // Perennos Tempo's own products and plug-in connectors, connected by themselves.
+    let found = tempo_local_agent::products::discover(
+        &cfg,
+        &getenv,
+        &tempo_local_agent::products::bin_dirs(&getenv),
+    );
+    for n in &found.notes {
+        eprintln!("[tools: {n}]");
+    }
+    tempo_local_agent::products::merge(&mut servers, &mut cfg, found);
     if let Some(opts) = serve_opts {
         if !args.prompt.is_empty() || args.conv.is_some() || args.reindex {
             return Err("serve takes no prompt, --conv or --reindex".into());

@@ -6,6 +6,7 @@ pub mod conv;
 pub mod fstools;
 pub mod mcp;
 pub mod ollama;
+pub mod products;
 pub mod rag;
 pub mod server;
 pub mod tools;
