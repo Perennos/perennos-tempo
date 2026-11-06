@@ -16,6 +16,9 @@ pub struct HostCfg {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub ollama_url: String,
+    /// More Ollama addresses (your other machines), used in this order when `ollama_url` cannot
+    /// be reached; a conversation stays on the engine that served it last.
+    pub ollama_fallbacks: Vec<String>,
     pub data_dir: PathBuf,
     pub models: Vec<String>,
     pub fast_models: Vec<String>,
@@ -61,6 +64,9 @@ pub struct Config {
     /// Hosts `fetch_url` may read without asking (`example.com`, or `*.example.com` for its
     /// subdomains). Any other host asks the owner once per conversation.
     pub fetch_allow_hosts: Vec<String>,
+    /// Pages `fetch_url` keeps for later reads (0: none). A full cache takes no new pages; it
+    /// never deletes to make room.
+    pub fetch_cache_max: usize,
     /// Packs (`<tempo home>/packs/<name>/`) whose connectors may be started. A pack comes from
     /// someone else and its connectors are programs it supplies, so none runs until listed here.
     pub packs_allow: Vec<String>,
@@ -141,6 +147,7 @@ impl Config {
             .unwrap_or_else(|| crate::home::agent_data(&|k| std::env::var(k).ok(), None));
         Config {
             ollama_url: "http://127.0.0.1:11434".into(),
+            ollama_fallbacks: vec![],
             models: vec!["local-heavy".into()],
             fast_models: vec!["local-fast".into()],
             num_ctx: BTreeMap::new(),
@@ -171,6 +178,7 @@ impl Config {
             offline_probe: "1.1.1.1:443".into(),
             fetch_allow_private: vec![],
             fetch_allow_hosts: vec![],
+            fetch_cache_max: 500,
             command_allow: vec![],
             command_deny: vec![],
             permission: crate::conv::Permission::Default,
@@ -226,6 +234,13 @@ impl Config {
         if let Some(x) = string(v, "ollama_url") {
             c.ollama_url = x.trim_end_matches('/').to_string();
         }
+        if let Some(x) = strs(v, "ollama_fallbacks") {
+            c.ollama_fallbacks = x
+                .into_iter()
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                .collect();
+        }
         if let Some(x) = strs(v, "models").filter(|x| !x.is_empty()) {
             c.models = x;
         }
@@ -261,6 +276,7 @@ impl Config {
             ("max_steps", &mut c.max_steps),
             ("tool_cap", &mut c.tool_cap),
             ("retries", &mut c.retries),
+            ("fetch_cache_max", &mut c.fetch_cache_max),
         ] {
             if let Some(n) = num(v, k) {
                 *slot = n as usize;

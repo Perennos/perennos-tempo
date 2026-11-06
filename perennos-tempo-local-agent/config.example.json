@@ -32,6 +32,8 @@
       "trust_reads": false
     }
   },
+  "ollama_fallbacks": ["http://second-machine.example:11434"],
+  "fetch_cache_max": 500,
   "fetch_allow_hosts": [],
   "fetch_allow_private": [],
   "packs_allow": [],

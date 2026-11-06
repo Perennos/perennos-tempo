@@ -272,6 +272,21 @@ fn mode_help(p: Permission) -> &'static str {
     }
 }
 
+/// How long to wait before retry `attempt` (1, 2, ...): about twice as long each time, at most
+/// eight times `base_ms`, give or take a fifth, so retries from several places do not land at once.
+pub fn backoff(base_ms: u64, attempt: u32) -> Duration {
+    if base_ms == 0 {
+        return Duration::ZERO;
+    }
+    let exp = base_ms.saturating_mul(1 << attempt.saturating_sub(1).min(3));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let jitter = i64::from(nanos % 41) - 20; // -20..=20 per cent
+    Duration::from_millis((exp as i64 + exp as i64 * jitter / 100).max(0) as u64)
+}
+
 /// Text reaches the caller's sink only as status lines (for work the owner should not see as a
 /// reply, such as the model writing a summary).
 struct StatusOnly<'a>(&'a mut dyn Sink);
@@ -490,6 +505,10 @@ impl Agent {
         hold: &mut Hold,
     ) -> Result<ChatResult, String> {
         let r = self.chat_retrying(models, idx, messages, tools, conv, sink, hold)?;
+        if let Some(f) = &r.info.failover {
+            conv.emit("status", f);
+            sink.status(f);
+        }
         let u = &mut conv.usage;
         u.requests += 1;
         u.prompt_tok += r.info.prompt_tok.unwrap_or(0);
@@ -511,11 +530,19 @@ impl Agent {
     ) -> Result<ChatResult, String> {
         let cfg = self.cfg();
         let think = conv.think;
+        // the conversation's own key for engine affinity (ids repeat across data folders)
+        let key = conv.path.to_string_lossy().into_owned();
         loop {
             let model = models[*idx].clone();
-            let mut last = match ollama::chat_with(cfg, &model, messages, tools, think, &mut |t| {
-                hold.push(t, sink)
-            }) {
+            let mut last = match ollama::chat_pooled(
+                cfg,
+                Some(&key),
+                &model,
+                messages,
+                tools,
+                think,
+                &mut |t| hold.push(t, sink),
+            ) {
                 Ok(r) => return Ok(r),
                 Err(e) => e,
             };
@@ -527,10 +554,16 @@ impl Agent {
                 );
                 conv.emit("status", &msg);
                 sink.status(&msg);
-                std::thread::sleep(Duration::from_millis(cfg.retry_delay_ms));
-                match ollama::chat_with(cfg, &model, messages, tools, think, &mut |t| {
-                    hold.push(t, sink)
-                }) {
+                std::thread::sleep(backoff(cfg.retry_delay_ms, attempt as u32));
+                match ollama::chat_pooled(
+                    cfg,
+                    Some(&key),
+                    &model,
+                    messages,
+                    tools,
+                    think,
+                    &mut |t| hold.push(t, sink),
+                ) {
                     Ok(r) => return Ok(r),
                     Err(e) => last = e,
                 }
@@ -2055,6 +2088,73 @@ mod tests {
             b[1].get("think").is_none(),
             "a model that cannot think is asked again without it"
         );
+    }
+
+    #[test]
+    fn a_machine_that_is_off_is_passed_over_and_the_conversation_stays_where_it_went() {
+        // an address nothing listens on: bind, note the port, let it go
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let m = Mock::start(chat_script(vec![
+            text_resp("from the other machine"),
+            text_resp("again"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.ollama_url = dead.clone();
+            c.ollama_fallbacks = vec![m.url.clone()];
+        });
+        let mut sink = VecSink::default();
+        assert_eq!(
+            a.turn(&mut conv, "please read the file", &mut sink)
+                .unwrap(),
+            "from the other machine"
+        );
+        assert!(
+            sink.status
+                .iter()
+                .any(|s| s.contains(&format!("engine {dead} cannot be reached"))
+                    && s.contains("answered")),
+            "{:?}",
+            sink.status
+        );
+        assert!(
+            sink.status
+                .iter()
+                .any(|s| s.contains(&format!(" on {}", m.url))),
+            "the timing line names the engine"
+        );
+        // the next turn goes straight to the engine that has this conversation's prompt cached
+        let key = conv.path.to_string_lossy().into_owned();
+        assert_eq!(ollama::engine_order(&a.env.cfg, Some(&key))[0], m.url);
+        let mut sink = VecSink::default();
+        assert_eq!(
+            a.turn(&mut conv, "please read it again", &mut sink)
+                .unwrap(),
+            "again"
+        );
+        assert!(
+            !sink.status.iter().any(|s| s.contains("cannot be reached")),
+            "{:?}",
+            sink.status
+        );
+        // a new conversation tries the main engine first again (a single failure is not a rest)
+        assert_eq!(ollama::engine_order(&a.env.cfg, None)[0], dead);
+        assert!(
+            ollama::unreachable("io: Connection refused (os error 111)")
+                && ollama::unreachable("timeout: connect")
+        );
+        assert!(!ollama::unreachable("HTTP 404: model not found"));
+    }
+
+    #[test]
+    fn retries_back_off_with_jitter() {
+        assert_eq!(backoff(0, 3), Duration::ZERO);
+        for (attempt, low, high) in [(1, 80, 120), (2, 160, 240), (4, 640, 960), (9, 640, 960)] {
+            let d = backoff(100, attempt).as_millis();
+            assert!((low..=high).contains(&d), "attempt {attempt}: {d} ms");
+        }
     }
 
     #[test]

@@ -12,13 +12,13 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Env {
     pub cfg: Config,
@@ -402,36 +402,6 @@ fn probe(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether an address is on the open internet: not this computer, not a private or link-local
-/// network (the cloud metadata address 169.254.169.254 is link-local), not carrier-grade NAT
-/// (Tailscale), not multicast.
-fn public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => {
-            let o = v.octets();
-            !(v.is_loopback()
-                || v.is_private()
-                || v.is_link_local()
-                || v.is_unspecified()
-                || v.is_broadcast()
-                || v.is_multicast()
-                || o[0] == 0
-                || (o[0] == 100 && o[1] & 0xc0 == 64))
-        }
-        IpAddr::V6(v) => match v.to_ipv4_mapped() {
-            Some(m) => public_ip(IpAddr::V4(m)),
-            None => {
-                let s = v.segments()[0];
-                !(v.is_loopback()
-                    || v.is_unspecified()
-                    || v.is_multicast()
-                    || s & 0xfe00 == 0xfc00
-                    || s & 0xffc0 == 0xfe80)
-            }
-        },
-    }
-}
-
 /// `Ok` when every address the host of `url` resolves to is public, or the host is one the owner
 /// listed in `fetch_allow_private`.
 fn check_fetch_target(url: &str, allow: &[String]) -> Result<(), String> {
@@ -448,16 +418,24 @@ fn check_fetch_target(url: &str, allow: &[String]) -> Result<(), String> {
             80
         });
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let addrs: Vec<_> = (bare, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("refused: cannot resolve {host}: {e}"))?
-        .collect();
-    if addrs.is_empty() || addrs.iter().any(|a| !public_ip(a.ip())) {
+    let addrs: Vec<_> = match (bare, port).to_socket_addrs() {
+        Ok(a) => a.collect(),
+        // through a proxy the proxy looks the name up (this computer may have no DNS of its
+        // own); an address written out is still checked, and the owner still approves the host
+        Err(_) if bare.parse::<std::net::IpAddr>().is_err() && proxied(&uri) => return Ok(()),
+        Err(e) => return Err(format!("refused: cannot resolve {host}: {e}")),
+    };
+    if addrs.is_empty() || addrs.iter().any(|a| !util::public_ip(a.ip())) {
         return Err(format!(
             "refused: {host} is on this computer or a private network (fetch_url reaches the internet only; the owner can list a host in fetch_allow_private)"
         ));
     }
     Ok(())
+}
+
+/// Whether a proxy from the environment carries requests to this address.
+fn proxied(uri: &ureq::http::Uri) -> bool {
+    ureq::Proxy::try_from_env().is_some_and(|p| !p.is_no_proxy(uri))
 }
 
 fn unescape_html(t: &str) -> String {
@@ -498,6 +476,62 @@ fn html_to_text(raw: &str) -> String {
         .trim()
         .to_string()
 }
+
+/// The https address to try first for a plain http one: a page read over http can be changed on
+/// the way (and could carry instructions). None for https, for an address with its own port, and
+/// for the owner's private hosts.
+fn https_first(url: &str, private_ok: &[String]) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    let host = uri
+        .host()?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if uri.port_u16().is_some() || private_ok.iter().any(|a| a.eq_ignore_ascii_case(&host)) {
+        return None;
+    }
+    Some(format!("https://{rest}"))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// "4 minutes ago", for a time in seconds since 1970.
+fn ago(t: u64) -> String {
+    let d = now_secs().saturating_sub(t);
+    let (n, unit) = match d {
+        0..=59 => return "moments ago".into(),
+        60..=3599 => (d / 60, "minute"),
+        3600..=86_399 => (d / 3600, "hour"),
+        _ => (d / 86_400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// FNV-1a: a stable file name for a cached address.
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// A page kept from an earlier read, as a CDN keeps one at its edge.
+struct Cached {
+    text: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    fetched: u64,
+    max_age: u64,
+}
+
+/// Seconds a page stays fresh when the site says nothing, and at most whatever it says.
+const FRESH_DEFAULT: u64 = 300;
+const FRESH_MAX: u64 = 86_400;
 
 fn unique_dest(dir: &Path, name: &str) -> PathBuf {
     let mut d = dir.join(name);
@@ -673,6 +707,71 @@ impl Env {
             }
         }
         Ok(format!("patch applied: {}", done.join("; ")))
+    }
+
+    fn cache_path(&self, url: &str) -> PathBuf {
+        self.cfg
+            .data_dir
+            .join("cache")
+            .join("fetch")
+            .join(format!("{:016x}.json", fnv(url)))
+    }
+
+    fn cache_get(&self, url: &str) -> Option<Cached> {
+        if self.cfg.fetch_cache_max == 0 {
+            return None;
+        }
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(self.cache_path(url)).ok()?).ok()?;
+        if v["url"] != url {
+            return None;
+        }
+        let s = |k: &str| v[k].as_str().map(str::to_string);
+        Some(Cached {
+            text: s("text")?,
+            etag: s("etag"),
+            last_modified: s("last_modified"),
+            fetched: v["fetched"].as_u64()?,
+            max_age: v["max_age"].as_u64().unwrap_or(FRESH_DEFAULT),
+        })
+    }
+
+    /// Keep a page for later reads, unless the site asks not to (`no-store`). A full cache
+    /// (`fetch_cache_max` pages) stops taking new pages rather than delete old ones.
+    fn cache_put(&self, url: &str, f: &util::Fetched, text: &str) {
+        if self.cfg.fetch_cache_max == 0 || f.no_store {
+            return;
+        }
+        let p = self.cache_path(url);
+        let Some(dir) = p.parent() else { return };
+        if !p.exists()
+            && std::fs::read_dir(dir).map(|r| r.count()).unwrap_or(0) >= self.cfg.fetch_cache_max
+        {
+            return;
+        }
+        let _ = std::fs::create_dir_all(dir);
+        let rec = json!({"url": url, "text": text, "etag": f.etag, "last_modified": f.last_modified, "fetched": now_secs(),
+            "max_age": f.max_age.unwrap_or(FRESH_DEFAULT).min(FRESH_MAX)});
+        let tmp = p.with_extension("tmp");
+        if std::fs::write(&tmp, rec.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+
+    /// Every read `fetch_url` makes, as a proxy keeps an access log: `logs/egress.jsonl`, one line
+    /// each, the address without its query (a query can hold a token).
+    fn egress(&self, conv: &Conv, url: &str, result: &str) {
+        let shown = url.split(['?', '#']).next().unwrap_or(url);
+        let rec = json!({"t": util::now_str(), "conv": conv.id, "url": util::redact(shown), "query": url.contains('?'),
+            "result": util::redact(&head_chars(result, 200))});
+        let _ = std::fs::create_dir_all(self.cfg.logs_dir());
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.cfg.logs_dir().join("egress.jsonl"))
+        {
+            let _ = writeln!(f, "{rec}");
+        }
     }
 
     /// Ask the owner, showing the whole request: nobody should approve text they could not read
@@ -966,30 +1065,115 @@ impl Env {
         Ok(())
     }
 
+    /// Read a web page. Like a careful proxy and a CDN in one: the owner approves each new host
+    /// once per conversation; every connection goes only to an internet address that was checked
+    /// at the moment of connecting; plain http tries https first; a page read lately comes from
+    /// the cache, a changed one is asked for with its validators, and while the site or the
+    /// internet is down the copy read before is served with its age; every read is logged.
     fn fetch_url(&self, conv: &Conv, a: &Value) -> Result<String, String> {
         let url = sarg(a, "url")?;
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok("refused: http(s) only".into());
         }
+        let cached = self.cache_get(url);
         if !net_up(&self.cfg) {
-            return Ok("offline: no internet right now. Use local memory (search_memory) or tell the user.".into());
+            let Some(c) = cached else {
+                return Ok("offline: no internet right now. Use local memory (search_memory) or tell the user.".into());
+            };
+            if let Err(no) = self.host_ok(conv, url) {
+                return Ok(no);
+            }
+            self.egress(conv, url, "offline: the cached copy");
+            return Ok(format!(
+                "(offline: this is the copy read {}; it may be out of date)\n{}",
+                ago(c.fetched),
+                c.text
+            ));
+        }
+        if let Some(c) = cached
+            .as_ref()
+            .filter(|c| now_secs().saturating_sub(c.fetched) < c.max_age)
+        {
+            if let Err(no) = self.host_ok(conv, url) {
+                return Ok(no);
+            }
+            self.egress(conv, url, "the cached copy (fresh)");
+            return Ok(c.text.clone());
         }
         let allow = &self.cfg.fetch_allow_private;
-        let raw = match util::get_text_checked(url, Duration::from_secs(20), 400_000, &|u| {
-            check_fetch_target(u, allow)?;
-            self.host_ok(conv, u)
-        }) {
-            Err(e) if e == "denied by user" || e.starts_with("refused: too long") => return Ok(e),
-            r => r,
+        let mut validators: Vec<(&str, String)> = vec![];
+        if let Some(c) = &cached {
+            validators.extend(c.etag.clone().map(|e| ("If-None-Match", e)));
+            validators.extend(c.last_modified.clone().map(|m| ("If-Modified-Since", m)));
         }
-        .map_err(|e| {
-            if e.starts_with("refused") {
-                e
-            } else {
-                format!("fetch failed: {e}")
+        let get = |u: &str| {
+            util::get_checked(
+                u,
+                Duration::from_secs(20),
+                400_000,
+                &|hop| {
+                    check_fetch_target(hop, allow)?;
+                    self.host_ok(conv, hop)
+                },
+                Some(allow),
+                &validators,
+            )
+        };
+        let mut note = "";
+        let got = match https_first(url, allow) {
+            Some(https) => match get(&https) {
+                Err(e) if !(e.starts_with("refused") || e == "denied by user") => {
+                    note = "(read over plain http: the site did not answer on https)\n";
+                    // when plain http fails too, both reasons are worth seeing
+                    get(url).map_err(|h| format!("https: {e}; http: {h}"))
+                }
+                r => r,
+            },
+            None => get(url),
+        };
+        match (got, cached) {
+            (Ok(f), Some(c)) if f.status == 304 => {
+                let kept = util::Fetched {
+                    etag: f.etag.clone().or(c.etag),
+                    last_modified: f.last_modified.clone().or(c.last_modified),
+                    ..f
+                };
+                self.cache_put(url, &kept, &c.text);
+                self.egress(conv, url, "304 not changed: the cached copy");
+                Ok(format!("{note}{}", c.text))
             }
-        })?;
-        Ok(html_to_text(&raw))
+            (Ok(f), _) if f.status == 304 => {
+                self.egress(conv, url, "304 with nothing cached");
+                Ok("fetch failed: the site answered 304 (not changed) to a first read".into())
+            }
+            (Ok(f), _) => {
+                let text = html_to_text(&f.text);
+                self.cache_put(url, &f, &text);
+                self.egress(
+                    conv,
+                    url,
+                    &format!("{} ({} chars)", f.status, text.chars().count()),
+                );
+                Ok(format!("{note}{text}"))
+            }
+            (Err(e), _) if e == "denied by user" || e.starts_with("refused") => {
+                self.egress(conv, url, &e);
+                Ok(e)
+            }
+            // the site is down: the copy read before, its age said plainly (stale-if-error)
+            (Err(e), Some(c)) => {
+                self.egress(conv, url, &format!("error ({e}): the cached copy"));
+                Ok(format!(
+                    "(the site could not be read: {e}; this is the copy read {}, which may be out of date)\n{}",
+                    ago(c.fetched),
+                    c.text
+                ))
+            }
+            (Err(e), None) => {
+                self.egress(conv, url, &format!("error: {e}"));
+                Ok(format!("fetch failed: {e}"))
+            }
+        }
     }
 
     fn search_memory(&self, a: &Value) -> Result<String, String> {
@@ -2006,6 +2190,136 @@ mod tests {
         assert!(!probe("127.0.0.1:1"));
     }
 
+    #[test]
+    fn pages_are_cached_revalidated_and_served_when_the_site_is_down() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let m = Mock::start_with_headers(move |r| {
+            h2.fetch_add(1, Ordering::SeqCst);
+            let tag = vec![
+                ("ETag".to_string(), "\"v1\"".to_string()),
+                ("Cache-Control".to_string(), "max-age=0".to_string()),
+            ];
+            match (r.path.as_str(), r.header("if-none-match")) {
+                ("/page", Some("\"v1\"")) => (304, tag, String::new()),
+                ("/page", _) => (200, tag, "<p>Version one</p>".into()),
+                ("/private", _) => (
+                    200,
+                    vec![("Cache-Control".to_string(), "no-store".to_string())],
+                    "secret page".into(),
+                ),
+                _ => (500, vec![], "down".into()),
+            }
+        });
+        let probe = m.url.trim_start_matches("http://").to_string();
+        let data = tmpdir("fetch-cache");
+        let setup = |probe: String| {
+            let d = data.clone();
+            env_with(Box::new(DenyAll), move |c| {
+                c.data_dir = d.clone();
+                c.offline_probe = probe;
+                c.fetch_allow_private = vec!["127.0.0.1".into()];
+                c.fetch_allow_hosts = vec!["127.0.0.1".into()];
+            })
+        };
+        let (e, c, _d) = setup(probe.clone());
+        let page = format!("{}/page", m.url);
+        assert_eq!(
+            run(&e, &c, "fetch_url", json!({"url": page})),
+            "Version one"
+        );
+        // stale at once (max-age=0): the next read asks with the validator and gets a 304
+        assert_eq!(
+            run(&e, &c, "fetch_url", json!({"url": page})),
+            "Version one"
+        );
+        let reqs = m.reqs.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[1].header("if-none-match"), Some("\"v1\""));
+        // a site that says no-store is never kept
+        assert_eq!(
+            run(
+                &e,
+                &c,
+                "fetch_url",
+                json!({"url": format!("{}/private", m.url)})
+            ),
+            "secret page"
+        );
+        assert!(e.cache_get(&format!("{}/private", m.url)).is_none());
+        // offline: the copy read before, said to be one
+        let (off, c2, _d2) = setup("127.0.0.1:1".into());
+        let r = run(&off, &c2, "fetch_url", json!({"url": page}));
+        assert!(
+            r.starts_with("(offline: this is the copy read moments ago")
+                && r.ends_with("Version one"),
+            "{r}"
+        );
+        assert!(run(
+            &off,
+            &c2,
+            "fetch_url",
+            json!({"url": format!("{}/never-read", m.url)})
+        )
+        .starts_with("offline:"));
+        // the site fails: a page read before is still served, with its age
+        std::fs::write(e.cache_path(&format!("{}/gone", m.url)), json!({"url": format!("{}/gone", m.url), "text": "old copy", "fetched": now_secs() - 7200, "max_age": 60}).to_string()).unwrap();
+        let r = run(
+            &e,
+            &c,
+            "fetch_url",
+            json!({"url": format!("{}/gone", m.url)}),
+        );
+        assert!(
+            r.contains("HTTP 500")
+                && r.contains("copy read 2 hours ago")
+                && r.ends_with("old copy"),
+            "{r}"
+        );
+        // every read is in the egress log, addresses without their queries
+        run(
+            &e,
+            &c,
+            "fetch_url",
+            json!({"url": format!("{}/page?token=abc", m.url)}),
+        );
+        let log = std::fs::read_to_string(e.cfg.logs_dir().join("egress.jsonl")).unwrap();
+        assert!(log.lines().count() >= 6, "{log}");
+        assert!(
+            log.contains("304 not changed")
+                && log.contains("offline: the cached copy")
+                && !log.contains("token=abc"),
+            "{log}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            5,
+            "the offline reads never reached the site"
+        );
+    }
+
+    #[test]
+    fn plain_http_tries_https_first() {
+        let private = vec!["10.0.0.9".to_string()];
+        assert_eq!(
+            https_first("http://example.com/a?b=1", &private).as_deref(),
+            Some("https://example.com/a?b=1")
+        );
+        assert_eq!(https_first("https://example.com/a", &private), None);
+        assert_eq!(
+            https_first("http://example.com:8080/a", &private),
+            None,
+            "a port of its own stays"
+        );
+        assert_eq!(
+            https_first("http://10.0.0.9/a", &private),
+            None,
+            "the owner's private hosts stay"
+        );
+    }
+
     /// Approves everything and keeps what it was asked.
     struct Ask(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
     impl Confirm for Ask {
@@ -2118,8 +2432,8 @@ mod tests {
             let r = run(&e, &c, "fetch_url", json!({"url": url}));
             assert!(r.starts_with("refused"), "{url}: {r}");
         }
-        assert!(public_ip("93.184.216.34".parse().unwrap()));
-        assert!(!public_ip("172.16.0.1".parse().unwrap()));
+        assert!(util::public_ip("93.184.216.34".parse().unwrap()));
+        assert!(!util::public_ip("172.16.0.1".parse().unwrap()));
     }
 
     #[test]

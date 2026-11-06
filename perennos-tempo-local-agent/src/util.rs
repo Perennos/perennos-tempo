@@ -340,9 +340,13 @@ impl Guard {
 
 // ---------------------------------------------------------------- HTTP
 pub fn agent(timeout: Duration, env_proxy: bool) -> ureq::Agent {
+    // a machine that is off should be noticed in seconds, not after the OS gives up on the
+    // connection (about two minutes), so the next engine or host can be tried
     let b = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(timeout));
+        .timeout_global(Some(timeout))
+        .timeout_connect(Some(timeout.min(CONNECT_TIMEOUT)))
+        .tls_config(tls());
     let b = if env_proxy { b } else { b.proxy(None) };
     b.build().into()
 }
@@ -379,6 +383,115 @@ pub fn get_text_capped(url: &str, timeout: Duration, limit: u64) -> Result<Strin
     get_text_checked(url, timeout, limit, &|_| Ok(()))
 }
 
+/// How long a connection may take to open (a machine that is off fails this fast).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// TLS settings for every request: the certificates in `SSL_CERT_FILE`, when it names a PEM
+/// bundle, replace the built-in list, as they do for curl, Python and OpenSSL (so a company's
+/// own authority, or a TLS-inspecting proxy's, works); otherwise the built-in list.
+pub fn tls() -> ureq::tls::TlsConfig {
+    static ROOTS: std::sync::OnceLock<Option<ureq::tls::RootCerts>> = std::sync::OnceLock::new();
+    let roots = ROOTS.get_or_init(|| {
+        let pem = std::fs::read(std::env::var_os("SSL_CERT_FILE")?).ok()?;
+        let certs: Vec<ureq::tls::Certificate<'static>> = ureq::tls::parse_pem(&pem)
+            .filter_map(|i| match i {
+                Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
+                _ => None,
+            })
+            .collect();
+        (!certs.is_empty()).then(|| ureq::tls::RootCerts::new_with_certs(&certs))
+    });
+    let b = ureq::tls::TlsConfig::builder();
+    match roots {
+        Some(r) => b.root_certs(r.clone()).build(),
+        None => b.build(),
+    }
+}
+
+/// Whether an address is on the open internet: not this computer, not a private or link-local
+/// network (the cloud metadata address 169.254.169.254 is link-local), not carrier-grade NAT
+/// (Tailscale), not multicast.
+pub fn public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            !(v.is_loopback()
+                || v.is_private()
+                || v.is_link_local()
+                || v.is_unspecified()
+                || v.is_broadcast()
+                || v.is_multicast()
+                || o[0] == 0
+                || (o[0] == 100 && o[1] & 0xc0 == 64))
+        }
+        IpAddr::V6(v) => match v.to_ipv4_mapped() {
+            Some(m) => public_ip(IpAddr::V4(m)),
+            None => {
+                let s = v.segments()[0];
+                !(v.is_loopback()
+                    || v.is_unspecified()
+                    || v.is_multicast()
+                    || s & 0xfe00 == 0xfc00
+                    || s & 0xffc0 == 0xfe80)
+            }
+        },
+    }
+}
+
+/// A name resolver that refuses, at the moment of connecting, any address that is not on the
+/// open internet. The addresses it checks are the ones the connection then uses, so a name that
+/// answers with a public address for a first look and a private one for the connection (DNS
+/// rebinding) gets nowhere. Hosts in `allow` (the owner's `fetch_allow_private`) pass, and so
+/// does the proxy when one is set (through a proxy, the proxy looks names up).
+#[derive(Debug)]
+struct PublicOnly {
+    allow: Vec<String>,
+}
+
+impl ureq::unversioned::resolver::Resolver for PublicOnly {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let addrs = ureq::unversioned::resolver::DefaultResolver::default()
+            .resolve(uri, config, timeout)?;
+        let host = uri
+            .host()
+            .unwrap_or("")
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let proxy = config
+            .proxy()
+            .is_some_and(|p| p.host().eq_ignore_ascii_case(host));
+        if proxy || self.allow.iter().any(|a| a.eq_ignore_ascii_case(host)) {
+            return Ok(addrs);
+        }
+        if addrs.iter().any(|a| !public_ip(a.ip())) {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refused: {host} is on this computer or a private network (fetch_url reaches the internet only; the owner can list a host in fetch_allow_private)"),
+            )));
+        }
+        Ok(addrs)
+    }
+}
+
+/// A page as fetched, with what a cache needs to ask again cheaply.
+#[derive(Debug, Clone, Default)]
+pub struct Fetched {
+    pub status: u16,
+    pub text: String,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    /// `Cache-Control: max-age`, in seconds.
+    pub max_age: Option<u64>,
+    /// `Cache-Control: no-store`: the site asks not to keep a copy.
+    pub no_store: bool,
+}
+
 /// Like `get_text_capped`, but `check` approves the address of the request and of every redirect
 /// (up to 5) before it is made, so a public page cannot send the agent on to an internal one.
 pub fn get_text_checked(
@@ -387,22 +500,53 @@ pub fn get_text_checked(
     limit: u64,
     check: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<String, String> {
-    let a: ureq::Agent = ureq::Agent::config_builder()
+    get_checked(url, timeout, limit, check, None, &[]).map(|f| f.text)
+}
+
+/// `get_text_checked` with more: with `public_only`, every connection is refused unless the
+/// address it goes to is on the internet (or its host is in the list); `headers` go on the first
+/// request (`If-None-Match`, `If-Modified-Since`), and a 304 answer comes back as it is.
+pub fn get_checked(
+    url: &str,
+    timeout: Duration,
+    limit: u64,
+    check: &dyn Fn(&str) -> Result<(), String>,
+    public_only: Option<&[String]>,
+    headers: &[(&str, String)],
+) -> Result<Fetched, String> {
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(timeout))
+        .timeout_connect(Some(timeout.min(CONNECT_TIMEOUT)))
+        .tls_config(tls())
         .max_redirects(0)
-        .build()
-        .into();
+        .build();
+    let a: ureq::Agent = match public_only {
+        Some(allow) => ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            PublicOnly {
+                allow: allow.to_vec(),
+            },
+        ),
+        None => config.into(),
+    };
     let mut cur = url.to_string();
-    for _ in 0..=5 {
+    for hop in 0..=5 {
         check(&cur)?;
-        let resp = a
-            .get(&cur)
-            .header("User-Agent", "PerennosTempo/1")
-            .call()
-            .map_err(|e| e.to_string())?;
+        let mut req = a.get(&cur).header("User-Agent", "PerennosTempo/1");
+        if hop == 0 {
+            for (k, v) in headers {
+                req = req.header(*k, v.as_str());
+            }
+        }
+        let resp = req.call().map_err(|e| {
+            let s = e.to_string();
+            // the resolver's refusal, without ureq's "io:" in front
+            s.find("refused: ").map(|i| s[i..].to_string()).unwrap_or(s)
+        })?;
         let status = resp.status();
-        if status.is_redirection() {
+        if status.is_redirection() && status.as_u16() != 304 {
             let loc = resp
                 .headers()
                 .get("location")
@@ -412,11 +556,37 @@ pub fn get_text_checked(
             cur = join_location(&cur, &loc);
             continue;
         }
-        let text = body_text(resp, limit);
-        if status.as_u16() >= 400 {
-            return Err(format!("HTTP {}", status.as_u16()));
+        let head = |k: &str| {
+            resp.headers()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let (etag, last_modified) = (head("etag"), head("last-modified"));
+        let cc = head("cache-control")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let max_age = cc
+            .split(',')
+            .find_map(|d| d.trim().strip_prefix("max-age=")?.parse().ok());
+        let no_store = cc.contains("no-store");
+        let code = status.as_u16();
+        let text = if code == 304 {
+            String::new()
+        } else {
+            body_text(resp, limit)
+        };
+        if code >= 400 {
+            return Err(format!("HTTP {code}"));
         }
-        return Ok(text);
+        return Ok(Fetched {
+            status: code,
+            text,
+            etag,
+            last_modified,
+            max_age,
+            no_store,
+        });
     }
     Err("too many redirects".into())
 }
@@ -645,14 +815,25 @@ pub mod testutil {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    type HandlerFn = Arc<dyn Fn(&Req) -> (u16, String) + Send + Sync>;
-
     #[derive(Clone, Debug)]
     pub struct Req {
         pub method: String,
         pub path: String,
         pub body: String,
+        /// Request headers, names in lower case.
+        pub headers: Vec<(String, String)>,
     }
+
+    impl Req {
+        pub fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    type FullFn = Arc<dyn Fn(&Req) -> (u16, Vec<(String, String)>, String) + Send + Sync>;
 
     /// In-process HTTP mock on 127.0.0.1:0. Records every request.
     pub struct Mock {
@@ -662,10 +843,20 @@ pub mod testutil {
 
     impl Mock {
         pub fn start(h: impl Fn(&Req) -> (u16, String) + Send + Sync + 'static) -> Mock {
+            Mock::start_with_headers(move |r| {
+                let (code, body) = h(r);
+                (code, vec![], body)
+            })
+        }
+
+        /// A mock whose handler also sets response headers.
+        pub fn start_with_headers(
+            h: impl Fn(&Req) -> (u16, Vec<(String, String)>, String) + Send + Sync + 'static,
+        ) -> Mock {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", l.local_addr().unwrap());
             let reqs = Arc::new(Mutex::new(Vec::new()));
-            let (r2, h): (_, HandlerFn) = (reqs.clone(), Arc::new(h));
+            let (r2, h): (_, FullFn) = (reqs.clone(), Arc::new(h));
             std::thread::spawn(move || {
                 for s in l.incoming().flatten() {
                     let (r2, h) = (r2.clone(), h.clone());
@@ -685,7 +876,7 @@ pub mod testutil {
         }
     }
 
-    fn serve(s: std::net::TcpStream, reqs: Arc<Mutex<Vec<Req>>>, h: HandlerFn) {
+    fn serve(s: std::net::TcpStream, reqs: Arc<Mutex<Vec<Req>>>, h: FullFn) {
         let mut rd = BufReader::new(s.try_clone().unwrap());
         let mut line = String::new();
         if rd.read_line(&mut line).unwrap_or(0) == 0 {
@@ -697,6 +888,7 @@ pub mod testutil {
             it.next().unwrap_or("").to_string(),
         );
         let mut len = 0usize;
+        let mut headers = vec![];
         loop {
             let mut hl = String::new();
             if rd.read_line(&mut hl).unwrap_or(0) == 0 || hl.trim().is_empty() {
@@ -706,6 +898,7 @@ pub mod testutil {
                 if k.eq_ignore_ascii_case("content-length") {
                     len = v.trim().parse().unwrap_or(0);
                 }
+                headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
             }
         }
         let mut body = vec![0u8; len];
@@ -714,11 +907,13 @@ pub mod testutil {
             method,
             path,
             body: String::from_utf8_lossy(&body).into_owned(),
+            headers,
         };
         reqs.lock().unwrap().push(req.clone());
-        let (code, out) = h(&req);
+        let (code, extra, out) = h(&req);
+        let extra: String = extra.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
         let resp = format!(
-            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{out}",
             out.len()
         );
         let mut w = s;
@@ -856,6 +1051,43 @@ mod tests {
             !redact("curl -H 'Authorization: Bearer abcdefghijkl12'").contains("abcdefghijkl12")
         );
         assert!(!redact("use Basic dXNlcjpwYXNz to log in").contains("dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn a_connection_goes_only_to_an_address_checked_when_it_is_made() {
+        // the check before (`check`) lets everything through here; the resolver alone refuses
+        let m = testutil::Mock::start(|_| (200, "inside".into()));
+        let port = m.url.rsplit(':').next().unwrap().to_string();
+        let local = format!("http://localhost:{port}/x");
+        let e = get_checked(
+            &local,
+            Duration::from_secs(5),
+            1000,
+            &|_| Ok(()),
+            Some(&[]),
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            e.starts_with("refused: localhost is on this computer"),
+            "{e}"
+        );
+        // a host the owner lists passes, and without pinning nothing is checked
+        let ok = get_checked(
+            &local,
+            Duration::from_secs(5),
+            1000,
+            &|_| Ok(()),
+            Some(&["localhost".to_string()]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!((ok.status, ok.text.as_str()), (200, "inside"));
+        assert_eq!(
+            get_text_checked(&local, Duration::from_secs(5), 1000, &|_| Ok(())).unwrap(),
+            "inside"
+        );
+        assert!(public_ip("1.1.1.1".parse().unwrap()) && !public_ip("::1".parse().unwrap()));
     }
 
     #[test]
