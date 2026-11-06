@@ -61,26 +61,27 @@ def _parser():
     config.add_argument("--port", type=int, default=8765)
 
     # Listed for --help only; main() forwards `agent ...` before argparse sees it.
-    modes.add_parser("agent", help="run the local agent loop (Rust tempo-agent) against Ollama at OLLAMA_URL; "
+    modes.add_parser("agent", help="run the local agent loop (Rust tempo-local-agent) against Ollama at OLLAMA_URL; "
                                    "`tempo agent --help` for its options")
     return parser
 
 
 def _agent_binary():
-    """The Rust tempo-agent: TEMPO_AGENT_BIN, a cargo build in this checkout, or PATH."""
-    exe = "tempo-agent.exe" if os.name == "nt" else "tempo-agent"
-    root = Path(__file__).resolve().parent
+    """The Rust tempo-local-agent: TEMPO_AGENT_BIN, a cargo build in this checkout, or PATH."""
+    exe = "tempo-local-agent.exe" if os.name == "nt" else "tempo-local-agent"
+    target = Path(__file__).resolve().parent / "perennos-tempo-local-agent" / "target"
     candidates = [os.environ.get("TEMPO_AGENT_BIN")]
-    candidates += [str(root / "target" / kind / exe) for kind in ("release", "debug")]
-    candidates.append(shutil.which("tempo-agent"))
+    candidates += [str(target / kind / exe) for kind in ("release", "debug")]
+    candidates.append(shutil.which("tempo-local-agent"))
     return next((c for c in candidates if c and Path(c).is_file()), None)
 
 
 def _run_agent(agent_args):
     binary = _agent_binary()
     if not binary:
-        print("tempo agent: the tempo-agent binary was not found. Build it with "
-              "`cargo build --release -p tempo-agent` in this folder, or set TEMPO_AGENT_BIN.", file=sys.stderr)
+        print("tempo agent: the tempo-local-agent binary was not found. Build it with "
+              "`cargo build --release --manifest-path perennos-tempo-local-agent/Cargo.toml`, "
+              "or set TEMPO_AGENT_BIN.", file=sys.stderr)
         return 2
     env = dict(os.environ)
     env.setdefault("OLLAMA_URL", "http://127.0.0.1:11434")
