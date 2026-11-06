@@ -1,5 +1,6 @@
 // CHAT surface: the local agent loop (Ollama engine, MCP tools, memory RAG, delegate, workflow file).
 // Talks only to the same origin at /agent/*. Every visible string comes from copy.json.
+// The second-brain graph (memgraph.mjs, three.js) is imported only when it is opened.
 const h = (tag, a = {}, ...kids) => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(a)) {
@@ -13,6 +14,8 @@ const h = (tag, a = {}, ...kids) => {
   return e;
 };
 const api = (p, b) => fetch('/agent/' + p, b ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) } : {}).then(r => r.json());
+const KINDS = ['current', 'core', 'memory', 'pack'];
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 export async function mount(el, ctx) {
   const c = ctx.copy;
@@ -24,18 +27,41 @@ export async function mount(el, ctx) {
 
   const saved = ctx.view ? (ctx.view.chat ??= {}) : {};
   let conv = saved.conv || null, since = 0, busy = false, dead = false, timer = 0;
+  let heavyModel = '', lane = null, lastTool = null, memUsed = new Set(), memFiles = [], graph = null;
 
+  const lab = t => h('span', { class: 't-label', text: t });
   const log = h('div', { class: 'ch-log', role: 'log', 'aria-live': 'polite' });
   const empty = h('p', { class: 'ch-empty', text: c.empty });
   log.append(empty);
   const strip = h('div', { class: 'ch-strip' });
+  const laneV = h('span', { class: 'ch-v ch-lane', 'data-lane': 'none', text: '-' });
   const wf = h('pre', { class: 'ch-wf', text: c.noTasks });
   const list = h('div', { class: 'ch-convs' });
   const input = h('textarea', { class: 'ch-in', rows: '2', placeholder: c.placeholder, 'aria-label': c.title });
   const sendBtn = h('button', { class: 'ch-btn ch-go', type: 'button', text: c.send });
   const newBtn = h('button', { class: 'ch-btn', type: 'button', text: c.newChat });
 
-  const lab = t => h('span', { class: 't-label', text: t });
+  // ---- side panel: Chats / Workflow / Memory
+  const memSearch = h('input', { class: 'ch-in ch-search', type: 'search', placeholder: c.search, 'aria-label': c.searchMemory });
+  const memList = h('div', { class: 'ch-mem' });
+  const memRead = h('div', { class: 'ch-read', hidden: true });
+  const graphBtn = h('button', { class: 'ch-btn', type: 'button', text: c.graph });
+  const panes = {
+    chats: h('div', { class: 'ch-pane' }, newBtn, list),
+    tasks: h('div', { class: 'ch-pane' }, wf),
+    memory: h('div', { class: 'ch-pane' }, h('div', { class: 'ch-row' }, memSearch, graphBtn), memList, memRead),
+  };
+  const tabs = h('div', { class: 'ch-tabs', role: 'tablist' });
+  function showTab(name) {
+    saved.tab = name;
+    for (const [k, p] of Object.entries(panes)) p.hidden = k !== name;
+    for (const b of tabs.children) b.setAttribute('aria-selected', String(b.dataset.tab === name));
+    if (name === 'memory') loadMemory();
+  }
+  for (const [k, t] of [['chats', c.chats], ['tasks', c.tasks], ['memory', c.memory]]) {
+    tabs.append(h('button', { class: 'ch-tab', type: 'button', role: 'tab', 'data-tab': k, text: t, onclick: () => showTab(k) }));
+  }
+
   function row(cls, who, text) {
     empty.remove();
     const d = h('div', { class: 'ch-m ' + cls }, who ? lab(who) : null, h('div', { class: 'ch-t', text }));
@@ -43,23 +69,51 @@ export async function mount(el, ctx) {
     log.scrollTop = log.scrollHeight;
     return d;
   }
+  function setLane(l, model) {
+    lane = l;
+    laneV.dataset.lane = l;
+    laneV.textContent = (l === 'heavy' ? c.heavy : c.fast) + (model ? ' · ' + model : '');
+  }
   let live = null;
   function render(e) {
-    if (e.type === 'delta') { if (!live) live = row('ch-bot', c.tempo, ''); live.querySelector('.ch-t').textContent += e.text; log.scrollTop = log.scrollHeight; return; }
+    if (e.type === 'delta') {
+      if (!live) { live = row('ch-bot ch-live', c.tempo, ''); }
+      live.querySelector('.ch-t').textContent += e.text;
+      log.scrollTop = log.scrollHeight;
+      return;
+    }
     if (live && e.type !== 'status') { live.remove(); live = null; }
     if (e.type === 'user') row('ch-user', c.you, e.text);
     else if (e.type === 'assistant') row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text);
     else if (e.type === 'assistant_partial') row('ch-bot', c.tempo, e.text);
-    else if (e.type === 'tool_call') row('ch-tool', null, '> ' + e.name + ' ' + (e.args || ''));
-    else if (e.type === 'tool_result') row('ch-tool', null, '< ' + (e.text || '').slice(0, 700));
-    else if (e.type === 'status') row('ch-status', null, e.text);
-    else if (e.type === 'error') row('ch-err', 'Error', e.text);
+    else if (e.type === 'tool_call') {
+      empty.remove();
+      lastTool = h('details', { class: 'ch-m ch-tool', 'data-state': 'run' },
+        h('summary', { class: 'ch-t', text: e.name + ' ' + (e.args || '') }));
+      log.append(lastTool);
+      log.scrollTop = log.scrollHeight;
+    } else if (e.type === 'tool_result') {
+      const text = (e.text || '').slice(0, 700);
+      if (lastTool) {
+        lastTool.dataset.state = /^(ERROR|refused|denied|unknown tool)/.test(text) ? 'err' : 'done';
+        lastTool.append(h('pre', { class: 'ch-res', text }));
+        lastTool = null;
+      } else row('ch-tool', null, '< ' + text);
+    } else if (e.type === 'status') {
+      const m = /^lane: (fast|heavy) \(([^)]*)\)/.exec(e.text || '');
+      if (m) setLane(m[1], m[2]);
+      else if (/^fast lane handed/.test(e.text || '')) setLane('heavy', heavyModel);
+      if (/^memory: /.test(e.text || '')) refreshUsed();
+      row('ch-status', null, e.text);
+    } else if (e.type === 'error') row('ch-err', 'Error', e.text);
     else if (e.type === 'confirm') {
       const d = row('ch-confirm', c.needsYou, e.what);
       d.append(h('code', { text: e.detail }));
-      const done = ok => { api('confirm', { conv, id: e.id, ok }); d.remove(); };
-      d.append(h('button', { class: 'ch-btn ch-go', type: 'button', text: c.approve, onclick: () => done(true) }),
-        h('button', { class: 'ch-btn', type: 'button', text: c.deny, onclick: () => done(false) }));
+      const btns = [h('button', { class: 'ch-btn ch-go', type: 'button', text: c.approve, onclick: () => done(true) }),
+        h('button', { class: 'ch-btn', type: 'button', text: c.deny, onclick: () => done(false) })];
+      // The card stays in the log as a record of the decision.
+      const done = ok => { api('confirm', { conv, id: e.id, ok }); btns.forEach(b => b.remove()); d.classList.add('ch-decided'); d.append(lab(ok ? c.approved : c.denied)); };
+      d.append(...btns);
     }
   }
   async function poll() {
@@ -72,7 +126,7 @@ export async function mount(el, ctx) {
     } catch { /* agent not running: health strip says so */ }
   }
   async function open_(id) {
-    conv = id; saved.conv = id; since = 0; log.replaceChildren(empty);
+    conv = id; saved.conv = id; since = 0; lastTool = null; log.replaceChildren(empty);
     await poll(); convs();
   }
   async function convs() {
@@ -92,28 +146,95 @@ export async function mount(el, ctx) {
   async function health() {
     try {
       const x = await api('health');
+      heavyModel = x.models[0];
       const up = Object.entries(x.hosts).filter(([, v]) => v === 'up').map(([k]) => k);
       strip.replaceChildren(
         h('span', { class: 'ch-pair' }, lab(c.engine), h('span', { class: 'ch-v', text: x.models[0] })),
+        h('span', { class: 'ch-pair' }, lab(c.lane), laneV),
         h('span', { class: 'ch-pair' }, lab(c.net), h('span', { class: 'ch-v', text: x.net ? c.netUp : c.netDown })),
         h('span', { class: 'ch-pair' }, lab(c.hosts), h('span', { class: 'ch-v', text: up.join(', ') || c.none })));
     } catch { strip.replaceChildren(h('span', { class: 'ch-v', text: c.failed })); }
   }
 
+  // ---- second brain: file list, excerpts, graph
+  const kindLabel = k => (c.kinds && c.kinds[k]) || k;
+  function drawMemory() {
+    const q = memSearch.value.trim().toLowerCase();
+    const files = memFiles.filter(f => !q || f.name.toLowerCase().includes(q));
+    if (!memFiles.length) { memList.replaceChildren(h('p', { class: 'ch-empty', text: c.noMemory })); return; }
+    const item = f => h('button', { class: 'ch-file', type: 'button', 'data-used': memUsed.has(f.src) ? 'true' : null, title: f.src, onclick: () => readFile(f.src) },
+      h('span', { class: 'ch-dot', 'aria-hidden': 'true' }), h('span', { class: 'ch-fname', text: f.name }), h('span', { class: 'ch-fmeta', text: String(f.chunks) }));
+    const groups = [];
+    const usedNow = files.filter(f => memUsed.has(f.src));
+    if (usedNow.length) groups.push(lab(c.used), ...usedNow.map(item));
+    for (const k of KINDS) {
+      const fs = files.filter(f => f.kind === k);
+      if (fs.length) groups.push(lab(kindLabel(k) + ' · ' + fs.length), ...fs.map(item));
+    }
+    memList.replaceChildren(...groups);
+  }
+  async function loadMemory() {
+    try {
+      const r = await api('memory' + (conv ? '?conv=' + encodeURIComponent(conv) : ''));
+      memFiles = r.files; memUsed = new Set(r.used);
+      drawMemory();
+    } catch { memList.replaceChildren(h('p', { class: 'ch-empty', text: c.failed })); }
+  }
+  function refreshUsed() { if (saved.tab === 'memory' || graph) loadMemory().then(() => { if (graph) openGraph(); }); }
+  async function readFile(src) {
+    showTab('memory');
+    try {
+      const r = await api('memory/file?src=' + encodeURIComponent(src));
+      if (r.error) return;
+      memRead.replaceChildren(
+        h('div', { class: 'ch-row' }, h('button', { class: 'ch-btn', type: 'button', text: c.back, onclick: () => { memRead.hidden = true; memList.hidden = false; } }), lab(kindLabel(r.kind))),
+        h('p', { class: 'ch-fname ch-title', text: r.name }),
+        ...r.chunks.map(t => h('pre', { class: 'ch-wf ch-chunk', text: t })),
+        r.total > r.chunks.length ? h('p', { class: 'ch-empty', text: `+${r.total - r.chunks.length} ${c.moreChunks}` }) : null);
+      memList.hidden = true; memRead.hidden = false; memRead.scrollTop = 0;
+    } catch { /* stale index: ignore */ }
+  }
+  const stage = h('div', { class: 'mg-stage' });
+  const legend = h('div', { class: 'mg-legend' });
+  const hint = h('span', { class: 'mg-hint', text: c.graphHint });
+  const overlay = h('div', { class: 'mg', hidden: true, role: 'dialog', 'aria-label': c.graphTitle },
+    h('div', { class: 'mg-head' }, lab(c.graphTitle), hint, legend,
+      h('button', { class: 'ch-btn', type: 'button', text: c.close, onclick: () => closeGraph() })),
+    stage);
+  async function openGraph() {
+    if (graph) graph.close();
+    overlay.hidden = false;
+    legend.replaceChildren(...['current', 'core', 'memory', 'pack', 'used'].map(k => h('span', { class: 'mg-key', 'data-kind': k, text: k === 'used' ? c.used : kindLabel(k) })));
+    try {
+      if (!memFiles.length) await loadMemory();
+      const g = await api('memory/graph');
+      if (!g.nodes.length) { stage.replaceChildren(h('p', { class: 'ch-empty', text: c.graphEmpty })); return; }
+      const { openGraph: draw } = await import(new URL('./memgraph.mjs', import.meta.url).href);
+      graph = await draw(stage, g, { used: memUsed, reduced: reducedMotion(), flatLabel: c.graphTitle, onPick: src => readFile(src) });
+      overlay.dataset.mode = graph.mode;
+      hint.textContent = graph.mode === 'flat' ? c.graphHintFlat : c.graphHint;
+    } catch { stage.replaceChildren(h('p', { class: 'ch-empty', text: c.failed })); }
+  }
+  function closeGraph() { graph?.close(); graph = null; overlay.hidden = true; }
+  graphBtn.addEventListener('click', openGraph);
+  memSearch.addEventListener('input', drawMemory);
+
   sendBtn.addEventListener('click', send);
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
   newBtn.addEventListener('click', async () => open_((await api('new', {})).conv));
+  const onKey = e => { if (e.key === 'Escape' && graph) closeGraph(); };
+  document.addEventListener('keydown', onKey);
 
   const root = h('div', { class: 'ch' },
     strip,
     h('div', { class: 'ch-body' },
-      h('aside', { class: 'ch-side' }, lab(c.chats), newBtn, list, lab(c.tasks), wf),
-      h('section', { class: 'ch-main' }, log, h('div', { class: 'ch-comp' }, input, sendBtn))));
+      h('aside', { class: 'ch-side' }, tabs, ...Object.values(panes)),
+      h('section', { class: 'ch-main' }, log, h('div', { class: 'ch-comp' }, input, sendBtn), overlay)));
   el.append(root);
+  showTab(saved.tab || 'chats');
   health(); convs();
   if (conv) open_(conv);
   timer = setInterval(poll, 1200);
   const ht = setInterval(health, 30000);
-  return { unmount() { dead = true; clearInterval(timer); clearInterval(ht); link.remove(); } };
+  return { unmount() { dead = true; closeGraph(); clearInterval(timer); clearInterval(ht); document.removeEventListener('keydown', onKey); link.remove(); } };
 }
-

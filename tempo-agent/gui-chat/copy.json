@@ -19,5 +19,29 @@
   "none": "none reachable",
   "empty": "Ask anything. Tempo answers from your memory and soul files, runs tools, makes images and can hand work to other machines.",
   "busy": "Working",
-  "failed": "The local agent did not answer. Start it with the Perennos Tempo (offline) shortcut."
+  "failed": "The local agent did not answer. Start it with the Perennos Tempo (offline) shortcut.",
+  "memory": "Memory",
+  "lane": "Lane",
+  "fast": "Fast",
+  "heavy": "Heavy",
+  "approved": "Approved",
+  "denied": "Denied",
+  "search": "Search",
+  "searchMemory": "Search memory",
+  "graph": "Graph",
+  "graphTitle": "Second brain",
+  "graphHint": "Drag to turn, scroll to zoom, click a file to read it.",
+  "graphHintFlat": "Flat view (no 3D on this device). Scroll to zoom, click a file to read it.",
+  "graphEmpty": "Nothing to draw yet: the memory index is empty or still building.",
+  "used": "Used this turn",
+  "noMemory": "No memory files indexed yet. Add rag_files or rag_globs to agent-config.json.",
+  "back": "Back",
+  "close": "Close",
+  "moreChunks": "more chunks not shown",
+  "kinds": {
+    "current": "Current work",
+    "core": "Core",
+    "memory": "Notes",
+    "pack": "Knowledge pack"
+  }
 }

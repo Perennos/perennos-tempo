@@ -68,7 +68,7 @@ Everything the harness does in its agent loop, plus a few things the Python vers
 ## What is left
 
 1. **HTTP API for the GUI.** The chat surface talks to `/agent/new`, `send`, `events`, `confirm`, `workflow`,
-   `health` and `convs`, and the Python server also serves `/chat/` and proxies the Tempo GUI. Port these to the
+   `health`, `convs` and the second-brain views `memory`, `memory/file` and `memory/graph`, and the Python server also serves `/chat/` and proxies the Tempo GUI. Port these to the
    Rust binary, ideally with server-sent events instead of polling, then switch `Start-TempoOffline.ps1` to it.
    Confirmations then come from the GUI instead of the terminal.
 2. **`claude_code`**, the Python tool that hands a task to Claude Code on the local engine, has no Rust
