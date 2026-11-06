@@ -1,0 +1,459 @@
+//! JSON config with safe generic defaults. Nothing machine-specific lives in code.
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug)]
+pub struct HostCfg {
+    pub urls: Vec<String>,
+    /// House models: when set, only these may be requested on that host.
+    pub models: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub ollama_url: String,
+    pub data_dir: PathBuf,
+    pub models: Vec<String>,
+    pub fast_models: Vec<String>,
+    pub num_ctx: BTreeMap<String, u64>,
+    pub default_num_ctx: u64,
+    pub keep_alive: String,
+    pub temperature: f64,
+    pub exclusive_models: Vec<String>,
+    pub embed_model: String,
+    pub rag_k: usize,
+    pub rag_chars: usize,
+    pub hist_chars: usize,
+    pub max_steps: usize,
+    pub tool_cap: usize,
+    pub retries: usize,
+    pub retry_delay_ms: u64,
+    pub chat_timeout_s: u64,
+    pub owner_context: String,
+    pub core_file: Option<String>,
+    pub rag_files: Vec<String>,
+    pub rag_globs: Vec<(String, usize)>,
+    pub pinned_current_files: Vec<(String, usize)>,
+    pub write_roots: Vec<String>,
+    pub trash_dir: PathBuf,
+    pub protect_regex: Option<String>,
+    pub command_cwd: PathBuf,
+    pub command_timeout_s: f64,
+    pub offline_probe: String,
+    pub hosts: BTreeMap<String, HostCfg>,
+    pub mcp_config: Option<String>,
+    pub mcp_skip: Vec<String>,
+    pub mcp_blocked: BTreeMap<String, Vec<String>>,
+    pub mcp_confirm: Vec<(String, String)>,
+    pub mcp_hints: BTreeMap<String, String>,
+    pub mcp_start_timeout_s: f64,
+    pub mcp_call_timeout_s: f64,
+    pub comfy_url: String,
+    pub comfy_output_dir: Option<String>,
+    pub comfy_start_cmd: Option<String>,
+    pub comfy_stop_cmd: Option<String>,
+    pub lease_status_cmd: Option<String>,
+    pub lease_acquire_cmd: Option<String>,
+    pub lease_release_cmd: Option<String>,
+}
+
+fn strs(v: &Value, k: &str) -> Option<Vec<String>> {
+    v.get(k)?.as_array().map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    })
+}
+fn string(v: &Value, k: &str) -> Option<String> {
+    v.get(k)?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+fn num(v: &Value, k: &str) -> Option<f64> {
+    v.get(k)?.as_f64()
+}
+fn path_list(v: &Value, k: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    if let Some(a) = v.get(k).and_then(|x| x.as_array()) {
+        for e in a {
+            if let Some(s) = e.as_str() {
+                out.push((s.to_string(), 0));
+            } else if let Some(p) = e
+                .get("pattern")
+                .or_else(|| e.get("path"))
+                .and_then(|x| x.as_str())
+            {
+                let n = e
+                    .get("newest")
+                    .or_else(|| e.get("tail"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                out.push((p.to_string(), n as usize));
+            }
+        }
+    }
+    out
+}
+
+impl Config {
+    /// Defaults only. `data_dir_env` is the value of TEMPO_AGENT_DATA, if any.
+    pub fn defaults(data_dir_env: Option<String>) -> Config {
+        let data_dir = PathBuf::from(data_dir_env.unwrap_or_else(|| "./tempo-agent-data".into()));
+        Config {
+            ollama_url: "http://127.0.0.1:11434".into(),
+            models: vec!["local-heavy".into()],
+            fast_models: vec!["local-fast".into()],
+            num_ctx: BTreeMap::new(),
+            default_num_ctx: 8192,
+            keep_alive: "60m".into(),
+            temperature: 0.4,
+            exclusive_models: vec![],
+            embed_model: "embeddinggemma".into(),
+            rag_k: 4,
+            rag_chars: 700,
+            hist_chars: 11000,
+            max_steps: 40,
+            tool_cap: 40,
+            retries: 3,
+            retry_delay_ms: 10_000,
+            chat_timeout_s: 1200,
+            owner_context: String::new(),
+            core_file: None,
+            rag_files: vec![],
+            rag_globs: vec![],
+            pinned_current_files: vec![],
+            write_roots: vec![data_dir.to_string_lossy().into_owned()],
+            trash_dir: data_dir.join("trash"),
+            protect_regex: None,
+            command_cwd: data_dir.clone(),
+            command_timeout_s: 60.0,
+            offline_probe: "1.1.1.1:443".into(),
+            hosts: BTreeMap::new(),
+            mcp_config: None,
+            mcp_skip: vec![],
+            mcp_blocked: BTreeMap::new(),
+            mcp_confirm: vec![],
+            mcp_hints: BTreeMap::new(),
+            mcp_start_timeout_s: 90.0,
+            mcp_call_timeout_s: 600.0,
+            comfy_url: "http://127.0.0.1:8188".into(),
+            comfy_output_dir: None,
+            comfy_start_cmd: None,
+            comfy_stop_cmd: None,
+            lease_status_cmd: None,
+            lease_acquire_cmd: None,
+            lease_release_cmd: None,
+            data_dir,
+        }
+    }
+
+    pub fn from_json(v: &Value, data_dir_env: Option<String>) -> Result<Config, String> {
+        if !v.is_object() {
+            return Err("config must be a JSON object".into());
+        }
+        let mut c = Config::defaults(data_dir_env);
+        if let Some(d) = string(v, "data_dir") {
+            c.data_dir = PathBuf::from(d);
+            c.write_roots = vec![c.data_dir.to_string_lossy().into_owned()];
+            c.trash_dir = c.data_dir.join("trash");
+            c.command_cwd = c.data_dir.clone();
+        }
+        if let Some(x) = string(v, "ollama_url") {
+            c.ollama_url = x.trim_end_matches('/').to_string();
+        }
+        if let Some(x) = strs(v, "models").filter(|x| !x.is_empty()) {
+            c.models = x;
+        }
+        if let Some(x) = strs(v, "fast_models") {
+            c.fast_models = x;
+        }
+        if let Some(m) = v.get("num_ctx").and_then(|x| x.as_object()) {
+            for (k, n) in m {
+                if let Some(n) = n.as_u64() {
+                    c.num_ctx.insert(k.clone(), n);
+                }
+            }
+        }
+        if let Some(n) = num(v, "default_num_ctx") {
+            c.default_num_ctx = n as u64;
+        }
+        if let Some(x) = string(v, "keep_alive") {
+            c.keep_alive = x;
+        }
+        if let Some(n) = num(v, "temperature") {
+            c.temperature = n;
+        }
+        if let Some(x) = strs(v, "exclusive_models") {
+            c.exclusive_models = x;
+        }
+        if let Some(x) = string(v, "embed_model") {
+            c.embed_model = x;
+        }
+        for (k, slot) in [
+            ("rag_k", &mut c.rag_k),
+            ("rag_chars", &mut c.rag_chars),
+            ("hist_chars", &mut c.hist_chars),
+            ("max_steps", &mut c.max_steps),
+            ("tool_cap", &mut c.tool_cap),
+            ("retries", &mut c.retries),
+        ] {
+            if let Some(n) = num(v, k) {
+                *slot = n as usize;
+            }
+        }
+        if let Some(n) = num(v, "retry_delay_ms") {
+            c.retry_delay_ms = n as u64;
+        }
+        if let Some(n) = num(v, "chat_timeout_s") {
+            c.chat_timeout_s = n as u64;
+        }
+        if let Some(x) = string(v, "owner_context") {
+            c.owner_context = x;
+        }
+        c.core_file = string(v, "core_file");
+        if let Some(x) = strs(v, "rag_files") {
+            c.rag_files = x;
+        }
+        c.rag_globs = path_list(v, "rag_globs");
+        c.pinned_current_files = path_list(v, "pinned_current_files");
+        if let Some(x) = strs(v, "write_roots") {
+            c.write_roots = x;
+        }
+        if let Some(x) = string(v, "trash_dir") {
+            c.trash_dir = PathBuf::from(x);
+        }
+        c.protect_regex = string(v, "protect_regex");
+        if let Some(x) = string(v, "command_cwd") {
+            c.command_cwd = PathBuf::from(x);
+        }
+        if let Some(n) = num(v, "command_timeout_s") {
+            c.command_timeout_s = n;
+        }
+        if let Some(x) = string(v, "offline_probe") {
+            c.offline_probe = x;
+        }
+        if let Some(m) = v.get("hosts").and_then(|x| x.as_object()) {
+            for (name, h) in m {
+                let urls = strs(h, "urls").unwrap_or_default();
+                if !urls.is_empty() {
+                    c.hosts.insert(
+                        name.clone(),
+                        HostCfg {
+                            urls,
+                            models: strs(h, "models").unwrap_or_default(),
+                        },
+                    );
+                }
+            }
+        }
+        c.mcp_config = string(v, "mcp_config");
+        if let Some(x) = strs(v, "mcp_skip") {
+            c.mcp_skip = x;
+        }
+        if let Some(m) = v.get("mcp_blocked").and_then(|x| x.as_object()) {
+            for (k, l) in m {
+                c.mcp_blocked.insert(
+                    k.clone(),
+                    l.as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        if let Some(a) = v.get("mcp_confirm").and_then(|x| x.as_array()) {
+            for e in a {
+                if let Some(p) = e.as_array() {
+                    if let (Some(s), Some(t)) = (
+                        p.first().and_then(|x| x.as_str()),
+                        p.get(1).and_then(|x| x.as_str()),
+                    ) {
+                        c.mcp_confirm.push((s.into(), t.into()));
+                    }
+                }
+            }
+        }
+        if let Some(m) = v.get("mcp_hints").and_then(|x| x.as_object()) {
+            for (k, r) in m {
+                if let Some(r) = r.as_str() {
+                    c.mcp_hints.insert(k.clone(), r.into());
+                }
+            }
+        }
+        if let Some(n) = num(v, "mcp_start_timeout_s") {
+            c.mcp_start_timeout_s = n;
+        }
+        if let Some(n) = num(v, "mcp_call_timeout_s") {
+            c.mcp_call_timeout_s = n;
+        }
+        if let Some(x) = string(v, "comfy_url") {
+            c.comfy_url = x.trim_end_matches('/').to_string();
+        }
+        c.comfy_output_dir = string(v, "comfy_output_dir");
+        c.comfy_start_cmd = string(v, "comfy_start_cmd");
+        c.comfy_stop_cmd = string(v, "comfy_stop_cmd");
+        c.lease_status_cmd = string(v, "lease_status_cmd");
+        c.lease_acquire_cmd = string(v, "lease_acquire_cmd");
+        c.lease_release_cmd = string(v, "lease_release_cmd");
+        Ok(c)
+    }
+
+    /// Load from `--config` or env value; neither given means defaults. A given but unreadable file is an error.
+    pub fn load(
+        cli_path: Option<&str>,
+        env_path: Option<String>,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Config, String> {
+        let data_env = env("TEMPO_AGENT_DATA");
+        let mut c = match resolve_path(cli_path, env_path) {
+            None => Config::defaults(data_env),
+            Some(p) => {
+                let txt = std::fs::read_to_string(&p)
+                    .map_err(|e| format!("cannot read config {p}: {e}"))?;
+                let v: Value = serde_json::from_str(&txt)
+                    .map_err(|e| format!("bad config JSON in {p}: {e}"))?;
+                Config::from_json(&v, data_env)?
+            }
+        };
+        if let Some(u) = env("TEMPO_OLLAMA").filter(|u| !u.is_empty()) {
+            c.ollama_url = u.trim_end_matches('/').to_string();
+        }
+        Ok(c)
+    }
+
+    pub fn num_ctx_for(&self, model: &str) -> u64 {
+        self.num_ctx
+            .get(model)
+            .copied()
+            .unwrap_or(self.default_num_ctx)
+    }
+
+    pub fn is_qwen(model: &str) -> bool {
+        let m = model.to_lowercase();
+        m.contains("qwen")
+    }
+
+    /// Every host usable by delegate. An implicit `local` host is the main Ollama URL.
+    pub fn all_hosts(&self) -> BTreeMap<String, HostCfg> {
+        let mut h = self.hosts.clone();
+        h.entry("local".into()).or_insert(HostCfg {
+            urls: vec![self.ollama_url.clone()],
+            models: vec![],
+        });
+        h
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+}
+
+/// Config path: CLI flag wins, then env TEMPO_AGENT_CONFIG.
+pub fn resolve_path(cli: Option<&str>, env: Option<String>) -> Option<String> {
+    cli.map(String::from).or(env).filter(|s| !s.is_empty())
+}
+
+/// MCP config path: CLI flag, then env TEMPO_MCP_CONFIG, then the main config's `mcp_config`.
+pub fn mcp_path(cli: Option<&str>, env: Option<String>, cfg: &Config) -> Option<PathBuf> {
+    resolve_path(cli, env)
+        .or_else(|| cfg.mcp_config.clone())
+        .map(PathBuf::from)
+}
+
+pub fn ensure_dirs(c: &Config) -> Result<(), String> {
+    for d in [
+        c.data_dir.join("conversations"),
+        c.data_dir.join("workflows"),
+        c.logs_dir(),
+    ] {
+        std::fs::create_dir_all(&d)
+            .map_err(|e| format!("cannot create {}: {e}", Path::new(&d).display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn defaults_are_generic() {
+        let c = Config::defaults(None);
+        assert_eq!(c.ollama_url, "http://127.0.0.1:11434");
+        assert_eq!(c.data_dir, PathBuf::from("./tempo-agent-data"));
+        assert_eq!(c.embed_model, "embeddinggemma");
+        assert_eq!(c.max_steps, 40);
+        let c = Config::defaults(Some("/x/data".into()));
+        assert_eq!(c.data_dir, PathBuf::from("/x/data"));
+    }
+
+    #[test]
+    fn parses_json() {
+        let v = json!({"ollama_url":"http://h:1/","models":["a","b"],"fast_models":["f"],"num_ctx":{"a":4096},
+            "retry_delay_ms":0,"pinned_current_files":[{"path":"/p.md","tail":40}],"rag_globs":[{"pattern":"/n/*.md","newest":5}],
+            "hosts":{"box":{"urls":["http://b:11434"],"models":["house"]}},"mcp_confirm":[["s","t"]],"mcp_blocked":{"s":["x"]}});
+        let c = Config::from_json(&v, None).unwrap();
+        assert_eq!(c.ollama_url, "http://h:1");
+        assert_eq!(c.models, ["a", "b"]);
+        assert_eq!(c.num_ctx_for("a"), 4096);
+        assert_eq!(c.num_ctx_for("zz"), 8192);
+        assert_eq!(c.retry_delay_ms, 0);
+        assert_eq!(c.pinned_current_files, [("/p.md".to_string(), 40)]);
+        assert_eq!(c.rag_globs, [("/n/*.md".to_string(), 5)]);
+        assert_eq!(c.hosts["box"].models, ["house"]);
+        assert!(c.all_hosts().contains_key("local"));
+        assert_eq!(c.mcp_confirm, [("s".to_string(), "t".to_string())]);
+        assert!(Config::from_json(&json!([1]), None).is_err());
+    }
+
+    #[test]
+    fn example_config_parses() {
+        let v: Value = serde_json::from_str(include_str!("../config.example.json")).unwrap();
+        let c = Config::from_json(&v, None).unwrap();
+        assert_eq!(c.models.len(), 2);
+        assert_eq!(c.rag_globs[0].1, 400);
+        assert!(c.lease_status_cmd.is_none());
+        assert_eq!(c.hosts["other-machine"].models, ["house-model-name"]);
+    }
+
+    #[test]
+    fn paths_from_cli_and_env() {
+        assert_eq!(resolve_path(Some("a"), Some("b".into())), Some("a".into()));
+        assert_eq!(resolve_path(None, Some("b".into())), Some("b".into()));
+        assert_eq!(resolve_path(None, None), None);
+        let c = Config::defaults(None);
+        // TEMPO_MCP_CONFIG value
+        assert_eq!(
+            mcp_path(None, Some("/m.json".into()), &c),
+            Some(PathBuf::from("/m.json"))
+        );
+        assert_eq!(
+            mcp_path(Some("/cli.json"), Some("/m.json".into()), &c),
+            Some(PathBuf::from("/cli.json"))
+        );
+        assert_eq!(mcp_path(None, None, &c), None);
+    }
+
+    #[test]
+    fn load_reads_file_and_env_override() {
+        let d = crate::util::testutil::tmpdir("cfg");
+        let f = d.join("c.json");
+        std::fs::write(&f, r#"{"models":["m1"]}"#).unwrap();
+        let env = |k: &str| match k {
+            "TEMPO_OLLAMA" => Some("http://127.0.0.1:9/".to_string()),
+            "TEMPO_AGENT_DATA" => Some("/dd".to_string()),
+            _ => None,
+        };
+        let c = Config::load(Some(f.to_str().unwrap()), None, &env).unwrap();
+        assert_eq!(c.models, ["m1"]);
+        assert_eq!(c.ollama_url, "http://127.0.0.1:9");
+        assert_eq!(c.data_dir, PathBuf::from("/dd"));
+        assert!(Config::load(Some("/no/such/file.json"), None, &env).is_err());
+    }
+}

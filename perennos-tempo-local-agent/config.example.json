@@ -1,0 +1,50 @@
+{
+  "ollama_url": "http://127.0.0.1:11434",
+  "data_dir": "./tempo-agent-data",
+
+  "models": ["heavy-model-name", "second-heavy-model-name"],
+  "fast_models": ["fast-model-name"],
+  "num_ctx": {"heavy-model-name": 8192, "second-heavy-model-name": 16384},
+  "keep_alive": "60m",
+  "temperature": 0.4,
+  "exclusive_models": [],
+  "retries": 3,
+  "retry_delay_ms": 10000,
+
+  "embed_model": "embeddinggemma",
+  "rag_files": ["/path/to/notes/MAIN-NOTES.md"],
+  "rag_globs": [{"pattern": "/path/to/notes/memory/*.md", "newest": 400}],
+  "pinned_current_files": [{"path": "/path/to/notes/TODAY.md", "tail": 40}],
+  "core_file": "/path/to/notes/CORE.md",
+  "owner_context": "Short description of who the agent works for (optional).",
+
+  "write_roots": ["/path/to/work-folder", "./tempo-agent-data"],
+  "trash_dir": "/path/to/trash",
+  "protect_regex": "my-protected-service|another-protected-service",
+  "command_cwd": "./tempo-agent-data",
+  "command_timeout_s": 60,
+  "offline_probe": "1.1.1.1:443",
+
+  "hosts": {
+    "other-machine": {
+      "urls": ["http://other-machine.example:11434"],
+      "models": ["house-model-name"]
+    }
+  },
+
+  "mcp_config": "/path/to/mcp.json",
+  "mcp_skip": [],
+  "mcp_blocked": {"some-server": ["tool_to_hide"]},
+  "mcp_confirm": [["some-server", "tool_that_needs_approval"]],
+  "mcp_hints": {"some-server": "keyword|another keyword"},
+  "mcp_start_timeout_s": 90,
+  "mcp_call_timeout_s": 600,
+
+  "comfy_url": "http://127.0.0.1:8188",
+  "comfy_output_dir": "/path/to/ComfyUI/output",
+  "comfy_start_cmd": null,
+  "comfy_stop_cmd": null,
+  "lease_status_cmd": null,
+  "lease_acquire_cmd": null,
+  "lease_release_cmd": null
+}
