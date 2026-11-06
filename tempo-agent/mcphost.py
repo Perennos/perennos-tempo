@@ -2,8 +2,11 @@
 Never prints env values. One reader thread per server; calls are matched by JSON-RPC id."""
 import json, os, subprocess, threading, itertools, queue, time
 
-CLAUDE_JSON = r"C:\Users\alexm\.claude.json"
-PROJECT_DIRS = [r"D:/Claude", r"D:/Claude/maarz-fm"]
+CLAUDE_JSON = os.path.expanduser(os.environ.get("TEMPO_CLAUDE_JSON") or "~/.claude.json")
+# Project folders whose MCP servers load too (TEMPO_MCP_PROJECT_DIRS, os.pathsep-separated).
+# tempo_agent.py may also set this from "mcp_project_dirs" in agent-config.json.
+PROJECT_DIRS = [os.path.expanduser(p).replace("\\", "/").rstrip("/")
+                for p in os.environ.get("TEMPO_MCP_PROJECT_DIRS", "").split(os.pathsep) if p.strip()]
 
 
 def load_server_configs():

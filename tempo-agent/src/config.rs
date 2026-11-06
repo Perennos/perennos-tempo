@@ -305,6 +305,15 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_shared_example_file() {
+        let c = AgentConfig::from_json(include_str!("../agent-config.example.json")).unwrap();
+        assert_eq!(c.fast_models, ["qwen3:4b"]);
+        assert_eq!((c.owner.as_str(), c.max_steps), ("Sam", 40));
+        assert!(c.needs_confirm("comfy-media", "run_workflow"));
+        assert_eq!(c.heavy_words, ["gpu-box"]);
+    }
+
+    #[test]
     fn claude_json_precedence() {
         let home = Some(PathBuf::from("/home/u"));
         assert_eq!(claude_json_from(None, None, home.clone()), PathBuf::from("/home/u/.claude.json"));

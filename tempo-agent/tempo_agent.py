@@ -7,33 +7,48 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mcphost
 
-HOME = r"C:\LocalAI\tempo-agent"
+# Run-time data (conversations, workflows, logs, rag-index.json) lives in TEMPO_AGENT_HOME, default this folder.
+# Machine-specific settings (folders, hosts, memory files, owner) live in agent-config.json there, never in git.
+# See agent-config.example.json for every key.
+HOME = os.path.expanduser(os.environ.get("TEMPO_AGENT_HOME") or os.path.dirname(os.path.abspath(__file__)))
+CFG_PATH = os.environ.get("TEMPO_AGENT_CONFIG") or os.path.join(HOME, "agent-config.json")
+try:
+    with open(CFG_PATH, encoding="utf-8") as _f:
+        CFG = json.load(_f)
+except FileNotFoundError:
+    CFG = {}
+_p = os.path.expanduser
 GUI_PORT = int(os.environ.get("TEMPO_GUI_PORT", "18795"))
 CONVS, WFS = os.path.join(HOME, "conversations"), os.path.join(HOME, "workflows")
 for d in (CONVS, WFS, os.path.join(HOME, "logs")):
     os.makedirs(d, exist_ok=True)
 
-OLLAMA = os.environ.get("TEMPO_OLLAMA", "http://127.0.0.1:11434")
-MODELS = ["uncensored-qwen3.8-27b-8k", "local-qwen3", "local-gpt-oss-32k"]  # 5 Nov: one fixed 8K alias so callers stop reloading each other  # fallback order
-NUM_CTX = {"uncensored-qwen3.8-27b-8k": 8192, "uncensored-qwen3.8-27b": 8192, "local-gpt-oss-32k": 16384, "local-qwen3": 8192}  # 5 Nov: 27B at 16-32K spilled 12% onto CPU on Beast's 16 GB GPU and timed out; 8K keeps it all on GPU
-EMBED_MODEL = "embeddinggemma"
+OLLAMA = os.environ.get("OLLAMA_URL") or os.environ.get("TEMPO_OLLAMA") or CFG.get("ollama_url") or "http://127.0.0.1:11434"
+MODELS = CFG.get("heavy_models") or ["uncensored-qwen3.8-27b-8k", "local-qwen3", "local-gpt-oss-32k"]  # 5 Nov: one fixed 8K alias so callers stop reloading each other  # fallback order
+NUM_CTX = {"uncensored-qwen3.8-27b-8k": 8192, "uncensored-qwen3.8-27b": 8192, "local-gpt-oss-32k": 16384, "local-qwen3": 8192, **(CFG.get("num_ctx") or {})}  # 5 Nov: 27B at 16-32K spilled 12% onto CPU on a 16 GB GPU and timed out; 8K keeps it all on GPU
+EMBED_MODEL = CFG.get("embed_model") or "embeddinggemma"
 MAX_STEPS, TOOL_CAP, RESULT_CAP, HIST_CHARS = 40, 40, 6000, 16000  # 5 Nov: HIST 16000 chars (~4K tokens) so an 8K window never truncates
-FAST_MODELS = ["local-qwen3", "uncensored-qwen3.8-27b-8k"]  # fast lane: Qwen3.5-9B fits fully on the GPU; heavy lane = MODELS
+FAST_MODELS = CFG.get("fast_models") or ["local-qwen3", "uncensored-qwen3.8-27b-8k"]  # fast lane: Qwen3.5-9B fits fully on the GPU; heavy lane = MODELS
 RAG_K, RAG_CHARS = 4, 700  # 5 Nov: cap memory in the prompt so prompt processing stays short
-WRITE_ROOTS = [r"C:\LocalAI\tempo-agent", r"D:\Claude\maarz-fm", r"D:\LocalAI\outputs", r"C:\LocalAI\scratch"]
+WRITE_ROOTS = [_p(r) for r in CFG.get("write_roots") or [HOME]]
+SCRATCH = _p(CFG.get("scratch_dir") or os.path.join(HOME, "scratch"))
+GPU_LEASE = _p(CFG.get("gpu_lease_script") or "")  # optional GPU lease helper used by comfy_image
+COMFY_OUT = _p(CFG.get("comfy_output_dir") or "")
+OWNER = CFG.get("owner") or "the owner"
+OWNER_NOTE = CFG.get("owner_note") or ""
+if CFG.get("claude_json") and not os.environ.get("TEMPO_CLAUDE_JSON"):
+    mcphost.CLAUDE_JSON = _p(CFG["claude_json"])
+if CFG.get("mcp_project_dirs") and not os.environ.get("TEMPO_MCP_PROJECT_DIRS"):
+    mcphost.PROJECT_DIRS = [_p(d).replace("\\", "/").rstrip("/") for d in CFG["mcp_project_dirs"]]
 SECRET_PATH = re.compile(r"(\.claude\.json|\.token$|\.key$|\.env|secret|credential|executor-token|password|id_rsa|\.pem$)", re.I)
 SECRET_TXT = [(re.compile(r"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization)['\"]?\s*[:=]\s*['\"]?)[^\s'\",;]{6,}"), r"\1[REDACTED]"),
               (re.compile(r"\b(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,})"), "[REDACTED]")]
 
-# Hosts: LAN first (works with no internet), Tailscale second. Protection: only the house model may be
-# requested on Brain and Zeus so a delegate call can never evict it; keep_alive is never set remotely.
-HOSTS = {
-    "beast": {"urls": ["http://127.0.0.1:11434"], "models": None},
-    "zeus": {"urls": ["http://192.168.108.231:11434", "http://100.124.109.122:11434"], "models": ["zeus-qwen36-35b"]},
-    "soul": {"urls": ["http://192.168.108.229:11434", "http://192.168.108.228:11434"], "models": ["uncensored-gemma4-26b-a4b-ultra"]},
-    "brain": {"urls": ["http://192.168.108.221:11434"], "models": ["hermarz-brain-qwen"]},
-    "base": {"urls": ["http://192.168.108.220:11434"], "models": None},
-}
+# Hosts come from agent-config.json "hosts": {"name": {"urls": [LAN url first, then a VPN url], "models": [house model] or null}}.
+# Protection: when "models" is set, only that house model may be requested there, so a delegate call can never
+# evict it; keep_alive is never set remotely. This machine is always available as LOCAL_HOST.
+LOCAL_HOST = CFG.get("local_host") or "local"
+HOSTS = {LOCAL_HOST: {"urls": [OLLAMA], "models": None}, **(CFG.get("hosts") or {})}
 HOST_OVERRIDE = {}  # tests: {"mockhost": {"urls": [...], "models": None}}
 
 
@@ -74,12 +89,12 @@ def net_up(_c={"t": 0, "v": False}):
 
 
 # ---------------------------------------------------------------- RAG (local, embeddinggemma)
-RAG_FILES = [r"C:\Users\alexm\.claude\CLAUDE.md", r"D:\Claude\maarz-fm\CLAUDE.md", r"C:\LocalAI\memory\SHARED_BRAIN.md",
-             r"D:\Claude\maarz-fm\OVERNIGHT-20261105.md", r"D:\Claude\maarz-fm\MORNING-NEEDS-20261105.md",
-             r"D:\Claude\maarz-fm\OFFLINE-AGENT-BRIEF-20261105.md"]
-RAG_GLOBS = [(r"C:\Users\alexm\.claude\projects\D--Claude-maarz-fm\memory\*.md", 400),
-             (r"C:\Users\alexm\Documents\Codex\continuity\*.md", 40)]  # newest N
-S16_PACK = r"D:\LocalAI\outputs\tempo-knowledge-s16-20261104\resume7\export\packs\2026.11.1\knowledge.jsonl"
+# Memory sources, all from agent-config.json: core files, [glob, newest N] pairs, an optional JSONL knowledge pack,
+# and [file, tail lines (0 = whole file)] pairs that lead "what am I working on" answers.
+RAG_FILES = [_p(f) for f in CFG.get("rag_files") or []]
+RAG_GLOBS = [(_p(g), int(n)) for g, n in CFG.get("rag_globs") or []]  # newest N
+S16_PACK = _p(CFG.get("knowledge_pack") or "")
+CURRENT_FILES = [(_p(f), int(t)) for f, t in CFG.get("current_files") or []]
 INDEX = os.path.join(HOME, "rag-index.json")
 _rag = {"docs": None, "lock": threading.Lock(), "embed_ok": None}
 
@@ -212,12 +227,12 @@ def rag_search(q, k=6):
         for i, c in enumerate(d["chunks"]):
             kw = len(qt & tok(c)) / (len(qt) + 1)
             sem = cos(qv, d["vecs"][i]) if qv and d.get("vecs") and i < len(d["vecs"]) else 0
-            core = 0.15 if (src in RAG_FILES and DEFN_RX.search(q)) else 0.0  # definitional questions: Alex's core files first
+            core = 0.15 if (src in RAG_FILES and DEFN_RX.search(q)) else 0.0  # definitional questions: the owner's core files first
             scored.append((sem + 0.6 * kw + 1.2 * head + rec + core + 0.5 * (kw if core else 0), src, i, c))
     scored.sort(key=lambda x: -x[0])
     out = []
     if CURRENT_RX.search(q):  # "what am I working on": always lead with the live work files
-        for p, tail in ((r"D:\Claude\maarz-fm\OVERNIGHT-20261105.md", 40), (r"D:\Claude\maarz-fm\MORNING-NEEDS-20261105.md", 0)):
+        for p, tail in CURRENT_FILES:
             try:
                 ls = open(p, encoding="utf-8", errors="replace").read().splitlines()
                 out.append({"score": 9.0, "src": p, "chunk": -1, "text": "\n".join(ls[-tail:] if tail else ls)[-3500:]})
@@ -235,7 +250,8 @@ def in_roots(path):
 
 
 DELETE_RX = re.compile(r"(?i)(^|[\s;|&(])(rm|del|erase|rmdir|rd|Remove-Item|ri|shred|unlink)(\s|$)")
-PROTECT_RX = re.compile(r"(?i)(lwa-voice|zeus-qwen36|hermarz-brain-qwen)")
+PROTECTED = CFG.get("protected_names") or []  # services/models run_command may never stop, kill or unload
+PROTECT_RX = re.compile("(?i)(" + "|".join(map(re.escape, PROTECTED)) + ")") if PROTECTED else None
 COMFY_RX = re.compile(r"(?i)comfy(\.exe)?\"?\s+(launch|start|stop|run)|ComfyUI[\\/]main\.py")
 CONFIRM_RX = re.compile(r"(?i)(>|\bSet-Content|\bOut-File|\bAdd-Content|\bNew-Item|\bMove-Item|\bCopy-Item|\bmv\b|\bcp\b|\bmkdir\b|"
                         r"\bInvoke-(WebRequest|RestMethod|Expression)|\bcurl\b|\bwget\b|\bpip\b|\bnpm\b|\bwinget\b|\bStart-Process|"
@@ -424,7 +440,7 @@ def t_read_file(conv, path, offset=0):
     return open(path, encoding="utf-8", errors="replace").read()[int(offset):int(offset) + RESULT_CAP]
 
 
-@builtin("write_file", "Write a text file inside the allowed folders (C:\\LocalAI\\tempo-agent, D:\\Claude\\maarz-fm, D:\\LocalAI\\outputs, C:\\LocalAI\\scratch). Overwrites need approval.",
+@builtin("write_file", "Write a text file inside the allowed folders (" + ", ".join(WRITE_ROOTS) + "). Overwrites need approval.",
          {"path": S("file path"), "content": S("text")}, ["path", "content"])
 def t_write_file(conv, path, content):
     if not in_roots(path):
@@ -449,15 +465,15 @@ def t_trash(conv, path):
     return "moved to Recycle Bin" if rc == 0 else "failed: " + out
 
 
-@builtin("run_command", "Run a PowerShell command in C:\\LocalAI\\tempo-agent. Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash).",
+@builtin("run_command", "Run a PowerShell command in " + WRITE_ROOTS[0] + ". Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash).",
          {"command": S("PowerShell command")}, ["command"])
 def t_run_command(conv, command):
     if DELETE_RX.search(command):
         return "refused: deleting is not allowed here; use the trash tool (Recycle Bin)"
     if COMFY_RX.search(command):
         return "refused: start ComfyUI only through the comfy_image tool (it takes the GPU lease)"
-    if PROTECT_RX.search(command) and re.search(r"(?i)stop|kill|rm|unload|delete|restart", command):
-        return "refused: protected service (lwa-voice, zeus-qwen36-35b, Brain house model)"
+    if PROTECT_RX and PROTECT_RX.search(command) and re.search(r"(?i)stop|kill|rm|unload|delete|restart", command):
+        return "refused: protected service (" + ", ".join(PROTECTED) + ")"
     if CONFIRM_RX.search(command) and not conv.confirm("run command", command):
         return "denied by user"
     out, rc = ps(command)
@@ -476,7 +492,7 @@ def t_fetch_url(conv, url):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", raw))).strip()
 
 
-@builtin("search_memory", "Search Alex's memory and soul files (CLAUDE.md, memory notes, SHARED_BRAIN, continuity, Perennos knowledge pack). Returns cited excerpts.",
+@builtin("search_memory", "Search the owner's memory files (core notes, memory notes, continuity, knowledge pack). Returns cited excerpts.",
          {"query": S("what to look for")}, ["query"])
 def t_search_memory(conv, query):
     return "\n\n".join(f"[{os.path.basename(r['src'])}#{r['chunk']}] {r['text'][:700]}" for r in rag_search(query, 5))
@@ -501,8 +517,8 @@ def probe_host(name):
     return None, f"host '{name}' unreachable on {', '.join(h['urls'])}"
 
 
-@builtin("delegate", "Run a subtask on another local engine (host: beast, zeus, soul, brain, base) with its own small tool loop. Use for second opinions, research or work another machine already has.",
-         {"host": S("beast|zeus|soul|brain|base"), "model": S("model name on that host, or empty for its house model"), "task": S("the subtask, self-contained")}, ["host", "task"])
+@builtin("delegate", "Run a subtask on another local engine (host: " + ", ".join(HOSTS) + ") with its own small tool loop. Use for second opinions, research or work another machine already has.",
+         {"host": S("|".join(HOSTS)), "model": S("model name on that host, or empty for its house model"), "task": S("the subtask, self-contained")}, ["host", "task"])
 def t_delegate(conv, host, task, model=""):
     p, err = probe_host(host)
     if err:
@@ -515,7 +531,7 @@ def t_delegate(conv, host, task, model=""):
     model = model or MODELS[0]
     if model not in avail and not any(a.startswith(model) for a in avail):
         return f"model '{model}' not on {host}. Available: {', '.join(avail[:15])}"
-    return sub_loop(conv, url, model, task, local=(host == "beast"))
+    return sub_loop(conv, url, model, task, local=(host == LOCAL_HOST))
 
 
 def sub_loop(conv, url, model, task, local):
@@ -546,8 +562,8 @@ CLAUDE_EXE = os.path.expandvars(r"%USERPROFILE%\.local\bin\claude.exe")
 
 
 @builtin("claude_code", "Hand a coding or multi-file task to the Claude Code harness running on the LOCAL engine (Ollama's Anthropic-compatible API, no cloud). Gives the full Claude Code tool set and its MCP servers. read_only=true by default.",
-         {"task": S("self-contained task"), "cwd": S("working folder (default C:\\LocalAI\\scratch)"), "read_only": {"type": "boolean"}, "model": S("default local-qwen3 (27B fails: its template rejects mid-conversation system messages)")}, ["task"])
-def t_claude_code(conv, task, cwd=r"C:\LocalAI\scratch", read_only=True, model=""):
+         {"task": S("self-contained task"), "cwd": S("working folder (default " + SCRATCH + ")"), "read_only": {"type": "boolean"}, "model": S("default local-qwen3 (27B fails: its template rejects mid-conversation system messages)")}, ["task"])
+def t_claude_code(conv, task, cwd=SCRATCH, read_only=True, model=""):
     if not os.path.isfile(CLAUDE_EXE):
         return "claude.exe not found"
     if not read_only and not conv.confirm("claude_code with write access", f"{cwd}: {task[:200]}"):
@@ -561,7 +577,9 @@ def t_claude_code(conv, task, cwd=r"C:\LocalAI\scratch", read_only=True, model="
 
 
 def gpu_status():
-    out, _ = ps(r"python C:\LocalAI\gpu\lease.py status")
+    if not GPU_LEASE:
+        return "gpu_lease_script is not set in agent-config.json"
+    out, _ = ps(f'python "{GPU_LEASE}" status')
     return out
 
 
@@ -604,13 +622,15 @@ def comfy_txt2img(prompt, w, h):
         hist = http_json(COMFY + "/history/" + pid, timeout=30).get(pid)
         if hist and hist.get("outputs"):
             im = hist["outputs"]["7"]["images"][0]
-            return os.path.join(r"C:\LocalAI\apps\ComfyUI\output", im.get("subfolder", ""), im["filename"])
+            return os.path.join(COMFY_OUT or "ComfyUI output", im.get("subfolder", ""), im["filename"])
         time.sleep(2)
     raise TimeoutError("ComfyUI did not finish in 10 minutes")
 
 @builtin("comfy_image", "Make one image with local ComfyUI and return the file path. Unloads the language model, takes the GPU lease, runs ComfyUI, then releases the GPU.",
          {"prompt": S("image prompt"), "width": {"type": "integer"}, "height": {"type": "integer"}}, ["prompt"])
 def t_comfy_image(conv, prompt, width=512, height=512):
+    if not GPU_LEASE:
+        return "refused: set gpu_lease_script in agent-config.json so ComfyUI never takes a GPU another job holds"
     st = gpu_status()
     try:
         free = json.loads(st).get("lease") is None
@@ -623,7 +643,7 @@ def t_comfy_image(conv, prompt, width=512, height=512):
     conv.emit("status", text="unloading Tempo's own language model so ComfyUI gets the GPU")
     unload_ollama()  # only our own models; the lease below still refuses if anything else holds VRAM
     time.sleep(3)
-    out, rc = ps(rf"python C:\LocalAI\gpu\lease.py --holder {holder} --portfolio tempo-agent --need-mib 8000 --ttl-min 20 --wait-min 0 acquire")
+    out, rc = ps(f'python "{GPU_LEASE}" --holder {holder} --portfolio tempo-agent --need-mib 8000 --ttl-min 20 --wait-min 0 acquire')
     if rc != 0:
         return "lease refused: " + out[:400]
     conv.emit("status", text="GPU lease taken")
@@ -648,7 +668,7 @@ def t_comfy_image(conv, prompt, width=512, height=512):
             TOOLS.server("comfy-media").call("stop_comfyui", {}, 60)
         except Exception:
             pass
-        ps(rf"python C:\LocalAI\gpu\lease.py --holder {holder} release")
+        ps(f'python "{GPU_LEASE}" --holder {holder} release')
         conv.emit("status", text="GPU lease released")
 
 
@@ -701,7 +721,7 @@ def chat_once(model, messages, tools, conv=None):
 
 
 TOOLISH = re.compile(r"\b(list|ls|dir|folder|directory|read|open|run|execute|command|write|save|create|make|generate|render|image|picture|"
-                     r"delegate|zeus|soul|brain|base|trash|delete|remove|fetch|download|install|restart|start|stop|comfy|workflow|task list|todo|"
+                     r"delegate|" + "|".join(map(re.escape, HOSTS)) + r"|trash|delete|remove|fetch|download|install|restart|start|stop|comfy|workflow|task list|todo|"
                      r"fix|edit|patch|status of|check (the )?(status|disk|gpu))\b|[A-Za-z]:\\|\.(py|md|json|ps1|txt|log)\b", re.I)
 HARDISH = re.compile(r"\b(analy[sz]e|compare|plan|design|architecture|debug|step by step|prove|calculate|code|script|refactor|review|draft)\b", re.I)
 
@@ -730,14 +750,14 @@ def trim(messages):
     return [sysm] + rest
 
 
-SYSTEM = """You are Perennos Tempo, Alex's local superagent: the harness around a local model. You run on Beast with no cloud and may have no internet and no homelab.
-Alex is the owner of Perennos (AI company, Tempo/UMBRA) and of the MAARZ music/stream business. Today is {today}.
+SYSTEM = """You are Perennos Tempo, {owner}'s local superagent: the harness around a local model. You run on this machine with no cloud and may have no internet and no other machines.
+{owner_note}Today is {today}.
 Rules:
-- Answer from the MEMORY excerpts below when they cover the question, and cite each source as [filename]. If they do not cover it, say so; never invent facts about Alex's work.
+- Answer from the MEMORY excerpts below when they cover the question, and cite each source as [filename]. If they do not cover it, say so; never invent facts about {owner}'s work.
 - Use tools to do things (list folders, run commands, make images, ask other machines with delegate). Check results before claiming success. Report failures plainly.
-- Never delete anything; the only removal is the trash tool (Recycle Bin) and it needs Alex's approval. Never touch secrets.
+- Never delete anything; the only removal is the trash tool (Recycle Bin) and it needs {owner}'s approval. Never touch secrets.
 - Keep a task list for multi-step jobs with workflow_update. The saved workflow is below; continue from it.
-- Be brief and direct: under 120 words unless Alex asks for detail; do not dump whole lists. No disclaimers.
+- Be brief and direct: under 120 words unless {owner} asks for detail; do not dump whole lists. No disclaimers.
 WORKFLOW FILE (persistent):
 {wf}
 """
@@ -750,7 +770,7 @@ def agent_turn(conv, text):
         hits = rag_search(text, RAG_K)
         mem = "\n\n".join(f"[{os.path.basename(h['src'])}] {h['text'][:RAG_CHARS]}" for h in hits)
         conv.emit("status", text="memory: " + ", ".join(sorted({os.path.basename(h['src']) for h in hits})))
-        sysmsg = {"role": "system", "content": SYSTEM.format(today=time.strftime("%d %b %Y"), wf=conv.wf_text()[-2500:]) + "\nMEMORY EXCERPTS:\n" + mem}
+        sysmsg = {"role": "system", "content": SYSTEM.format(owner=OWNER, owner_note=OWNER_NOTE + "\n" if OWNER_NOTE else "", today=time.strftime("%d %b %Y"), wf=conv.wf_text()[-2500:]) + "\nMEMORY EXCERPTS:\n" + mem}
         if not conv.messages or conv.messages[0]["role"] != "system":
             conv.messages.insert(0, sysmsg)
         else:

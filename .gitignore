@@ -16,3 +16,14 @@ payload.zip
 python-runtime.zip
 # Rust build output
 target/
+# tempo-agent run-time data and machine settings: built locally, never committed
+tempo-agent/agent-config.json
+tempo-agent/conversations/
+tempo-agent/workflows/
+tempo-agent/logs/
+tempo-agent/scratch/
+tempo-agent/rag-index.json
+tempo-agent/gui-ui/
+tempo-agent/edge-profile/
+.claude.json
+.mcp.json
