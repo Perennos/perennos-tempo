@@ -35,6 +35,9 @@
   "fetch_allow_hosts": [],
   "fetch_allow_private": [],
   "packs_allow": [],
+  "command_allow": ["cargo test", "cargo clippy", "npm run lint"],
+  "command_deny": ["git push", "docker"],
+  "permission": "default",
 
   "mcp_config": "/path/to/mcp.json",
   "mcp_skip": [],

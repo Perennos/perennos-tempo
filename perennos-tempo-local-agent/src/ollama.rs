@@ -49,12 +49,43 @@ pub fn chat_once(
     tools: &[Value],
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
+    chat_with(cfg, model, messages, tools, false, on_text)
+}
+
+/// `chat_once`, thinking first when `think` (models that cannot think answer as usual: the
+/// engine's "does not support thinking" is retried once without it).
+pub fn chat_with(
+    cfg: &Config,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    think: bool,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<ChatResult, String> {
+    match chat_raw(cfg, model, messages, tools, think, on_text) {
+        Err(e) if think && e.contains("does not support thinking") => {
+            chat_raw(cfg, model, messages, tools, false, on_text)
+        }
+        r => r,
+    }
+}
+
+fn chat_raw(
+    cfg: &Config,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    think: bool,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<ChatResult, String> {
     let mut body = json!({"model": model, "messages": messages, "stream": true, "keep_alive": cfg.keep_alive,
         "options": {"num_ctx": cfg.num_ctx_for(model), "temperature": cfg.temperature}});
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
-    if Config::is_qwen(model) {
+    if think {
+        body["think"] = json!(true);
+    } else if Config::is_qwen(model) {
         body["think"] = json!(false); // other families never get think:false
     }
     make_room(cfg, model);

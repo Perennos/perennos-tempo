@@ -12,7 +12,7 @@ cargo build --release
 ./target/release/tempo-local-agent --config config.json                                # line REPL
 ```
 
-Options: `--config PATH` (or env `TEMPO_AGENT_CONFIG`), `--mcp-config PATH` (or env `TEMPO_MCP_CONFIG`), `--conv ID` to continue a conversation, `--reindex` to rebuild the RAG index, `--help`.
+Options: `--config PATH` (or env `TEMPO_AGENT_CONFIG`), `--mcp-config PATH` (or env `TEMPO_MCP_CONFIG`), `--conv ID` to continue a conversation, `-c`/`--continue` for the most recent one, `--reindex` to rebuild the RAG index, `--help`. A new conversation started from the terminal works in the folder you started it in.
 
 MCP servers load only from a file you name. That can be a plain `{"mcpServers": {...}}` file or your Claude Code `~/.claude.json` (`--mcp-config ~/.claude.json`); with the latter, the per-project servers and `.mcp.json` of the folders in env `TEMPO_MCP_PROJECT_DIRS` (path-list separated) load too.
 
@@ -33,13 +33,47 @@ Streamed text goes to stdout, status lines to stderr. With no config file it use
 - Approvals appear in the GUI. `/agent/confirm` resolves only an id this server issued for that conversation, and only an explicit `true` approves; an unanswered approval is denied after `--confirm-timeout` seconds (default 900).
 - One worker runs turns in order; reading memory or events never waits for a turn and never creates a conversation. Event text and file excerpts are redacted.
 
+## Working in a project
+
+The habits that make Claude Code and Codex good to work with, built in and running on your own machines:
+
+- **Project instructions.** `AGENTS.md`, `TEMPO.md` and `CLAUDE.md` from the top of the project (the folder with `.git`) down to the working folder go into the system prompt, nearer files last, after your own `<Tempo home>/AGENTS.md`. A line `@docs/style.md` brings that file in (one level, inside the project). They say how to work here; they never override the safety rules or your approvals. Capped at 8,000 characters, redacted.
+- **`@file`** in a message attaches that file (up to six, 10,000 characters each; secret files never).
+- **Commands** (typed in the chat; the model never sees them):
+
+  | Command | What it does |
+  | --- | --- |
+  | `/cd <folder>` | Work in another folder: commands run there, relative paths start there, its instructions apply |
+  | `/mode default`, `accept-edits`, `plan` | How much Tempo may do without asking (below) |
+  | `/plan [task]` | Plan mode; with a task, plan it |
+  | `/undo` | Put back every file the last changing turn changed; their newer versions go to the trash |
+  | `/diff` | What the last changing turn changed |
+  | `/think [on\|off]` | Think before answering, with models that can (DeepSeek-R1, Qwen 3 and others); a model that cannot is asked again without it |
+  | `/model [name]` | The model for this conversation; the config's stay as fallbacks |
+  | `/compact [focus]` | Ask the model for a summary and put it in place of the history |
+  | `/clear` | A fresh start; the history so far is kept as its own conversation |
+  | `/init` | Look at the folder and write an `AGENTS.md` for it |
+  | `/review [what]` | Review the changes in the folder (`git diff`), change nothing |
+  | `/usage`, `/status` | Tokens and engine time; folder, mode, model, instructions |
+  | `/name args` | Your own: `<project>/.tempo/commands/name.md` or `<Tempo home>/commands/name.md`, with `$ARGUMENTS` and `$1`..`$9` |
+  | `!command` | Run a command yourself in the folder (the deny list and the no-delete rule still hold); its output joins the conversation |
+
+  Rooms' guests have none of these: what they type is only text.
+- **Modes.** `default` asks before every change. `accept-edits` writes and edits files inside `write_roots` without asking (commands, the trash and new websites still ask). `plan` offers only the tools that read, refuses the rest, and asks the model for a numbered plan instead of changes. `permission` in the config sets the mode new conversations start in.
+- **Checkpoints.** Before a turn first changes a file, what it held is kept in `<data>/checkpoints/<conversation>/<turn>/`. After a turn that changed files, a status line lists them (`a.rs +3 -1, notes.md (new) +12`); `/diff` and `/undo` work from there. Nothing is deleted on the way: an undone version and a file the turn created both go to the trash.
+- **`apply_patch`** changes several files in one step in the patch format Codex uses (`*** Begin Patch`, `*** Add File:`, `*** Update File:` with `*** Move to:`, `*** Delete File:`, `@@` hunks). Each hunk is found by its lines (exactly, then ignoring trailing spaces, then indentation); the patch applies whole or not at all; line endings are kept; a deleted file goes to the trash and asks first.
+- **Command lists.** `command_allow` lists prefixes that run without asking (`cargo test`, `npm run lint`), matched word for word on every part of a command with no redirection or substitution. `command_deny` lists ones that never run (`git push`, `docker`).
+- **Tool calls written as text.** Local models often write a call as text instead of making it: Hermes and Qwen `<tool_call>{...}</tool_call>`, DeepSeek's `<｜tool▁sep｜>name` with a JSON block, or a reply that is only `{"name": ..., "arguments": {...}}`. Tempo runs those as the calls they are, for offered tools only.
+- **Trims leave notes.** When the history is trimmed to its budget, a short note of what was dropped (each request, each tool call, the start of each answer) takes its place, so the thread of the work survives without an extra model call; `/compact` asks for a real summary.
+- **Fresh reads.** The repeat guard (the same call is not run twice in a turn) forgets earlier reads after anything that may change files, so a check after an edit reads the file as it is now.
+
 ## What it does
 
 - Agent loop: up to 40 steps, history trimmed to a character budget, repeat-call guard (the same call is not re-run), and at the step cap one last request with no tools that asks what is done and what is next.
 - Lanes: short plain questions go to a fast model with no tools (it answers `NEEDS_TOOLS` to hand the turn to the heavy lane); anything tool-like, hard or long goes straight to the heavy lane.
 - Engine retry: an HTTP error or an in-band `{"error":...}` line (for example a CUDA crash on the first request after a model load) retries the same model up to 3 times, then falls back to the next model in the lane. If all fail the turn ends with "all engines failed".
 - Timing of every request (first token, total, load, prompt tokens) is appended to `logs/timing.jsonl` in the data dir.
-- Builtin tools: `list_dir`, `read_file`, `write_file`, `trash`, `run_command`, `fetch_url`, `search_memory`, `workflow_update`, `delegate`, `comfy_image`, `edit_file`, `grep`, `glob`.
+- Builtin tools: `list_dir`, `read_file`, `write_file`, `trash`, `run_command`, `fetch_url`, `search_memory`, `workflow_update`, `delegate`, `comfy_image`, `edit_file`, `grep`, `glob`, `apply_patch`.
 - MCP: stdio servers from a `{"mcpServers": {"name": {"command", "args", "env"}}}` file. The agent offers all builtins plus up to 8 MCP tools picked by keyword fit to the prompt, named `server__tool`. A server that fails to start or stops later (`ssh zeus tempo-vault mcp` while Zeus is off) is started again at the next turn, at most once a minute, and its tools come back; what it writes to stderr is kept in `logs/mcp-<name>.log` and its last line is in the error.
 - RAG: markdown files and globs from the config, chunked on blank lines, embedded with `embeddinggemma` on the CPU only (`num_gpu: 0`), cached in `rag-index.json` per file (reused while the file mtime is unchanged). If embedding fails, keyword search still works.
 - Workflow: `workflows/<conv>.md` has `## Task list`, `## Notes` and `## Log`; the last 2500 characters go into the system prompt. Conversations are saved atomically under `conversations/`.
@@ -68,7 +102,9 @@ All keys are optional. See `config.example.json` for placeholders.
 | `prefix_stable` (default `true`) | Keep the system message and the offered tools fixed within a conversation, put per-turn context (date, workflow tail, memory) in that turn's user message, and trim history with headroom. Every request then starts with the previous one, so Ollama reuses its cached prompt and only processes new tokens. `false` restores the original layout. |
 | `embed_model`, `rag_files`, `rag_globs`, `pinned_current_files` | RAG sources; `rag_globs` entries are `{"pattern", "newest"}`; pinned files lead the results for "what am I working on" style questions |
 | `core_file`, `owner_context` | Text pinned into every system prompt |
-| `write_roots`, `trash_dir`, `protect_regex`, `command_cwd`, `command_timeout_s` | Safety and shell settings |
+| `write_roots`, `trash_dir`, `protect_regex`, `command_cwd`, `command_timeout_s` | Safety and shell settings (`command_cwd` is where a conversation works until `/cd`) |
+| `command_allow`, `command_deny` | Command prefixes that run without asking, and ones that never run |
+| `permission` | The mode new conversations start in: `default`, `accept-edits` or `plan` |
 | `offline_probe` | `host:port` for the quick offline check (env `TEMPO_OFFLINE` forces offline) |
 | `hosts` | Name to `{"urls": [...], "models": [...], "trust_reads": false}` for `delegate`; an implicit `local` host is the main Ollama. A remote host's model asks before each file it reads here, unless `trust_reads` marks the machine as your own |
 | `fetch_allow_hosts` | Hosts `fetch_url` reads without asking (`example.com`, `*.example.com`); others ask once per conversation |

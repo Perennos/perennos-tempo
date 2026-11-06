@@ -1,7 +1,8 @@
 //! Builtin tools (OpenAI-style function schemas) and their guarded implementations.
 //! Safety: write roots, secret-path refusal, delete refusal, confirmation, trash is MOVE ONLY.
+use crate::checkpoint::Checkpoints;
 use crate::config::Config;
-use crate::conv::{Confirm, Conv};
+use crate::conv::{Confirm, Conv, Permission};
 use crate::fstools;
 use crate::mcp::McpHost;
 use crate::ollama;
@@ -28,6 +29,8 @@ pub struct Env {
     protect: Option<Regex>,
     /// Hosts the owner let `fetch_url` read, per conversation (asked once each).
     fetch_ok: RefCell<HashMap<String, HashSet<String>>>,
+    /// What files held before a turn changed them (`/undo`, `/diff`).
+    pub checkpoints: Checkpoints,
 }
 
 /// The host of an http(s) address, lower case, without the port.
@@ -66,7 +69,7 @@ pub fn builtin_schemas() -> Vec<Value> {
         func("read_file", "Read a text file (first 6000 chars unless offset given).", json!({"path": s("file path"), "offset": int}), &["path"]),
         func("write_file", "Write a text file inside the allowed write folders. Overwrites need approval.", json!({"path": s("file path"), "content": s("text")}), &["path", "content"]),
         func("trash", "Move a file or folder into the trash folder (the only way to remove anything; nothing is ever deleted). Needs approval.", json!({"path": s("path")}), &["path"]),
-        func("run_command", "Run a shell command (PowerShell on Windows, sh elsewhere). Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash).", json!({"command": s("shell command")}), &["command"]),
+        func("run_command", "Run a shell command (PowerShell on Windows, sh elsewhere) in the conversation's folder. Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash).", json!({"command": s("shell command"), "cwd": s("optional folder to run in (relative to the conversation's folder)")}), &["command"]),
         func("fetch_url", "Fetch a web page as text. Works only when the internet is up; fails cleanly offline.", json!({"url": s("http(s) URL")}), &["url"]),
         func("search_memory", "Search the user's memory and notes (configured markdown files). Returns cited excerpts.", json!({"query": s("what to look for")}), &["query"]),
         func("workflow_update", "Update this conversation's persistent task list and notes. Call it when you plan work and after each step.",
@@ -80,6 +83,8 @@ pub fn builtin_schemas() -> Vec<Value> {
         func("grep", "Regex search over files (skips binaries, big files, .git, node_modules). Returns path:line: text.",
             json!({"pattern": s("regex"), "path": s("file or folder"), "glob": s("filename filter such as *.py"), "ignore_case": boolean, "context": int, "max_results": int}), &["pattern", "path"]),
         func("glob", "Find files by pattern (e.g. **/*.py), newest first, max 100.", json!({"pattern": s("glob pattern"), "path": s("folder")}), &["pattern", "path"]),
+        func("apply_patch", "Change several files in one step. Format: *** Begin Patch, then for each file *** Add File: path (every line +text), *** Delete File: path (goes to the trash), or *** Update File: path (optional *** Move to: path) with hunks: an optional '@@ line the change comes after', then lines starting ' ' (context, about 3 lines), '-' (remove) or '+' (add); then *** End Patch. Applies whole or not at all; /undo puts it back.",
+            json!({"patch": s("the whole patch text")}), &["patch"]),
     ]
 }
 
@@ -208,6 +213,15 @@ static NET_CACHE: Mutex<Vec<(String, Instant, bool)>> = Mutex::new(Vec::new());
 /// The longest request an approval shows (whole); anything longer is refused unasked.
 pub const APPROVAL_MAX: usize = 20_000;
 
+/// Builtins that change something (refused in plan mode; offered only outside it).
+pub const CHANGES: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "trash",
+    "comfy_image",
+];
+
 /// Programs that read only when run with nothing after them, or only the options listed: with
 /// other options they write a file (`tree -o`), set the clock (`date -s`), rename the machine
 /// (`hostname x`), drop the network (`ipconfig /release`) or change the GPU (`nvidia-smi -pl`).
@@ -266,7 +280,9 @@ const READ_ONLY: &[&str] = &[
 
 /// True when `cmd` is made only of read-only programs joined by `;`, `&&`, `||` or `|`, with no
 /// redirection, substitution, background `&` or line break.
-pub fn is_read_only(cmd: &str) -> bool {
+/// The parts of a plain command (split on `;`, `&&`, `||` and `|`), or None when it redirects,
+/// substitutes, runs in the background or spans lines (then nothing about it is plain).
+pub fn plain_parts(cmd: &str) -> Option<Vec<String>> {
     if cmd.trim().is_empty()
         || cmd.chars().any(|c| {
             matches!(
@@ -275,38 +291,84 @@ pub fn is_read_only(cmd: &str) -> bool {
             )
         })
     {
-        return false;
+        return None;
     }
     let flat = cmd.replace("&&", ";").replace("||", ";").replace('|', ";");
     if flat.contains('&') {
-        return false;
+        return None;
     }
-    flat.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .all(|seg| {
-            let seg = seg.strip_prefix("exec ").unwrap_or(seg).trim();
-            let mut words = seg.split_whitespace();
-            let first = words.next().unwrap_or("").to_ascii_lowercase();
-            let first = first.strip_suffix(".exe").unwrap_or(&first);
-            if first == "git" {
-                return matches!(
-                    words.next(),
-                    Some("status" | "log" | "show" | "diff" | "rev-parse" | "ls-files")
-                ) && !seg.contains("--output");
-            }
-            if let Some((_, ok)) = BARE_ONLY.iter().find(|(p, _)| *p == first) {
-                // each option must be one listed (`--query-gpu=name` and `--format=csv` count)
-                return words.all(|w| {
-                    ok.iter().any(|o| {
-                        w.eq_ignore_ascii_case(o)
-                            || (o.starts_with("--")
-                                && w.strip_prefix(o).is_some_and(|r| r.starts_with(['-', '='])))
-                    })
-                });
-            }
-            READ_ONLY.contains(&first)
+    Some(
+        flat.split(';')
+            .map(|s| {
+                s.trim()
+                    .strip_prefix("exec ")
+                    .unwrap_or(s.trim())
+                    .trim()
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// `prefix` matches `part` word for word (`cargo test` matches `cargo test --all`, not `cargo testx`).
+fn starts_with_words(part: &str, prefix: &str) -> bool {
+    let (p, w): (Vec<&str>, Vec<&str>) = (
+        prefix.split_whitespace().collect(),
+        part.split_whitespace().collect(),
+    );
+    !p.is_empty()
+        && w.len() >= p.len()
+        && p.iter()
+            .zip(&w)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b.strip_suffix(".exe").unwrap_or(b)))
+}
+
+/// The owner's `command_deny` entry a command hits, if any (checked on every part, and on the
+/// command as a whole when it is not plain).
+pub fn denied_by<'a>(cmd: &str, deny: &'a [String]) -> Option<&'a String> {
+    let parts = plain_parts(cmd).unwrap_or_else(|| vec![cmd.to_string()]);
+    deny.iter()
+        .find(|d| parts.iter().any(|p| starts_with_words(p, d)) || cmd.contains(d.as_str()))
+}
+
+/// Runs without asking: every part is read-only or starts with an owner's `command_allow` entry.
+pub fn allowed_unasked(cmd: &str, allow: &[String]) -> bool {
+    is_read_only(cmd)
+        || plain_parts(cmd).is_some_and(|parts| {
+            parts
+                .iter()
+                .all(|p| is_read_only(p) || allow.iter().any(|a| starts_with_words(p, a)))
         })
+}
+
+pub fn is_read_only(cmd: &str) -> bool {
+    let Some(parts) = plain_parts(cmd) else {
+        return false;
+    };
+    parts.iter().map(String::as_str).all(|seg| {
+        let seg = seg.strip_prefix("exec ").unwrap_or(seg).trim();
+        let mut words = seg.split_whitespace();
+        let first = words.next().unwrap_or("").to_ascii_lowercase();
+        let first = first.strip_suffix(".exe").unwrap_or(&first);
+        if first == "git" {
+            return matches!(
+                words.next(),
+                Some("status" | "log" | "show" | "diff" | "rev-parse" | "ls-files")
+            ) && !seg.contains("--output");
+        }
+        if let Some((_, ok)) = BARE_ONLY.iter().find(|(p, _)| *p == first) {
+            // each option must be one listed (`--query-gpu=name` and `--format=csv` count)
+            return words.all(|w| {
+                ok.iter().any(|o| {
+                    w.eq_ignore_ascii_case(o)
+                        || (o.starts_with("--")
+                            && w.strip_prefix(o).is_some_and(|r| r.starts_with(['-', '='])))
+                })
+            });
+        }
+        READ_ONLY.contains(&first)
+    })
 }
 
 /// Offline check: env TEMPO_OFFLINE, else a quick TCP connect to the probe address (cached 20 s).
@@ -458,6 +520,8 @@ impl Env {
             "logs",
             "rag-index.json",
             "agent-config.json",
+            "checkpoints",
+            "control.key",
         ]
         .iter()
         .map(|n| cfg.data_dir.join(n))
@@ -465,6 +529,7 @@ impl Env {
         for var in ["TEMPO_AGENT_CONFIG", "TEMPO_MCP_CONFIG"] {
             keep.extend(std::env::var_os(var).map(PathBuf::from));
         }
+        let checkpoints = Checkpoints::new(&cfg.data_dir);
         Env {
             guard: Guard::new(&cfg.write_roots).keeping(&keep),
             cfg,
@@ -473,7 +538,141 @@ impl Env {
             mcp: RefCell::new(mcp),
             protect,
             fetch_ok: RefCell::new(HashMap::new()),
+            checkpoints,
         }
+    }
+
+    /// Keep what a file holds before this turn changes it (for `/undo` and `/diff`).
+    fn keep(&self, conv: &Conv, real: &Path) -> Result<(), String> {
+        self.checkpoints.keep(&conv.id, conv.turns, real)
+    }
+
+    /// Move a path into `<trash>/<YYYYMMDD>/` under a unique name (nothing is ever deleted).
+    fn to_trash(&self, real: &Path) -> Result<PathBuf, String> {
+        let day = self.cfg.trash_dir.join(util::date_ymd());
+        std::fs::create_dir_all(&day)
+            .map_err(|e| format!("failed: cannot create trash folder: {e}"))?;
+        let name = real
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "item".into());
+        let dest = unique_dest(&day, &name);
+        std::fs::rename(real, &dest).map_err(|e| {
+            format!(
+                "failed: could not move {} ({e}); nothing was changed or deleted",
+                real.display()
+            )
+        })?;
+        Ok(dest)
+    }
+
+    /// The folder this conversation works in.
+    pub fn cwd(&self, conv: &Conv) -> PathBuf {
+        conv.cwd
+            .clone()
+            .unwrap_or_else(|| self.cfg.command_cwd.clone())
+    }
+
+    /// Several files in one step, Codex's patch format (see `patch`). Applies whole or not at all;
+    /// what each file held is kept for `/undo`; deletions and the old names of moves go to the
+    /// trash and ask first, as the trash tool does.
+    fn apply_patch(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        let src = sarg(a, "patch")?;
+        let changes = match crate::patch::plan(src, &self.cwd(conv)) {
+            Ok(c) => c,
+            Err(e) => return Ok(format!("error: {e}")),
+        };
+        for c in &changes {
+            for p in [Some(&c.path), c.moved_from.as_ref()].into_iter().flatten() {
+                let ps = p.to_string_lossy();
+                if is_secret_path(&ps) {
+                    return Ok(format!("refused: secret path {ps}"));
+                }
+                if self.guard.writable(&ps).is_none() {
+                    return Ok(format!("refused: {ps} is outside the allowed write folders (or a link, or the agent's own state)"));
+                }
+            }
+        }
+        // deleting always asks (as the trash tool does); the old name of a move asks unless the
+        // owner chose accept-edits
+        let edits_ok = conv.permission == Permission::AcceptEdits;
+        let leaving: Vec<String> = changes
+            .iter()
+            .filter_map(|c| match (&c.after, &c.moved_from) {
+                (None, _) => Some(c.path.display().to_string()),
+                (_, Some(m)) if !edits_ok => Some(m.display().to_string()),
+                _ => None,
+            })
+            .collect();
+        if !leaving.is_empty() {
+            if let Err(no) = self.ask("move to trash (from a patch)", &leaving.join("\n")) {
+                return Ok(no);
+            }
+        }
+        let clobber: Vec<String> = changes
+            .iter()
+            .filter(|c| c.before.is_some() && (c.add || c.moved_from.is_some()))
+            .map(|c| c.path.display().to_string())
+            .collect();
+        if !clobber.is_empty() && !edits_ok {
+            if let Err(no) = self.ask("overwrite file (from a patch)", &clobber.join("\n")) {
+                return Ok(no);
+            }
+        }
+        for c in &changes {
+            self.keep(conv, &c.path)?;
+            if let Some(m) = &c.moved_from {
+                self.keep(conv, m)?;
+            }
+        }
+        let mut done = vec![];
+        for c in &changes {
+            let name = c.path.display().to_string();
+            match &c.after {
+                Some(text) => {
+                    if let Some(p) = c.path.parent() {
+                        let _ = std::fs::create_dir_all(p);
+                    }
+                    // what a changed file held also goes to the trash first, as edit_file keeps a copy
+                    if c.before.is_some() {
+                        let bdir = self
+                            .cfg
+                            .trash_dir
+                            .join(util::date_ymd())
+                            .join("tempo-agent-edits");
+                        std::fs::create_dir_all(&bdir)
+                            .map_err(|e| format!("error: cannot create backup folder: {e}"))?;
+                        let base = c
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        std::fs::copy(
+                            &c.path,
+                            unique_dest(&bdir, &format!("{base}.{}.bak", util::time_hms())),
+                        )
+                        .map_err(|e| format!("error: backup failed, {name} not changed: {e}"))?;
+                    }
+                    std::fs::write(&c.path, text)
+                        .map_err(|e| format!("error: cannot write {name}: {e}"))?;
+                    let (plus, minus) = crate::patch::counts(c.before.as_deref(), Some(text));
+                    done.push(match (&c.moved_from, c.before.is_some()) {
+                        (Some(m), _) => format!("moved {} to {name} +{plus} -{minus}", m.display()),
+                        (None, false) => format!("added {name} +{plus}"),
+                        (None, true) => format!("updated {name} +{plus} -{minus}"),
+                    });
+                    if let Some(m) = &c.moved_from {
+                        self.to_trash(m)?;
+                    }
+                }
+                None => {
+                    let dest = self.to_trash(&c.path)?;
+                    done.push(format!("moved {name} to the trash ({})", dest.display()));
+                }
+            }
+        }
+        Ok(format!("patch applied: {}", done.join("; ")))
     }
 
     /// Ask the owner, showing the whole request: nobody should approve text they could not read
@@ -499,12 +698,28 @@ impl Env {
 
     /// Run a builtin by name. Result is NOT yet redacted/capped (the loop does that).
     pub fn run_builtin(&self, conv: &Conv, name: &str, a: &Value) -> String {
+        if conv.permission == Permission::Plan && CHANGES.contains(&name) {
+            return format!("refused: plan mode only reads and plans; {name} changes things. Put this step in the plan; the owner leaves plan mode with /mode default when it is approved.");
+        }
+        // a relative path means the conversation's folder (`/cd`), as for commands
+        let mut fixed;
+        let mut a = a;
+        if let Some(p) = a
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty() && Path::new(p).is_relative())
+        {
+            fixed = a.clone();
+            fixed["path"] = json!(self.cwd(conv).join(p).to_string_lossy());
+            a = &fixed;
+        }
         let r = match name {
             "list_dir" => self.list_dir(a),
             "read_file" => self.read_file(a),
-            "write_file" => self.write_file(a),
+            "write_file" => self.write_file(conv, a),
             "trash" => self.trash(a),
-            "run_command" => self.run_command(a),
+            "run_command" => self.run_command(conv, a),
+            "apply_patch" => self.apply_patch(conv, a),
             "fetch_url" => self.fetch_url(conv, a),
             "search_memory" => self.search_memory(a),
             "workflow_update" => {
@@ -514,6 +729,9 @@ impl Env {
             "comfy_image" => self.comfy_image(a),
             "edit_file" => sarg(a, "path").and_then(|p| {
                 let (o, n) = (sarg(a, "old")?, sarg(a, "new")?);
+                if let Some(real) = self.guard.writable(p) {
+                    self.keep(conv, &real)?;
+                }
                 Ok(fstools::edit_file(
                     &self.guard,
                     &self.cfg.trash_dir,
@@ -589,7 +807,7 @@ impl Env {
             .collect())
     }
 
-    fn write_file(&self, a: &Value) -> Result<String, String> {
+    fn write_file(&self, conv: &Conv, a: &Value) -> Result<String, String> {
         let (path, content) = (sarg(a, "path")?, sarg(a, "content")?);
         if is_secret_path(path) {
             return Ok("refused: secret path".into());
@@ -600,7 +818,8 @@ impl Env {
                 self.cfg.write_roots.join("; ")
             ));
         };
-        if real.exists() {
+        // accept-edits: files inside the write folders are written without asking
+        if real.exists() && conv.permission != Permission::AcceptEdits {
             if let Err(no) = self.ask("overwrite file", path) {
                 return Ok(no);
             }
@@ -608,6 +827,7 @@ impl Env {
         if let Some(p) = real.parent() {
             let _ = std::fs::create_dir_all(p);
         }
+        self.keep(conv, &real)?;
         std::fs::write(&real, content).map_err(|e| format!("error: {e}"))?;
         Ok(format!("wrote {} chars to {path}", content.chars().count()))
     }
@@ -644,13 +864,19 @@ impl Env {
         }
     }
 
-    fn run_command(&self, a: &Value) -> Result<String, String> {
-        let cmd = sarg(a, "command")?;
+    /// Why a command may not run at all, whoever asks for it: the owner's deny list, deleting,
+    /// ComfyUI outside its tool, a protected service.
+    fn refusal(&self, cmd: &str) -> Option<String> {
+        if let Some(d) = denied_by(cmd, &self.cfg.command_deny) {
+            return Some(format!(
+                "refused: the owner does not allow \"{d}\" (command_deny)"
+            ));
+        }
         if util::delete_rx().is_match(cmd) {
-            return Ok("refused: deleting is not allowed here; use the trash tool".into());
+            return Some("refused: deleting is not allowed here; use the trash tool".into());
         }
         if util::comfy_rx().is_match(cmd) {
-            return Ok(
+            return Some(
                 "refused: start ComfyUI only through the comfy_image tool (it takes the GPU lease)"
                     .into(),
             );
@@ -658,16 +884,60 @@ impl Env {
         if self.protect.as_ref().is_some_and(|p| p.is_match(cmd))
             && util::protect_verb_rx().is_match(cmd)
         {
-            return Ok("refused: protected service".into());
+            return Some("refused: protected service".into());
         }
-        if !is_read_only(cmd) {
+        None
+    }
+
+    /// A command the owner typed (`!cmd`): no approval (the owner is the one asking), but the
+    /// same refusals as any command, in the conversation's folder.
+    pub fn owner_command(&self, conv: &Conv, cmd: &str) -> String {
+        if let Some(no) = self.refusal(cmd) {
+            return no;
+        }
+        let (out, rc) = shell(
+            cmd,
+            &self.cwd(conv),
+            Duration::from_secs_f64(self.cfg.command_timeout_s),
+        );
+        format!("[exit {rc}]\n{out}")
+    }
+
+    fn run_command(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        let cmd = sarg(a, "command")?;
+        if let Some(no) = self.refusal(cmd) {
+            return Ok(no);
+        }
+        if conv.permission == Permission::Plan && !is_read_only(cmd) {
+            return Ok(
+                "refused: plan mode only reads; put this command in the plan instead".into(),
+            );
+        }
+        if !allowed_unasked(cmd, &self.cfg.command_allow) {
             if let Err(no) = self.ask("run command", cmd) {
                 return Ok(no);
             }
         }
+        // the conversation's folder (`/cd`), or a folder the call names inside it
+        let mut cwd = self.cwd(conv);
+        if let Some(d) = a
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|d| !d.trim().is_empty())
+        {
+            let p = if Path::new(d).is_absolute() {
+                PathBuf::from(d)
+            } else {
+                cwd.join(d)
+            };
+            if !p.is_dir() {
+                return Ok(format!("error: no such folder {}", p.display()));
+            }
+            cwd = p;
+        }
         let (out, rc) = shell(
             cmd,
-            &self.cfg.command_cwd,
+            &cwd,
             Duration::from_secs_f64(self.cfg.command_timeout_s),
         );
         Ok(format!("[exit {rc}]\n{out}"))
@@ -1061,13 +1331,228 @@ mod tests {
         e.run_builtin(c, name, &a)
     }
 
+    /// Whatever was asked, in order; answers yes.
+    struct Asked(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl Confirm for Asked {
+        fn confirm(&self, what: &str, _: &str) -> bool {
+            self.0.lock().unwrap().push(what.to_string());
+            true
+        }
+    }
+
     #[test]
-    fn all_thirteen_builtins_have_schemas() {
+    fn a_patch_changes_several_files_and_undo_puts_them_back() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let (e, mut c, d) = env_with(Box::new(Asked(asked.clone())), |_| {});
+        let w = d.join("work");
+        std::fs::create_dir_all(&w).unwrap();
+        std::fs::write(
+            w.join("a.rs"),
+            "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n",
+        )
+        .unwrap();
+        std::fs::write(w.join("old.md"), "bye\n").unwrap();
+        std::fs::write(w.join("m.txt"), "keep\n").unwrap();
+        c.cwd = Some(w.clone());
+        c.turns = 1;
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n@@ fn main() {\n     let x = 1;\n-    println!(\"{x}\");\n+    println!(\"x = {x}\");\n*** Add File: notes/new.md\n+hello\n*** Delete File: old.md\n*** Update File: m.txt\n*** Move to: moved.txt\n*** End Patch";
+        let r = run(&e, &c, "apply_patch", json!({"patch": patch}));
+        assert!(r.starts_with("patch applied"), "{r}");
+        assert!(std::fs::read_to_string(w.join("a.rs"))
+            .unwrap()
+            .contains("x = {x}"));
+        assert_eq!(
+            std::fs::read_to_string(w.join("notes/new.md")).unwrap(),
+            "hello\n"
+        );
+        assert!(!w.join("old.md").exists() && !w.join("m.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(w.join("moved.txt")).unwrap(),
+            "keep\n"
+        );
+        // the deletion and the move's old name asked (once, together); nothing else did
+        assert_eq!(*asked.lock().unwrap(), ["move to trash (from a patch)"]);
+        // nothing was deleted: old.md and m.txt are in the trash
+        let day = e.cfg.trash_dir.join(util::date_ymd());
+        assert!(day.join("old.md").exists() && day.join("m.txt").exists());
+        // the turn's summary, then /undo restores all four
+        let sum = e.checkpoints.summary(&c.id, 1).join(", ");
+        assert!(
+            sum.contains("a.rs +1 -1") && sum.contains("new.md (new) +1"),
+            "{sum}"
+        );
+        let (t, done) = e.checkpoints.undo(&c.id, 1, &e.cfg.trash_dir).unwrap();
+        assert_eq!((t, done.len()), (1, 5), "{done:?}");
+        assert!(std::fs::read_to_string(w.join("a.rs"))
+            .unwrap()
+            .contains("println!(\"{x}\")"));
+        assert_eq!(std::fs::read_to_string(w.join("old.md")).unwrap(), "bye\n");
+        assert_eq!(std::fs::read_to_string(w.join("m.txt")).unwrap(), "keep\n");
+        assert!(!w.join("notes/new.md").exists() && !w.join("moved.txt").exists());
+        // a patch that does not fit changes nothing
+        let bad = "*** Begin Patch\n*** Add File: z.md\n+z\n*** Update File: a.rs\n-not there\n+x\n*** End Patch";
+        assert!(run(&e, &c, "apply_patch", json!({"patch": bad})).contains("does not fit"));
+        assert!(!w.join("z.md").exists());
+        // a secret or a folder outside the write folders is refused
+        let out = tmpdir("outside");
+        assert!(run(&e, &c, "apply_patch", json!({"patch": format!("*** Begin Patch\n*** Add File: {}\n+x\n*** End Patch", out.join("x.md").display())})).starts_with("refused"));
+        assert!(run(
+            &e,
+            &c,
+            "apply_patch",
+            json!({"patch": "*** Begin Patch\n*** Add File: .env\n+K=1\n*** End Patch"})
+        )
+        .starts_with("refused: secret"));
+    }
+
+    #[test]
+    fn plan_mode_reads_and_changes_nothing() {
+        let (e, mut c, d) = env_with(Box::new(Yes), |_| {});
+        c.permission = Permission::Plan;
+        let f = d.join("p.txt");
+        for (tool, a) in [
+            (
+                "write_file",
+                json!({"path": f.to_string_lossy(), "content": "x"}),
+            ),
+            (
+                "apply_patch",
+                json!({"patch": "*** Begin Patch\n*** Add File: p.txt\n+x\n*** End Patch"}),
+            ),
+            (
+                "trash",
+                json!({"path": d.join("conversations").to_string_lossy()}),
+            ),
+        ] {
+            assert!(
+                run(&e, &c, tool, a).starts_with("refused: plan mode"),
+                "{tool}"
+            );
+        }
+        assert!(!f.exists());
+        assert!(run(&e, &c, "run_command", json!({"command": "git init"}))
+            .starts_with("refused: plan mode"));
+        assert!(run(&e, &c, "run_command", json!({"command": "echo reading"})).contains("reading"));
+    }
+
+    #[test]
+    fn accept_edits_writes_without_asking_and_keeps_what_was_there() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let (e, mut c, d) = env_with(Box::new(Asked(asked.clone())), |_| {});
+        let f = d.join("w.txt");
+        std::fs::write(&f, "before\n").unwrap();
+        c.turns = 3;
+        assert!(run(
+            &e,
+            &c,
+            "write_file",
+            json!({"path": f.to_string_lossy(), "content": "one\n"})
+        )
+        .starts_with("wrote"));
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["overwrite file"],
+            "default mode asks"
+        );
+        c.permission = Permission::AcceptEdits;
+        c.turns = 4;
+        assert!(run(
+            &e,
+            &c,
+            "write_file",
+            json!({"path": f.to_string_lossy(), "content": "two\n"})
+        )
+        .starts_with("wrote"));
+        assert_eq!(asked.lock().unwrap().len(), 1, "accept-edits does not ask");
+        assert_eq!(
+            e.checkpoints.entries(&c.id, 4)[0].before.as_deref(),
+            Some("one\n")
+        );
+        // commands still ask in accept-edits
+        run(&e, &c, "run_command", json!({"command": "git init"}));
+        assert_eq!(asked.lock().unwrap().last().unwrap(), "run command");
+    }
+
+    #[test]
+    fn the_owner_lists_commands_that_run_unasked_and_commands_that_never_run() {
+        let parts = plain_parts("cargo test && git status | head -5").unwrap();
+        assert_eq!(parts, ["cargo test", "git status", "head -5"]);
+        assert!(plain_parts("cargo test > out.txt").is_none());
+        let allow = vec!["cargo test".to_string(), "git --version".to_string()];
+        assert!(allowed_unasked("cargo test --all && git status", &allow));
+        assert!(!allowed_unasked("cargo testx", &allow), "word for word");
+        assert!(
+            !allowed_unasked("cargo test; cargo publish", &allow),
+            "every part counts"
+        );
+        assert!(
+            !allowed_unasked("cargo test > x", &allow),
+            "redirection always asks"
+        );
+        let deny = vec!["git push".to_string(), "docker".to_string()];
+        assert_eq!(
+            denied_by("git status && git push origin", &deny).map(String::as_str),
+            Some("git push")
+        );
+        assert_eq!(
+            denied_by("echo $(docker ps)", &deny).map(String::as_str),
+            Some("docker")
+        );
+        assert!(denied_by("git pull", &deny).is_none());
+        let (e, c, _d) = env_with(Box::new(DenyAll), |c| {
+            c.command_allow = vec!["git --version".into()];
+            c.command_deny = vec!["git push".into()];
+        });
+        assert!(
+            run(&e, &c, "run_command", json!({"command": "git --version"})).contains("git version"),
+            "allowed: runs though every approval is denied"
+        );
+        assert!(run(&e, &c, "run_command", json!({"command": "git push"})).contains("command_deny"));
+        assert!(
+            e.owner_command(&c, "git push --force")
+                .contains("command_deny"),
+            "the owner's own ! commands keep the deny list"
+        );
+    }
+
+    #[test]
+    fn relative_paths_and_commands_start_in_the_conversations_folder() {
+        let (e, mut c, d) = env_with(Box::new(Yes), |_| {});
+        let w = d.join("proj");
+        std::fs::create_dir_all(w.join("sub")).unwrap();
+        std::fs::write(w.join("readme.md"), "hello from proj").unwrap();
+        c.cwd = Some(w.clone());
+        assert_eq!(
+            run(&e, &c, "read_file", json!({"path": "readme.md"})),
+            "hello from proj"
+        );
+        assert!(run(
+            &e,
+            &c,
+            "write_file",
+            json!({"path": "sub/new.txt", "content": "x"})
+        )
+        .starts_with("wrote"));
+        assert!(w.join("sub/new.txt").exists());
+        let pwd = if cfg!(windows) { "Get-Location" } else { "pwd" };
+        let r = run(&e, &c, "run_command", json!({"command": pwd, "cwd": "sub"}));
+        assert!(r.contains("sub"), "{r}");
+        assert!(run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": pwd, "cwd": "nope"})
+        )
+        .contains("no such folder"));
+    }
+
+    #[test]
+    fn all_fourteen_builtins_have_schemas() {
         let names: Vec<String> = builtin_schemas()
             .iter()
             .map(|f| f["function"]["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         for n in [
             "list_dir",
             "read_file",
@@ -1082,6 +1567,7 @@ mod tests {
             "edit_file",
             "grep",
             "glob",
+            "apply_patch",
         ] {
             assert!(names.iter().any(|x| x == n), "{n}");
             assert!(Env::is_builtin(n));

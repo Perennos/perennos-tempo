@@ -14,7 +14,10 @@ USAGE:
     tempo-local-agent serve [OPTIONS] [SERVE OPTIONS]
 
 With a PROMPT it runs one turn and exits. With no PROMPT it starts a line REPL
-(an empty line or `exit` ends it).
+(an empty line or `exit` ends it). A new conversation works in the folder you start
+it in. In the chat, /help lists the commands (/cd, /mode, /plan, /undo, /diff,
+/compact, /init, /review, /think, /model, /usage, /status, your own commands);
+!cmd runs a command yourself and @file attaches a file.
 
 OPTIONS:
     --config PATH       JSON config file (env TEMPO_AGENT_CONFIG)
@@ -22,6 +25,7 @@ OPTIONS:
                         ~/.claude.json works too; its per-project servers load for
                         the folders in env TEMPO_MCP_PROJECT_DIRS. Nothing loads by default.
     --conv ID           continue the conversation ID (workflow and history are kept)
+    -c, --continue      continue the most recent conversation
     --reindex           rebuild the RAG index from scratch first
     -h, --help          show this help
 
@@ -49,6 +53,7 @@ struct Args {
     config: Option<String>,
     mcp: Option<String>,
     conv: Option<String>,
+    cont: bool,
     reindex: bool,
     prompt: Vec<String>,
 }
@@ -58,6 +63,7 @@ fn parse(args: Vec<String>) -> Result<Option<Args>, String> {
         config: None,
         mcp: None,
         conv: None,
+        cont: false,
         reindex: false,
         prompt: vec![],
     };
@@ -69,6 +75,7 @@ fn parse(args: Vec<String>) -> Result<Option<Args>, String> {
             "--config" => a.config = Some(val("--config")?),
             "--mcp-config" => a.mcp = Some(val("--mcp-config")?),
             "--conv" => a.conv = Some(val("--conv")?),
+            "-c" | "--continue" => a.cont = true,
             "--reindex" => a.reindex = true,
             s if s.starts_with("--") && s.len() > 2 => {
                 return Err(format!("unknown option {s} (try --help)"))
@@ -167,8 +174,8 @@ fn real_main() -> Result<(), String> {
     }
     tempo_local_agent::products::merge(&mut servers, &mut cfg, found);
     if let Some(opts) = serve_opts {
-        if !args.prompt.is_empty() || args.conv.is_some() || args.reindex {
-            return Err("serve takes no prompt, --conv or --reindex".into());
+        if !args.prompt.is_empty() || args.conv.is_some() || args.cont || args.reindex {
+            return Err("serve takes no prompt, --conv, --continue or --reindex".into());
         }
         if !opts.bind.is_loopback() && opts.allow_remote {
             eprintln!("[warning: listening on {}, not loopback; anyone who can reach it and has the key can drive this agent]", opts.bind);
@@ -181,8 +188,23 @@ fn real_main() -> Result<(), String> {
         let n = agent.env.rag.borrow_mut().build_index(&cfg, true);
         eprintln!("[reindexed {n} files]");
     }
-    let mut conv = Conv::open(&cfg, args.conv.as_deref())?;
-    eprintln!("[conversation {}]", conv.id);
+    let id = match (&args.conv, args.cont) {
+        (Some(_), true) => return Err("give --conv or --continue, not both".into()),
+        (None, true) => {
+            Some(newest_conversation(&cfg).ok_or("there is no conversation to continue yet")?)
+        }
+        (id, false) => id.clone(),
+    };
+    let mut conv = Conv::open(&cfg, id.as_deref())?;
+    // like Claude Code and Codex: a new conversation works where it was started
+    if conv.cwd.is_none() && conv.messages.is_empty() {
+        conv.cwd = std::env::current_dir().ok();
+    }
+    eprintln!(
+        "[conversation {} in {}; /help lists the commands]",
+        conv.id,
+        agent.env.cwd(&conv).display()
+    );
     let mut sink = StdSink::default();
     let result = if !args.prompt.is_empty() {
         agent
@@ -193,6 +215,25 @@ fn real_main() -> Result<(), String> {
     };
     agent.env.mcp.borrow_mut().stop_all();
     result.map(|_| ())
+}
+
+/// The owner's most recently used conversation (rooms' guest conversations are not the owner's).
+fn newest_conversation(cfg: &Config) -> Option<String> {
+    let mut all: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+        std::fs::read_dir(cfg.data_dir.join("conversations"))
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+            .collect();
+    all.sort();
+    all.into_iter().rev().find_map(|(_, p)| {
+        let text = std::fs::read_to_string(&p).ok()?;
+        (!text.contains("\"mode\":\"guest\""))
+            .then(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .flatten()
+    })
 }
 
 fn repl(agent: &mut Agent, conv: &mut Conv, sink: &mut StdSink) -> Result<(), String> {

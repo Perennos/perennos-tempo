@@ -92,6 +92,57 @@ pub struct Conv {
     pub on_event: Option<EventHook>,
     /// A guest conversation (a chat room, other people): no tools, no memory, no owner context.
     pub guest: bool,
+    /// The folder commands run in and files are found from (`/cd`); None: the config's.
+    pub cwd: Option<PathBuf>,
+    /// How much the agent may do without asking (`/mode`).
+    pub permission: Permission,
+    /// Turns so far (checkpoints are kept per turn).
+    pub turns: u64,
+    /// Tokens and time used so far (`/usage`).
+    pub usage: Usage,
+    /// Think before answering, with models that can (`/think`, like DeepSeek's DeepThink).
+    pub think: bool,
+    /// The model this conversation asked for first (`/model`); None: the config's.
+    pub model: Option<String>,
+}
+
+/// What the agent may do in a conversation, as Claude Code's modes: `Default` asks as always;
+/// `AcceptEdits` writes and overwrites files inside the write folders without asking (commands,
+/// trash and fetching still ask); `Plan` only reads and proposes a plan, changing nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Permission {
+    #[default]
+    Default,
+    AcceptEdits,
+    Plan,
+}
+
+impl Permission {
+    pub fn name(self) -> &'static str {
+        match self {
+            Permission::Default => "default",
+            Permission::AcceptEdits => "accept-edits",
+            Permission::Plan => "plan",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Permission> {
+        Some(
+            match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+                "default" | "ask" => Permission::Default,
+                "accept-edits" | "edits" | "auto-edit" => Permission::AcceptEdits,
+                "plan" | "read-only" => Permission::Plan,
+                _ => return None,
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Usage {
+    pub requests: u64,
+    pub prompt_tok: u64,
+    pub out_tok: u64,
+    pub seconds: f64,
 }
 
 /// Windows treats `CON.json`, `nul.x.json`, `COM1.json` as devices, not files: reading one blocks
@@ -148,6 +199,12 @@ impl Conv {
             mcp_offered: vec![],
             on_event: None,
             guest: false,
+            cwd: None,
+            permission: cfg.permission,
+            turns: 0,
+            usage: Usage::default(),
+            think: false,
+            model: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)
@@ -155,6 +212,24 @@ impl Conv {
             c.messages = d["messages"].as_array().cloned().unwrap_or_default();
             c.events = d["events"].as_array().cloned().unwrap_or_default();
             c.guest = d["mode"] == "guest";
+            c.cwd = d["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir());
+            c.permission = d["permission"]
+                .as_str()
+                .and_then(Permission::parse)
+                .unwrap_or(cfg.permission);
+            c.turns = d["turns"].as_u64().unwrap_or(0);
+            c.think = d["think"].as_bool().unwrap_or(false);
+            c.model = d["model"]
+                .as_str()
+                .filter(|m| !m.trim().is_empty())
+                .map(str::to_string);
+            let u = &d["usage"];
+            c.usage = Usage {
+                requests: u["requests"].as_u64().unwrap_or(0),
+                prompt_tok: u["prompt_tok"].as_u64().unwrap_or(0),
+                out_tok: u["out_tok"].as_u64().unwrap_or(0),
+                seconds: u["seconds"].as_f64().unwrap_or(0.0),
+            };
             c.mcp_offered = d["mcp_offered"]
                 .as_array()
                 .map(|a| {
@@ -180,7 +255,9 @@ impl Conv {
         }
         if std::fs::write(
             &tmp,
-            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" }}).to_string(),
+            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" },
+                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model,
+                "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
         .is_ok()
         {

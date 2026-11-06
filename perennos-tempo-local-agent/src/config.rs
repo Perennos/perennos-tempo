@@ -51,6 +51,13 @@ pub struct Config {
     /// Host names `fetch_url` may reach even though they are on this computer or its network
     /// (everything private, loopback or link-local, such as the cloud metadata address, is refused).
     pub fetch_allow_private: Vec<String>,
+    /// Command prefixes that run without asking (`cargo test`, `npm run lint`), each part of a
+    /// command checked on its own, with no redirection or substitution.
+    pub command_allow: Vec<String>,
+    /// Command prefixes that are refused outright (`git push`, `docker`).
+    pub command_deny: Vec<String>,
+    /// The mode a new conversation starts in (`default`, `accept-edits`, `plan`).
+    pub permission: crate::conv::Permission,
     /// Hosts `fetch_url` may read without asking (`example.com`, or `*.example.com` for its
     /// subdomains). Any other host asks the owner once per conversation.
     pub fetch_allow_hosts: Vec<String>,
@@ -164,6 +171,9 @@ impl Config {
             offline_probe: "1.1.1.1:443".into(),
             fetch_allow_private: vec![],
             fetch_allow_hosts: vec![],
+            command_allow: vec![],
+            command_deny: vec![],
+            permission: crate::conv::Permission::Default,
             packs_allow: vec![],
             hosts: BTreeMap::new(),
             mcp_config: None,
@@ -276,6 +286,15 @@ impl Config {
         c.pinned_current_files = path_list(v, "pinned_current_files");
         if let Some(x) = strs(v, "packs_allow") {
             c.packs_allow = x;
+        }
+        if let Some(x) = strs(v, "command_allow") {
+            c.command_allow = x;
+        }
+        if let Some(x) = strs(v, "command_deny") {
+            c.command_deny = x;
+        }
+        if let Some(p) = string(v, "permission").and_then(|p| crate::conv::Permission::parse(&p)) {
+            c.permission = p;
         }
         if let Some(x) = strs(v, "fetch_allow_hosts") {
             c.fetch_allow_hosts = x
