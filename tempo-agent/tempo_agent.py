@@ -42,7 +42,12 @@ if CFG.get("mcp_project_dirs") and not os.environ.get("TEMPO_MCP_PROJECT_DIRS"):
     mcphost.PROJECT_DIRS = [_p(d).replace("\\", "/").rstrip("/") for d in CFG["mcp_project_dirs"]]
 SECRET_PATH = re.compile(r"(\.claude\.json|\.token$|\.key$|\.env|secret|credential|executor-token|password|id_rsa|\.pem$)", re.I)
 SECRET_TXT = [(re.compile(r"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization)['\"]?\s*[:=]\s*['\"]?)[^\s'\",;]{6,}"), r"\1[REDACTED]"),
-              (re.compile(r"\b(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,})"), "[REDACTED]")]
+              (re.compile(r"\b(sk-[A-Za-z0-9_-]{20,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+                          r"xox[abprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16}\b|"
+                          r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"), "[REDACTED]")]
+# Run first: whole PEM private-key blocks (even cut off) and user:password@ in URLs.
+SECRET_PRE = [(re.compile(r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)"), "[REDACTED PRIVATE KEY]"),
+              (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@")]
 
 # Hosts come from agent-config.json "hosts": {"name": {"urls": [LAN url first, then a VPN url], "models": [house model] or null}}.
 # Protection: when "models" is set, only that house model may be requested there, so a delegate call can never
@@ -53,7 +58,7 @@ HOST_OVERRIDE = {}  # tests: {"mockhost": {"urls": [...], "models": None}}
 
 
 def redact(s):
-    for rx, rep in SECRET_TXT:
+    for rx, rep in SECRET_PRE + SECRET_TXT:
         s = rx.sub(rep, s)
     return s
 

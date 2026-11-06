@@ -78,6 +78,17 @@ class AgentMemoryTest(unittest.TestCase):
         self.assertIsNone(self.ta.memory_file(os.path.abspath(__file__)))
         self.assertIsNone(self.ta.memory_file(""))
 
+    def test_redacts_token_shapes(self):
+        a = "abcdefghijKLMNOPQRSTuvwxyz0123456789"  # tokens are built at run time: the leak scan must never match
+        for t in ["sk-" + a, "sk_live_" + a, "rk_test_" + a, "ghp_" + a, "gho_" + a, "github_pat_11" + a,
+                  "xoxb-1234-" + a, "hf_" + a, "AKIA" + "ABCDEFGHIJKLMNOP", "eyJ%s.eyJ%s.%s" % (a, a, a)]:
+            self.assertEqual(self.ta.redact("value %s end" % t), "value [REDACTED] end", t)
+        pem = "before\n-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEv" + a + "\n-----END RSA " + "PRIVATE KEY-----\nafter"
+        self.assertEqual(self.ta.redact(pem), "before\n[REDACTED PRIVATE KEY]\nafter")
+        self.assertEqual(self.ta.redact("https://alex:hunter2pass@git.example.com/r.git"), "https://[REDACTED]@git.example.com/r.git")
+        for plain in ["see https://example.com/path?q=1", "the sk_ prefix alone"]:
+            self.assertEqual(self.ta.redact(plain), plain)
+
     def test_graph_links_files_that_share_terms(self):
         g = self.ta.memory_graph()
         self.assertEqual(len(g["nodes"]), 10)

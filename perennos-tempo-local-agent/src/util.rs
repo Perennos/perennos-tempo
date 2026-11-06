@@ -102,9 +102,21 @@ rx!(
     secret_kv_rx,
     r#"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization)['"]?\s*[:=]\s*['"]?)[^\s'",;]{6,}"#
 );
+// Token shapes: OpenAI/Anthropic-style sk-, Stripe live/test/restricted keys, GitHub (all prefixes and
+// fine-grained PATs), Slack, Hugging Face, Google API keys, AWS access key ids and JWTs.
 rx!(
     secret_tok_rx,
-    r"\b(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,})"
+    r"\b(sk-[A-Za-z0-9_-]{20,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16}\b|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+);
+// A whole PEM private-key block (its BEGIN/END lines included).
+rx!(
+    secret_pem_rx,
+    r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)"
+);
+// user:password@ in a URL.
+rx!(
+    secret_userinfo_rx,
+    r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"
 );
 rx!(
     delete_rx,
@@ -121,8 +133,10 @@ rx!(
 );
 
 pub fn redact(s: &str) -> String {
-    let a = secret_kv_rx().replace_all(s, "${1}[REDACTED]");
-    secret_tok_rx().replace_all(&a, "[REDACTED]").into_owned()
+    let a = secret_pem_rx().replace_all(s, "[REDACTED PRIVATE KEY]");
+    let b = secret_userinfo_rx().replace_all(&a, "${1}[REDACTED]@");
+    let c = secret_kv_rx().replace_all(&b, "${1}[REDACTED]");
+    secret_tok_rx().replace_all(&c, "[REDACTED]").into_owned()
 }
 
 /// Redact, then cap at `n` chars with a truncation note.
@@ -597,6 +611,44 @@ mod tests {
         let token = format!("sk-{}1", "abcdefghijklmnopqrstuvwxyz");
         let red = redact(&format!("x {token} y"));
         assert!(red.contains("[REDACTED]") && !red.contains(&token));
+        // More token shapes, all built at run time for the same reason.
+        let a = "abcdefghijKLMNOPQRSTuvwxyz0123456789";
+        let tokens = [
+            format!("sk_live_{a}"),
+            format!("rk_test_{a}"),
+            format!("gho_{a}"),
+            format!("ghs_{a}"),
+            format!("github_pat_11{a}"),
+            format!("xoxb-1234-{a}"),
+            format!("hf_{a}"),
+            format!("AKIA{}", "ABCDEFGHIJKLMNOP"),
+            format!("eyJ{a}.eyJ{a}.{a}"),
+        ];
+        for t in &tokens {
+            let red = redact(&format!("value {t} end"));
+            assert_eq!(red, "value [REDACTED] end", "{t}");
+        }
+        let pem = format!("before\n-----BEGIN {}PRIVATE KEY-----\nMIIEv{a}\n{a}==\n-----END {}PRIVATE KEY-----\nafter", "RSA ", "RSA ");
+        assert_eq!(redact(&pem), "before\n[REDACTED PRIVATE KEY]\nafter");
+        let cut = format!("-----BEGIN {}PRIVATE KEY-----\nMIIEv{a}", "");
+        assert_eq!(
+            redact(&cut),
+            "[REDACTED PRIVATE KEY]",
+            "a block cut off by a cap is still hidden"
+        );
+        assert_eq!(
+            redact("clone https://alex:hunter2pass@git.example.com/repo.git now"),
+            "clone https://[REDACTED]@git.example.com/repo.git now"
+        );
+        // Ordinary text is left alone.
+        for plain in [
+            "see https://example.com/path?q=1",
+            "akia is a word",
+            "the sk_ prefix alone",
+            "eyJ alone",
+        ] {
+            assert_eq!(redact(plain), plain);
+        }
         let long = "a".repeat(7000);
         let c = cap(&long, RESULT_CAP);
         assert!(c.contains("[truncated 1000 chars]"));
