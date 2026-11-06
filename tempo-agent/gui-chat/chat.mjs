@@ -1,6 +1,8 @@
 // CHAT surface: the local agent loop (Ollama engine, MCP tools, memory RAG, delegate, workflow file).
 // Talks only to the same origin at /agent/*. Every visible string comes from copy.json.
 // The second-brain graph (memgraph.mjs, three.js) is imported only when it is opened.
+// Events arrive over /agent/stream (server-sent events) when /agent/health says the server has it
+// (the Rust server does), else by polling (the Python harness).
 const h = (tag, a = {}, ...kids) => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(a)) {
@@ -28,6 +30,7 @@ export async function mount(el, ctx) {
   const saved = ctx.view ? (ctx.view.chat ??= {}) : {};
   let conv = saved.conv || null, since = 0, busy = false, dead = false, timer = 0;
   let heavyModel = '', lane = null, lastTool = null, memUsed = new Set(), memFiles = [], graph = null;
+  let sse = false, es = null;
 
   const lab = t => h('span', { class: 't-label', text: t });
   const log = h('div', { class: 'ch-log', role: 'log', 'aria-live': 'polite' });
@@ -116,18 +119,38 @@ export async function mount(el, ctx) {
       d.append(...btns);
     }
   }
+  const setBusy = b => { busy = b; sendBtn.disabled = busy; sendBtn.textContent = busy ? c.busy : c.send; };
+  const refreshWf = () => api('workflow?conv=' + conv).then(w => { wf.textContent = (w.text.split('## Log')[0] || '').trim() || c.noTasks; }).catch(() => {});
+  let polling = false;
   async function poll() {
-    if (dead || !conv) return;
+    if (dead || !conv || es || polling) return; // one poll at a time, or rows repeat and `since` skips ahead
+    polling = true;
+    const asked = conv;
     try {
-      const r = await api(`events?conv=${conv}&since=${since}`);
-      r.events.forEach(render); since += r.events.length; busy = r.busy;
-      sendBtn.disabled = busy; sendBtn.textContent = busy ? c.busy : c.send;
-      if (r.events.length || busy) api('workflow?conv=' + conv).then(w => { wf.textContent = (w.text.split('## Log')[0] || '').trim() || c.noTasks; });
-    } catch { /* agent not running: health strip says so */ }
+      const r = await api(`events?conv=${asked}&since=${since}`);
+      if (asked !== conv) return;
+      for (const e of r.events) { const n = e.n ?? since; if (n >= since) { render(e); since = n + 1; } }
+      setBusy(r.busy);
+      if (r.events.length || busy) refreshWf();
+    } catch { /* agent not running: health strip says so */ } finally { polling = false; }
+  }
+  // Live stream: one event per message, plus a `state` event when busy changes. If it fails before
+  // anything arrives, the surface falls back to polling.
+  function stream() {
+    if (!sse || !conv || dead) return;
+    let heard = false;
+    const s = new EventSource(`/agent/stream?conv=${encodeURIComponent(conv)}&since=${since}`);
+    es = s;
+    s.onmessage = m => { heard = true; const e = JSON.parse(m.data); if (e.n >= since) { render(e); since = e.n + 1; } if (e.type === 'tool_result' || e.type === 'assistant') refreshWf(); };
+    s.addEventListener('state', m => { heard = true; setBusy(JSON.parse(m.data).busy); });
+    s.onerror = () => { if (!heard || s.readyState === EventSource.CLOSED) { s.close(); if (es === s) es = null; if (!heard) sse = false; poll(); } };
   }
   async function open_(id) {
+    await ready;
+    es?.close(); es = null;
     conv = id; saved.conv = id; since = 0; lastTool = null; log.replaceChildren(empty);
-    await poll(); convs();
+    if (sse) { stream(); refreshWf(); } else await poll();
+    convs();
   }
   async function convs() {
     try {
@@ -141,12 +164,13 @@ export async function mount(el, ctx) {
     if (!conv) await open_((await api('new', {})).conv);
     input.value = '';
     await api('send', { conv, text: t });
-    poll();
+    if (es) setBusy(true); else poll();
   }
   async function health() {
     try {
       const x = await api('health');
       heavyModel = x.models[0];
+      sse = x.stream === true && 'EventSource' in window;
       const up = Object.entries(x.hosts).filter(([, v]) => v === 'up').map(([k]) => k);
       strip.replaceChildren(
         h('span', { class: 'ch-pair' }, lab(c.engine), h('span', { class: 'ch-v', text: x.models[0] })),
@@ -232,9 +256,10 @@ export async function mount(el, ctx) {
       h('section', { class: 'ch-main' }, log, h('div', { class: 'ch-comp' }, input, sendBtn), overlay)));
   el.append(root);
   showTab(saved.tab || 'chats');
-  health(); convs();
+  const ready = health();
+  convs();
   if (conv) open_(conv);
   timer = setInterval(poll, 1200);
   const ht = setInterval(health, 30000);
-  return { unmount() { dead = true; closeGraph(); clearInterval(timer); clearInterval(ht); document.removeEventListener('keydown', onKey); link.remove(); } };
+  return { unmount() { dead = true; es?.close(); closeGraph(); clearInterval(timer); clearInterval(ht); document.removeEventListener('keydown', onKey); link.remove(); } };
 }

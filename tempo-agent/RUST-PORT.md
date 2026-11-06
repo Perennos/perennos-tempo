@@ -3,8 +3,8 @@
 The Rust port of this folder's harness (`tempo_agent.py`, `mcphost.py`) is the standalone crate
 [`perennos-tempo-local-agent/`](../perennos-tempo-local-agent/README.md) at the repository root: library
 `tempo_local_agent`, binary `tempo-local-agent`. The same crate lives in the private Perennos core, and the two
-copies are kept byte-identical. The Python harness still serves the GUI chat surface until the Rust side has an
-HTTP API (see "What is left").
+copies are kept byte-identical. `tempo-local-agent serve` now serves the GUI chat surface too (see "Serve the GUI from Rust");
+the Python harness stays the default launcher until that has been run on Beast.
 
 An earlier, smaller port lived in this folder (`tempo-agent/src`). It was retired so there is one port, not two.
 Its history is in commits `b5f02b1` to `30e6d83`; for example `git show 30e6d83:tempo-agent/src/agent.rs`.
@@ -34,6 +34,20 @@ python tempo.py agent "list the files in ~/notes"
 ```
 
 `tempo.sh agent ...` and `tempo.cmd agent ...` do the same. With no prompt it reads one turn per line from stdin.
+
+## Serve the GUI from Rust
+
+```bash
+python tempo.py agent serve --config agent.json --port 8765 --chat-dir tempo-agent/gui-chat --gui-port 18795
+```
+
+This is the same origin and the same `/agent/*` API as `tempo_agent.py`, so the GUI and its chat surface work
+unchanged. The chat surface sees `stream: true` in `/agent/health` and switches from polling to the
+`/agent/stream` event stream; with the Python server it keeps polling. On Windows, stop the Python agent and run
+the binary with `--chat-dir <TEMPO_AGENT_HOME>\gui-ui\chat --gui-port 18795` to try it; `Start-TempoOffline.ps1`
+still starts the Python agent. Security: loopback only by default, Host and Origin checks, GET and POST only,
+JSON bodies up to 1 MB, approvals that resolve only by the id the server issued (deny on timeout). See the crate
+README.
 
 ## Configuration
 
@@ -67,10 +81,9 @@ Everything the harness does in its agent loop, plus a few things the Python vers
 
 ## What is left
 
-1. **HTTP API for the GUI.** The chat surface talks to `/agent/new`, `send`, `events`, `confirm`, `workflow`,
-   `health`, `convs` and the second-brain views `memory`, `memory/file` and `memory/graph`, and the Python server also serves `/chat/` and proxies the Tempo GUI. Port these to the
-   Rust binary, ideally with server-sent events instead of polling, then switch `Start-TempoOffline.ps1` to it.
-   Confirmations then come from the GUI instead of the terminal.
+1. **Switch the launcher.** `serve` covers the HTTP API, `/chat/`, the GUI pass-through and an SSE stream.
+   Run it on Beast with the real GUI, real Ollama and real MCP servers, then make `Start-TempoOffline.ps1`
+   start the binary instead of `tempo_agent.py`.
 2. **`claude_code`**, the Python tool that hands a task to Claude Code on the local engine, has no Rust
    equivalent yet.
 3. **Measure on the real machine.** The prompt-reuse saving on the 27B model, and real MCP servers, have only been
