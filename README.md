@@ -1,19 +1,107 @@
-# Perennos Tempo
+<p align="center">
+  <img src="docs/assets/hero.png" alt="Perennos Tempo. Your machines, one field. Local AI that routes every request to the engines you own, keeps private work private by rule, and writes a receipt for every route." width="100%">
+</p>
 
-Perennos Tempo is a local-first open-source core for routing requests to local engines, applying privacy and admission rules, and recording route receipts. It includes a desktop chat, a native bootstrap source, a loopback HTTP API, headless operation, and an MCP stdio bridge.
+<p align="center">
+  <a href="https://github.com/Perennos/perennos-tempo/releases"><img alt="Download for Windows" src="https://img.shields.io/badge/download-Windows-ff5a2a?style=flat-square&labelColor=1b1a1b"></a>
+  <a href="https://github.com/Perennos/perennos-tempo/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Perennos/perennos-tempo/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="LICENSE"><img alt="Licence: PolyForm Shield 1.0.0" src="https://img.shields.io/badge/licence-PolyForm%20Shield%201.0.0-efe9dc?style=flat-square&labelColor=1b1a1b"></a>
+  <img alt="Local first" src="https://img.shields.io/badge/local-first-a9aaad?style=flat-square&labelColor=1b1a1b">
+  <img alt="Hosted spend: 0 by default" src="https://img.shields.io/badge/hosted%20spend-0%20by%20default-a9aaad?style=flat-square&labelColor=1b1a1b">
+</p>
 
-Download Windows builds from [GitHub Releases](https://github.com/Perennos/perennos-tempo/releases). Each release records its tested Windows image, installer checksum, and acceptance results. A source snapshot alone does not establish a working installation. The installer is unsigned; multi-user security and shared office deployment are outside this core release.
+<p align="center">
+  <b>Perennos Tempo</b> is local AI that answers to you. It routes every request to the engines on your own machines,<br>
+  applies privacy and admission rules you can read, and writes a receipt for every route.<br>
+  <sub>Free to use, change and share, for yourself or your business. Source-available under PolyForm Shield.</sub>
+</p>
 
-Project links: [Perennos](https://perennos.com) · [Perennos Tempo](https://perennos.com/tempo).
+<p align="center">
+  <a href="https://github.com/Perennos/perennos-tempo/releases"><b>Download</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="SETUP-GUIDE.md"><b>Setup guide</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="PROFILES-README.md"><b>Profiles</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://perennos.com/tempo"><b>perennos.com/tempo</b></a>
+</p>
 
-## What is in the public core
+<br>
 
-- Generic routing, profiles, local inference, privacy screening, receipts, append-only ledgers, and resource admission/lease controls.
-- Desktop chat and bootstrap source, plus the headless API, status command, and MCP stdio adapter.
-- Generic profile infrastructure. The built-ins contain no customer prompts; the default is `private`, and the `offline` profile requires loopback inference.
-- Apache-2.0 terms for Perennos-authored core files. Third-party source, runtimes, dependencies, and model files keep their separate terms; see [NOTICE.md](NOTICE.md).
+## Why Perennos Tempo
 
-The package excludes private onboarding interviews, customer or office profile packs, vertical-specific setup choices, desks and approvals UX, owner configuration and history, owner priors, benchmark data, model weights, the private resident adapter, and optional workspace integrations. The export manifest records its exact file set and exclusions.
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h3>Private by rule</h3>
+      Private labels, screen hits and private conversations stay on local engines. A missing label stays local. Hosted engines stay off until you add one yourself and set a cap above zero.
+    </td>
+    <td width="33%" valign="top">
+      <h3>Your hardware</h3>
+      Runs local engines through Ollama on the machines you already own. CPU works with the default setup; GPU work waits for a lease, so jobs take turns instead of fighting over it.
+    </td>
+    <td width="33%" valign="top">
+      <h3>Receipts, not promises</h3>
+      Every route writes a hash-chained receipt: which engine, why, and how it went. Receipts refuse prompt text, so the record is safe to keep.
+    </td>
+  </tr>
+</table>
+
+## How a request flows
+
+<p align="center">
+  <img src="docs/assets/how-it-works.png" alt="How a request flows: your request (desktop chat, local HTTP API or MCP client, on 127.0.0.1) passes the privacy screen, then your profile and admission rules, then is routed to local engines by default; a hosted engine is optional and off until you add a provider and a cap above zero; every route writes a hash-chained receipt with no prompt text." width="100%">
+</p>
+
+1. **In.** A request arrives from the desktop chat, the local HTTP API or an MCP client. Everything listens on `127.0.0.1`.
+2. **Screen.** Private labels, screen hits and private conversations are pinned to local engines.
+3. **Policy.** Your profile decides what may leave. Hosted spend is capped at 0 until you raise it, and GPU work waits for its lease.
+4. **Route.** A qualified local engine answers. A hosted engine is used only for public work, and only after you have configured it.
+5. **Record.** A metadata-only receipt is written. Chat responses carry its id in the `x-tempo-receipt-id` header.
+
+## Privacy by rule
+
+<p align="center">
+  <img src="docs/assets/privacy.png" alt="Privacy by rule: the private profile is the default and denies hosted routing; the offline profile requires loopback inference; public-work profiles list hosted classes but cap each job at zero; a missing or unknown label is treated as private." width="100%">
+</p>
+
+| Profile | What it does |
+|---|---|
+| `private` | The default. Hosted routing is denied. |
+| `offline` | Hosted routing is denied and inference must use loopback. |
+| `design-studio`, `frontier-assist` | Public-work profiles. Hosted classes are listed, but the per-job cap is 0. |
+| `custom` | An empty policy slot, with no prompt pack and no hosted permission. |
+
+A profile never declassifies a request, and a public label does not anonymize content. Full details are in [PROFILES-README.md](PROFILES-README.md).
+
+## What's in the box
+
+| Part | What it gives you | Start it |
+|---|---|---|
+| **Desktop chat** | A local chat window on top of the gateway. | `python tempo.py gui --home "<data-folder>" --port 8765` |
+| **Headless API** | `GET /health`, plus authenticated `GET /v1/models` and `POST /v1/chat/completions`, on `127.0.0.1`. | `python tempo.py headless --home "<data-folder>" --host 127.0.0.1 --port 8765 --device cpu` |
+| **MCP bridge** | `ask`, `listmodels` and `status` for editors and MCP clients, over stdio. The token never goes into client config. | `python tempo.py mcp-config --home "<data-folder>" --port 8765` |
+| **Profiles** | Five generic built-ins with a validator and a privacy boundary. No customer prompts. | [PROFILES-README.md](PROFILES-README.md) |
+| **Receipts** | Append-only, hash-chained route and outcome metadata. | Written by every route. |
+| **Admission and leases** | Resource admission and a lease gate for GPU work. | Applied by the gateway. |
+
+## Quick start
+
+**Windows.** Download `PerennosTempo-Setup-unsigned.exe` from the [latest release](https://github.com/Perennos/perennos-tempo/releases), check its published SHA-256, open it and click **Install and open**. First setup downloads pinned packages, the app-owned Ollama runtime and the local `qwen3:4b` model, which is several gigabytes. Setup shows the exact plan and free space before anything large is downloaded.
+
+**From source (headless).** With Python 3.12 or newer, a prepared data folder and a local engine:
+
+```sh
+python tempo.py headless --home "<data-folder>" --host 127.0.0.1 --port 8765 --device cpu
+```
+
+Then connect an MCP client with the entry printed by `python tempo.py mcp-config --home "<data-folder>" --port 8765`. The [Setup Guide](SETUP-GUIDE.md) covers the token, the MCP client and the Linux source path.
+
+## Coming to this repository
+
+Being prepared for release here:
+
+- **Rust local agent:** tools, memory and an MCP host.
+- **Perennos Tempo Vault:** your notes, in Markdown.
+- **Perennos Tempo Studio:** mix and master.
+- **Perennos Tempo Room:** a private group chat where anyone can ask `@tempo`.
 
 ## Defaults and limits
 
@@ -21,4 +109,20 @@ The default profile is local and has a zero hosted cost cap. Provider attachment
 
 `TEMPO_HOME` separates one workspace's data; it is not an operating-system security boundary. Use a separate OS account or machine for separate owners. The API binds to `127.0.0.1`; this release does not provide a shared office server or LAN authorization. Receipts record routing and outcome metadata; they are not proof that a response is correct.
 
-The Windows installer bundles an app-local Python/Tk runtime and preserves its upstream license. Models, Ollama, and Python dependencies download during first setup, which needs network access and several gigabytes of free storage. The source export contains no runtime binaries or model weights. The installer is unsigned; keep Windows security protections enabled. See the [Setup Guide](SETUP-GUIDE.md), [Profiles](PROFILES-README.md), [Deployment Options](DEPLOYMENT-OPTIONS.md), and [Buyer Guide](BUYER-GUIDE.md).
+Each [release](https://github.com/Perennos/perennos-tempo/releases) records its tested Windows image, installer checksum and acceptance results. A source snapshot alone does not establish a working installation. The installer is unsigned; keep Windows security protections enabled. Multi-user security and shared office deployment are outside this core release.
+
+The Windows installer bundles an app-local Python/Tk runtime and preserves its upstream license. Models, Ollama and Python dependencies download during first setup, which needs network access and several gigabytes of free storage. The source export contains no runtime binaries or model weights.
+
+This public core leaves out private onboarding interviews, customer or office profile packs, vertical-specific setup choices, desks and approvals UX, owner configuration and history, owner priors, benchmark data, model weights, the private resident adapter and optional workspace integrations. The export manifest records its exact file set and exclusions. See also [Deployment Options](DEPLOYMENT-OPTIONS.md) and the [Buyer Guide](BUYER-GUIDE.md).
+
+## Licence
+
+Perennos-authored files are offered under the [PolyForm Shield License 1.0.0](LICENSE). You may use, change and share Perennos Tempo, for yourself or for your business, and you may contribute back. You may not use it to provide a product that competes with Perennos Tempo. Releases before 6 November 2026 keep their Apache-2.0 terms. Third-party source, runtimes, dependencies and model files keep their own terms; see [NOTICE.md](NOTICE.md).
+
+## Contributing and security
+
+Contributions are welcome. They come in under Apache-2.0 with a sign-off (`git commit -s`), so they can go into every edition of Perennos Tempo; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md).
+
+<br>
+
+<p align="center"><sub>Made by <a href="https://perennos.com">Perennos</a></sub></p>

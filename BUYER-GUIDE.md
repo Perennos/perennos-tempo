@@ -1,6 +1,6 @@
 # Buyer guide: the core is free
 
-Perennos Tempo public core is a community source release under Apache-2.0 for Perennos-authored core files. There is no Perennos checkout, hosted service, subscription, support plan, or paid feature in this release.
+Perennos Tempo public core is a community source release under the PolyForm Shield License 1.0.0 for Perennos-authored core files: free to use, change and share, for yourself or your business, but not for building a competing product. There is no Perennos checkout, hosted service, subscription, support plan, or paid feature in this release.
 
 ## Who should evaluate it
 
