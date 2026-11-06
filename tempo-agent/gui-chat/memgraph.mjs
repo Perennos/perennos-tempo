@@ -34,7 +34,7 @@ export function layout(nodes, edges, dims = 3, iterations = 240) {
     for (const e of edges) {
       const a = e.a * 3, b = e.b * 3;
       const dx = pos[a] - pos[b], dy = pos[a + 1] - pos[b + 1], dz = pos[a + 2] - pos[b + 2];
-      const f = (Math.sqrt(dx * dx + dy * dy + dz * dz) / k) * (1 + 0.25 * ((e.w || 2) - 2));
+      const f = (Math.sqrt(dx * dx + dy * dy + dz * dz) / k) * (1 + 3 * Math.max(0, (e.w ?? 0.17) - 0.17));
       disp[a] -= dx * f; disp[a + 1] -= dy * f; disp[a + 2] -= dz * f;
       disp[b] += dx * f; disp[b + 1] += dy * f; disp[b + 2] += dz * f;
     }
@@ -100,7 +100,7 @@ async function threeView(host, g, opts, used, pal, maxChunks, tip) {
 
   const col = new Float32Array(n * 3), size = new Float32Array(n);
   g.nodes.forEach((node, i) => {
-    const u = used.has(node.src), c = u ? pal.used : (pal[node.kind] || pal.memory);
+    const u = used.has(node.src) || !!node.used, c = u ? pal.used : (pal[node.kind] || pal.memory);
     col.set(c, i * 3);
     size[i] = sizeOf(node, maxChunks, u) * ratio;
   });
@@ -125,7 +125,7 @@ async function threeView(host, g, opts, used, pal, maxChunks, tip) {
   group.add(new T.LineSegments(egeo, emat));
 
   // Labels for the files used this turn, placed in screen space each frame.
-  const labels = g.nodes.map((node, i) => [node, i]).filter(([node]) => used.has(node.src)).map(([node, i]) => {
+  const labels = g.nodes.map((node, i) => [node, i]).filter(([node]) => used.has(node.src) || node.used).map(([node, i]) => {
     const el = document.createElement('span');
     el.className = 'mg-label';
     el.textContent = node.name;
@@ -233,7 +233,7 @@ function flatView(host, g, opts, used, pal, maxChunks, tip) {
   svg.append(lines);
   const unit = span / Math.max(host.clientWidth || 600, 1);
   g.nodes.forEach((node, i) => {
-    const u = used.has(node.src);
+    const u = used.has(node.src) || !!node.used;
     const c = mk('circle', { cx: pos[i * 3], cy: pos[i * 3 + 1], r: (sizeOf(node, maxChunks, u) / 2) * unit, fill: hex(u ? pal.used : (pal[node.kind] || pal.memory)), tabindex: '0', role: 'button', 'aria-label': node.name });
     const t = mk('title', {});
     t.textContent = node.name;

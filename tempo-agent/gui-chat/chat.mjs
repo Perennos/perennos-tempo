@@ -207,7 +207,7 @@ export async function mount(el, ctx) {
     legend.replaceChildren(...['current', 'core', 'memory', 'pack', 'used'].map(k => h('span', { class: 'mg-key', 'data-kind': k, text: k === 'used' ? c.used : kindLabel(k) })));
     try {
       if (!memFiles.length) await loadMemory();
-      const g = await api('memory/graph');
+      const g = await api('memory/graph' + (conv ? '?conv=' + encodeURIComponent(conv) : ''));
       if (!g.nodes.length) { stage.replaceChildren(h('p', { class: 'ch-empty', text: c.graphEmpty })); return; }
       const { openGraph: draw } = await import(new URL('./memgraph.mjs', import.meta.url).href);
       graph = await draw(stage, g, { used: memUsed, reduced: reducedMotion(), flatLabel: c.graphTitle, onPick: src => readFile(src) });

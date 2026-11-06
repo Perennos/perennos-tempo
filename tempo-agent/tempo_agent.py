@@ -285,7 +285,8 @@ def memory_file(src):
 
 
 def memory_graph(max_nodes=400, terms=12, per_node=4):
-    """Files as nodes; an edge joins two files that share at least two of their most distinctive terms (tf-idf)."""
+    """Files as nodes; an edge joins two files that share at least two of their most distinctive terms (tf-idf).
+    w is the share of those top terms in common, 0..1."""
     docs = mem_docs()[:max_nodes]
     key = tuple((d["src"], d.get("mtime")) for d in docs)
     if _graph["key"] == key:
@@ -315,7 +316,7 @@ def memory_graph(max_nodes=400, terms=12, per_node=4):
             edges[(min(i, j), max(i, j))] = s
     val = {"nodes": [{"id": i, "src": d["src"], "name": os.path.basename(d["src"]), "kind": mem_kind(d["src"]),
                       "chunks": len(d.get("chunks") or [])} for i, d in enumerate(docs)],
-           "edges": [{"a": a, "b": b, "w": w} for (a, b), w in sorted(edges.items())]}
+           "edges": [{"a": a, "b": b, "w": round(s / terms, 3)} for (a, b), s in sorted(edges.items())]}
     _graph.update(key=key, val=val)
     return val
 
@@ -1026,7 +1027,9 @@ class H(BaseHTTPRequestHandler):
             c = CONVOS.get(q.get("conv", ""))  # never create a conversation just to read
             self.send_json({"files": memory_files(), "used": c.last_mem if c else [], "embed": _rag["embed_ok"]})
         elif u.path == "/agent/memory/graph":
-            self.send_json(memory_graph())
+            g, c = memory_graph(), CONVOS.get(q.get("conv", ""))
+            used = set(c.last_mem) if c else set()
+            self.send_json({"nodes": [dict(n, used=n["src"] in used) for n in g["nodes"]], "edges": g["edges"]})
         elif u.path == "/agent/memory/file":
             r = memory_file(q.get("src", ""))
             self.send_json(r if r else {"error": "not an indexed memory file"}, 200 if r else 404)

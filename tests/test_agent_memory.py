@@ -90,7 +90,7 @@ class AgentMemoryTest(unittest.TestCase):
                 self.assertEqual(topic[a], topic[b], (a, b))
         for e in g["edges"]:
             self.assertLess(e["a"], e["b"])
-            self.assertGreaterEqual(e["w"], 2)
+            self.assertTrue(0 < e["w"] <= 1, e)
         self.assertIs(self.ta.memory_graph(), g, "unchanged index: cached")
 
     def test_http_routes(self):
@@ -102,7 +102,9 @@ class AgentMemoryTest(unittest.TestCase):
             m = get("memory?conv=no-such-conversation")
             self.assertEqual((len(m["files"]), m["used"]), (10, []))
             self.assertNotIn("no-such-conversation", self.ta.CONVOS, "reading memory never creates a conversation")
-            self.assertEqual(len(get("memory/graph")["nodes"]), 10)
+            g = get("memory/graph?conv=no-such-conversation")
+            self.assertEqual(len(g["nodes"]), 10)
+            self.assertFalse(any(n["used"] for n in g["nodes"]))
             with self.assertRaises(urllib.error.HTTPError) as ctx:
                 urllib.request.urlopen(base + "memory/file?src=" + urllib.request.quote(os.path.abspath(__file__)), timeout=10)
             self.assertEqual(ctx.exception.code, 404)
