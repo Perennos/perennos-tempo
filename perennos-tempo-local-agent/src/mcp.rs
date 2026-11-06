@@ -129,6 +129,42 @@ fn server_cfg(s: &Value) -> Option<ServerCfg> {
     })
 }
 
+/// Environment variables every program needs to find its files and run (upper case).
+const BASE_ENV: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "HOME",
+    "USER",
+    "USERNAME",
+    "LOGNAME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "SHELL",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+];
+
 type Pending = Arc<Mutex<HashMap<u64, Sender<Value>>>>;
 
 pub struct McpServer {
@@ -168,6 +204,15 @@ impl McpServer {
 
     fn boot(&mut self, cfg: &ServerCfg, timeout: Duration) -> Result<(), String> {
         let mut cmd = Command::new(&cfg.command);
+        // A third-party server gets what any program needs to run, this product's own TEMPO_*
+        // settings, and what its config lists: not the agent's other environment (keys, tokens).
+        cmd.env_clear();
+        for (k, v) in std::env::vars_os() {
+            let name = k.to_string_lossy().to_ascii_uppercase();
+            if BASE_ENV.contains(&name.as_str()) || name.starts_with("TEMPO_") {
+                cmd.env(k, v);
+            }
+        }
         cmd.args(&cfg.args)
             .envs(&cfg.env)
             .stdin(Stdio::piped())
@@ -526,6 +571,29 @@ mod tests {
     use super::*;
 
     /// When TLA_MCP_MOCK is set this "test" is re-invoked as a stdio MCP server (see `mock_cfg`).
+    #[cfg(unix)]
+    #[test]
+    fn third_party_servers_do_not_inherit_the_agents_secrets() {
+        std::env::set_var("TLA_LEAK_TEST_KEY", "hunter2-from-the-agent");
+        let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b; read c; echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"t\",\"description\":\"seen=[$TLA_LEAK_TEST_KEY] own=[$OWN] path=[${PATH:+yes}]\"}]}}"; sleep 3"#;
+        let cfg = ServerCfg {
+            command: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            env: BTreeMap::from([("OWN".to_string(), "listed-in-config".to_string())]),
+        };
+        let s = McpServer::start("leak", &cfg, Duration::from_secs(10));
+        assert!(s.error.is_none(), "{:?}", s.error);
+        let d = s.tools[0]["description"].as_str().unwrap().to_string();
+        assert!(
+            !d.contains("hunter2"),
+            "the agent's variable reached the server: {d}"
+        );
+        assert!(
+            d.contains("own=[listed-in-config]") && d.contains("path=[yes]"),
+            "{d}"
+        );
+    }
+
     #[test]
     fn mock_server_main() {
         if std::env::var("TLA_MCP_MOCK").is_err() {

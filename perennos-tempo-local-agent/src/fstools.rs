@@ -16,9 +16,12 @@ pub fn edit_file(
     if is_secret_path(path) {
         return "refused: secret path".into();
     }
-    if !guard.in_roots(path) {
-        return "refused: outside allowed write folders".into();
-    }
+    let Some(real) = guard.writable(path) else {
+        return "refused: outside allowed write folders (or a link, or the agent's own state)"
+            .into();
+    };
+    let path = real.to_string_lossy().into_owned();
+    let path = path.as_str();
     if !Path::new(path).is_file() {
         return format!("error: no such file: {path}");
     }

@@ -34,7 +34,7 @@ pub fn bin_dirs(getenv: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     }
     for var in ["TEMPO_BIN", "PATH"] {
         if let Some(v) = getenv(var) {
-            d.extend(std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()));
+            d.extend(std::env::split_paths(&v).filter(|p| p.is_absolute()));
         }
     }
     d
@@ -260,6 +260,12 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
                 f.notes.push(format!("pack {pack}: off"));
                 continue;
             }
+            // A pack's connectors are programs the pack supplies, started with no further prompt
+            // (only their tool calls ask). So a pack runs only when the owner lists it.
+            if !cfg.packs_allow.contains(&pack) {
+                f.notes.push(format!("pack {pack}: not connected; add \"{pack}\" to packs_allow in your config to let its connectors run"));
+                continue;
+            }
             // A pack can only add. Settings it might carry (engines, spend caps, approvals,
             // privacy) are never read; say so, so nobody thinks they took effect.
             for k in manifest.as_object().into_iter().flat_map(|m| m.keys()) {
@@ -428,6 +434,43 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_the_owner_has_not_listed_starts_nothing() {
+        let d = tmpdir("pack-unlisted");
+        let home = d.join("home");
+        std::fs::create_dir_all(home.join("packs/shop/connectors")).unwrap();
+        std::fs::write(
+            home.join("packs/shop/connectors/orders.json"),
+            r#"{"command": "orders-mcp"}"#,
+        )
+        .unwrap();
+        let mut cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        let genv = env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]);
+        let f = discover(&cfg, &genv, &[]);
+        assert!(
+            f.servers.is_empty() && f.confirm.is_empty(),
+            "{:?}",
+            f.servers.keys()
+        );
+        assert!(
+            f.notes.iter().any(|n| n.contains("packs_allow")),
+            "{:?}",
+            f.notes
+        );
+        cfg.packs_allow = vec!["shop".into()];
+        assert!(discover(&cfg, &genv, &[]).servers.contains_key("orders"));
+    }
+
+    #[test]
+    fn program_folders_must_be_absolute() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let abs = std::env::temp_dir().to_string_lossy().into_owned();
+        let path = format!(".{sep}bin{sep}{abs}{sep}");
+        let dirs = bin_dirs(&|k| (k == "PATH").then(|| path.clone()));
+        assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
+        assert!(dirs.contains(&PathBuf::from(&abs)));
+    }
+
+    #[test]
     fn packs_can_only_add() {
         let d = tmpdir("packs-add-only");
         let home = d.join("home");
@@ -455,7 +498,8 @@ mod tests {
             r#"{"command": "orders-mcp", "confirm": ["refund"]}"#,
         )
         .unwrap();
-        let cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        let mut cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        cfg.packs_allow = vec!["shop".into()];
         let f = discover(
             &cfg,
             &env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]),
@@ -540,6 +584,7 @@ mod tests {
         )
         .unwrap();
         let mut cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        cfg.packs_allow = vec!["law-firm".into(), "retired".into()];
         let f = discover(
             &cfg,
             &env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]),
@@ -616,6 +661,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.mcp_trust.len(), 2);
+        cfg.packs_allow = vec!["shop".into()];
         let f = discover(
             &cfg,
             &env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]),

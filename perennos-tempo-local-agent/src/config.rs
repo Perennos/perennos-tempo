@@ -3,11 +3,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct HostCfg {
     pub urls: Vec<String>,
     /// House models: when set, only these may be requested on that host.
     pub models: Vec<String>,
+    /// The owner's own machine: its model may read here (list_dir, read_file, search_memory)
+    /// during a delegate without asking each time. Off unless the owner sets it.
+    pub trust_reads: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +48,12 @@ pub struct Config {
     pub command_cwd: PathBuf,
     pub command_timeout_s: f64,
     pub offline_probe: String,
+    /// Host names `fetch_url` may reach even though they are on this computer or its network
+    /// (everything private, loopback or link-local, such as the cloud metadata address, is refused).
+    pub fetch_allow_private: Vec<String>,
+    /// Packs (`<tempo home>/packs/<name>/`) whose connectors may be started. A pack comes from
+    /// someone else and its connectors are programs it supplies, so none runs until listed here.
+    pub packs_allow: Vec<String>,
     pub hosts: BTreeMap<String, HostCfg>,
     pub mcp_config: Option<String>,
     pub mcp_skip: Vec<String>,
@@ -147,6 +156,8 @@ impl Config {
             command_cwd: data_dir.clone(),
             command_timeout_s: 60.0,
             offline_probe: "1.1.1.1:443".into(),
+            fetch_allow_private: vec![],
+            packs_allow: vec![],
             hosts: BTreeMap::new(),
             mcp_config: None,
             auto_tools: true,
@@ -244,6 +255,12 @@ impl Config {
         }
         c.rag_globs = path_list(v, "rag_globs");
         c.pinned_current_files = path_list(v, "pinned_current_files");
+        if let Some(x) = strs(v, "packs_allow") {
+            c.packs_allow = x;
+        }
+        if let Some(x) = strs(v, "fetch_allow_private") {
+            c.fetch_allow_private = x;
+        }
         if let Some(x) = strs(v, "write_roots") {
             c.write_roots = x;
         }
@@ -269,6 +286,10 @@ impl Config {
                         HostCfg {
                             urls,
                             models: strs(h, "models").unwrap_or_default(),
+                            trust_reads: h
+                                .get("trust_reads")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
                         },
                     );
                 }
@@ -391,6 +412,7 @@ impl Config {
         h.entry("local".into()).or_insert(HostCfg {
             urls: vec![self.ollama_url.clone()],
             models: vec![],
+            trust_reads: true,
         });
         h
     }

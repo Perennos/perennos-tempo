@@ -28,9 +28,12 @@
   "hosts": {
     "other-machine": {
       "urls": ["http://other-machine.example:11434"],
-      "models": ["house-model-name"]
+      "models": ["house-model-name"],
+      "trust_reads": false
     }
   },
+  "fetch_allow_private": [],
+  "packs_allow": [],
 
   "mcp_config": "/path/to/mcp.json",
   "mcp_skip": [],

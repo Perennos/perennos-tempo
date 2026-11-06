@@ -47,7 +47,8 @@ Streamed text goes to stdout, status lines to stderr. With no config file it use
 
 - Nothing is ever deleted. `trash` only moves into `<trash_dir>/<YYYYMMDD>/` under a unique name; `edit_file` copies the original into the trash dir before writing; `run_command` refuses `rm`, `del`, `Remove-Item` and similar.
 - `write_file`, `trash` and `edit_file` only work inside `write_roots`. Paths that look like secrets are refused, and tool output is redacted and capped at 6000 characters.
-- Overwrites, trash moves and commands that write, install or use the network ask `y/N` on the terminal. When stdin is not a terminal they are denied. There is no approve-everything switch.
+- Overwrites, trash moves and every command that is not plainly read-only (`ls`, `cat`, `grep`, `git status` and the like, with no redirection or substitution; `tree`, `date`, `hostname` only bare) ask `y/N` on the terminal. An approval always shows the whole request, never a cut-off one; a request over 20,000 characters is refused. When stdin is not a terminal they are denied. There is no approve-everything switch.
+- Text from other people is information, not instructions: the automatic memory never takes in a room's notes (`<vault>/Rooms/`), and the vault marks them untrusted when Tempo reads them.
 - `protect_regex` (optional) refuses stop/kill commands that mention protected services. `delegate` only allows a host's configured house models, and `comfy_image` refuses to run while the GPU lease status says it is held.
 
 ## Config keys
@@ -67,7 +68,9 @@ All keys are optional. See `config.example.json` for placeholders.
 | `core_file`, `owner_context` | Text pinned into every system prompt |
 | `write_roots`, `trash_dir`, `protect_regex`, `command_cwd`, `command_timeout_s` | Safety and shell settings |
 | `offline_probe` | `host:port` for the quick offline check (env `TEMPO_OFFLINE` forces offline) |
-| `hosts` | Name to `{"urls": [...], "models": [...]}` for `delegate`; an implicit `local` host is the main Ollama |
+| `hosts` | Name to `{"urls": [...], "models": [...], "trust_reads": false}` for `delegate`; an implicit `local` host is the main Ollama. A remote host's model asks before each file it reads here, unless `trust_reads` marks the machine as your own |
+| `fetch_allow_private` | Host names `fetch_url` may reach although they are on this computer or a private network (all of those, and the cloud metadata address, are refused otherwise) |
+| `packs_allow` | Names of packs whose connectors may start (a pack supplies programs, so none runs until you list it) |
 | `mcp_config`, `mcp_skip`, `mcp_blocked`, `mcp_confirm`, `mcp_trust`, `mcp_hints`, `mcp_*_timeout_s` | MCP settings (`mcp_trust`: pack tools you let run without asking; every pack tool asks first otherwise) |
 | `comfy_url`, `comfy_output_dir`, `comfy_start_cmd`, `comfy_stop_cmd`, `lease_status_cmd`, `lease_acquire_cmd`, `lease_release_cmd` | ComfyUI and optional GPU lease commands |
 

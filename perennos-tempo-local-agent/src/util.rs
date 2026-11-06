@@ -1,6 +1,7 @@
 //! Small shared helpers: time (std only), char-safe slicing, secret redaction, path guard, HTTP.
 use regex::Regex;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
@@ -76,6 +77,22 @@ pub fn short_id() -> String {
     format!("{:04x}", (n ^ std::process::id().rotate_left(7)) & 0xffff)
 }
 
+/// 32 hex characters nobody can guess, from the system's per-process random keys (no RNG crate).
+/// For ids that act as a one-time key, such as an approval id.
+pub fn secret_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    (0..2)
+        .map(|_| {
+            format!(
+                "{:016x}",
+                std::collections::hash_map::RandomState::new()
+                    .build_hasher()
+                    .finish()
+            )
+        })
+        .collect()
+}
+
 pub fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -100,7 +117,16 @@ rx!(
 );
 rx!(
     secret_kv_rx,
-    r#"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization)['"]?\s*[:=]\s*['"]?)[^\s'",;]{6,}"#
+    r#"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization)['"]?\s*[:=]\s*['"]?(?:(?:bearer|basic|digest|token)\s+)?)[^\s'",;]{6,}"#
+);
+// `Bearer x` or `Basic x` anywhere, and a whole Cookie / Set-Cookie line.
+rx!(
+    secret_scheme_rx,
+    r"(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})"
+);
+rx!(
+    secret_cookie_rx,
+    r"(?i)\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+"
 );
 // Token shapes: OpenAI/Anthropic-style sk-, Stripe live/test/restricted keys, GitHub (all prefixes and
 // fine-grained PATs), Slack, Hugging Face, Google API keys, AWS access key ids and JWTs.
@@ -136,7 +162,23 @@ pub fn redact(s: &str) -> String {
     let a = secret_pem_rx().replace_all(s, "[REDACTED PRIVATE KEY]");
     let b = secret_userinfo_rx().replace_all(&a, "${1}[REDACTED]@");
     let c = secret_kv_rx().replace_all(&b, "${1}[REDACTED]");
-    secret_tok_rx().replace_all(&c, "[REDACTED]").into_owned()
+    let d = secret_cookie_rx().replace_all(&c, "${1}[REDACTED]");
+    // "Bearer abc123.def" or "Basic dXNlcjpw==", but not "basic introduction": a credential
+    // has a digit, a token character or a capital inside it, or is very long
+    let e = secret_scheme_rx().replace_all(&d, |c: &regex::Captures| {
+        let tok = &c[2];
+        if tok.chars().skip(1).any(|ch| ch.is_ascii_uppercase())
+            || tok
+                .chars()
+                .any(|ch| ch.is_ascii_digit() || "._~+/=-".contains(ch))
+            || tok.len() >= 24
+        {
+            format!("{} [REDACTED]", &c[1])
+        } else {
+            c[0].to_string()
+        }
+    });
+    secret_tok_rx().replace_all(&e, "[REDACTED]").into_owned()
 }
 
 /// Redact, then cap at `n` chars with a truncation note.
@@ -198,6 +240,9 @@ pub fn resolve(path: &Path) -> PathBuf {
 #[derive(Clone, Debug, Default)]
 pub struct Guard {
     pub roots: Vec<PathBuf>,
+    /// The agent's own state (conversations, its config, its index and logs): never writable by
+    /// a tool, even inside a write root. A guest flag or a trust list lives there.
+    pub keep: Vec<PathBuf>,
 }
 
 fn same_case(p: &Path) -> String {
@@ -213,7 +258,24 @@ impl Guard {
     pub fn new(roots: &[String]) -> Guard {
         Guard {
             roots: roots.iter().map(|r| resolve(Path::new(r))).collect(),
+            keep: vec![],
         }
+    }
+    pub fn keeping(mut self, paths: &[PathBuf]) -> Guard {
+        self.keep = paths.iter().map(|p| resolve(p)).collect();
+        self
+    }
+    /// The real place to write for `path`: inside a root, not the agent's own state, and not a link
+    /// (a dangling link would let the write land wherever it points). Use the returned path for the
+    /// write itself: `a/link/..` means one thing to this check and another to the system.
+    pub fn writable(&self, path: &str) -> Option<PathBuf> {
+        let p = resolve(Path::new(path));
+        let inside = self.in_roots(&p.to_string_lossy());
+        let kept = self.keep.iter().any(|k| p.starts_with(k));
+        let link = p
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink());
+        (inside && !kept && !link).then_some(p)
     }
     pub fn in_roots(&self, path: &str) -> bool {
         let p = resolve(Path::new(path));
@@ -270,18 +332,66 @@ pub fn http_json(url: &str, body: Option<&Value>, timeout: Duration) -> Result<V
 }
 
 pub fn get_text_capped(url: &str, timeout: Duration, limit: u64) -> Result<String, String> {
-    let a = agent(timeout, true);
-    let resp = a
-        .get(url)
-        .header("User-Agent", "PerennosTempo/1")
-        .call()
-        .map_err(|e| e.to_string())?;
-    let status = resp.status().as_u16();
-    let text = body_text(resp, limit);
-    if status >= 400 {
-        return Err(format!("HTTP {status}"));
+    get_text_checked(url, timeout, limit, &|_| Ok(()))
+}
+
+/// Like `get_text_capped`, but `check` approves the address of the request and of every redirect
+/// (up to 5) before it is made, so a public page cannot send the agent on to an internal one.
+pub fn get_text_checked(
+    url: &str,
+    timeout: Duration,
+    limit: u64,
+    check: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let a: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(timeout))
+        .max_redirects(0)
+        .build()
+        .into();
+    let mut cur = url.to_string();
+    for _ in 0..=5 {
+        check(&cur)?;
+        let resp = a
+            .get(&cur)
+            .header("User-Agent", "PerennosTempo/1")
+            .call()
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if status.is_redirection() {
+            let loc = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or("redirect without a location")?
+                .to_string();
+            cur = join_location(&cur, &loc);
+            continue;
+        }
+        let text = body_text(resp, limit);
+        if status.as_u16() >= 400 {
+            return Err(format!("HTTP {}", status.as_u16()));
+        }
+        return Ok(text);
     }
-    Ok(text)
+    Err("too many redirects".into())
+}
+
+/// A redirect's Location against the address it came from.
+pub fn join_location(base: &str, loc: &str) -> String {
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return loc.to_string();
+    }
+    let (scheme, rest) = base.split_once("://").unwrap_or(("http", base));
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if let Some(p) = loc.strip_prefix("//") {
+        return format!("{scheme}://{p}");
+    }
+    if loc.starts_with('/') {
+        return format!("{scheme}://{auth}{loc}");
+    }
+    let dir = rest[auth.len()..].rsplit_once('/').map_or("", |(d, _)| d);
+    format!("{scheme}://{auth}{dir}/{loc}")
 }
 
 /// POST a JSON body and return the response for streaming, or an error with the HTTP status text.
@@ -307,58 +417,93 @@ pub fn post_stream(
 }
 
 // ---------------------------------------------------------------- glob
-/// fnmatch-style: `*`, `?`, `[abc]`, `[a-z]`, `[!x]`.
+/// fnmatch-style: `*`, `?`, `[abc]`, `[a-z]`, `[!x]`. Each (pattern position, text position) is tried
+/// once, so a pattern such as `*a*a*a*a*b` cannot take exponential time on a long name.
 pub fn glob_match(pat: &str, s: &str) -> bool {
-    fn go(p: &[char], s: &[char]) -> bool {
-        match p.first() {
-            None => s.is_empty(),
-            Some('*') => (0..=s.len()).any(|i| go(&p[1..], &s[i..])),
-            Some('?') => !s.is_empty() && go(&p[1..], &s[1..]),
+    fn go(
+        p: &[char],
+        s: &[char],
+        pi: usize,
+        si: usize,
+        dead: &mut HashSet<(usize, usize)>,
+    ) -> bool {
+        if dead.contains(&(pi, si)) {
+            return false;
+        }
+        let rest = &s[si.min(s.len())..];
+        let ok = match p.get(pi) {
+            None => rest.is_empty(),
+            Some('*') => (si..=s.len()).any(|i| go(p, s, pi + 1, i, dead)),
+            Some('?') => !rest.is_empty() && go(p, s, pi + 1, si + 1, dead),
             Some('[') => {
-                let Some(end) = p.iter().skip(2).position(|c| *c == ']').map(|i| i + 2) else {
-                    return !s.is_empty() && s[0] == '[' && go(&p[1..], &s[1..]);
-                };
-                if s.is_empty() {
-                    return false;
-                }
-                let (neg, set) = match p[1] {
-                    '!' | '^' => (true, &p[2..end]),
-                    _ => (false, &p[1..end]),
-                };
-                let mut hit = false;
-                let mut i = 0;
-                while i < set.len() {
-                    if i + 2 < set.len() && set[i + 1] == '-' {
-                        hit |= set[i] <= s[0] && s[0] <= set[i + 2];
-                        i += 3;
-                    } else {
-                        hit |= set[i] == s[0];
-                        i += 1;
+                let tail = &p[pi..];
+                match tail.iter().skip(2).position(|c| *c == ']').map(|i| i + 2) {
+                    None => !rest.is_empty() && rest[0] == '[' && go(p, s, pi + 1, si + 1, dead),
+                    Some(_) if rest.is_empty() => false,
+                    Some(end) => {
+                        let (neg, set) = match tail[1] {
+                            '!' | '^' => (true, &tail[2..end]),
+                            _ => (false, &tail[1..end]),
+                        };
+                        let mut hit = false;
+                        let mut i = 0;
+                        while i < set.len() {
+                            if i + 2 < set.len() && set[i + 1] == '-' {
+                                hit |= set[i] <= rest[0] && rest[0] <= set[i + 2];
+                                i += 3;
+                            } else {
+                                hit |= set[i] == rest[0];
+                                i += 1;
+                            }
+                        }
+                        hit != neg && go(p, s, pi + end + 1, si + 1, dead)
                     }
                 }
-                hit != neg && go(&p[end + 1..], &s[1..])
             }
-            Some(c) => !s.is_empty() && s[0] == *c && go(&p[1..], &s[1..]),
+            Some(c) => !rest.is_empty() && rest[0] == *c && go(p, s, pi + 1, si + 1, dead),
+        };
+        if !ok {
+            dead.insert((pi, si));
         }
+        ok
     }
     let p: Vec<char> = pat.chars().collect();
     let t: Vec<char> = s.chars().collect();
-    go(&p, &t)
+    go(&p, &t, 0, 0, &mut HashSet::new())
 }
 
 fn segs_match(pat: &[&str], rel: &[&str]) -> bool {
-    match pat.first() {
-        None => rel.is_empty(),
-        Some(&"**") => (0..=rel.len()).any(|i| segs_match(&pat[1..], &rel[i..])),
-        Some(p) => !rel.is_empty() && glob_match(p, rel[0]) && segs_match(&pat[1..], &rel[1..]),
+    fn go(
+        pat: &[&str],
+        rel: &[&str],
+        pi: usize,
+        ri: usize,
+        dead: &mut HashSet<(usize, usize)>,
+    ) -> bool {
+        if dead.contains(&(pi, ri)) {
+            return false;
+        }
+        let ok = match pat.get(pi) {
+            None => ri >= rel.len(),
+            Some(&"**") => (ri..=rel.len()).any(|i| go(pat, rel, pi + 1, i, dead)),
+            Some(p) => {
+                ri < rel.len() && glob_match(p, rel[ri]) && go(pat, rel, pi + 1, ri + 1, dead)
+            }
+        };
+        if !ok {
+            dead.insert((pi, ri));
+        }
+        ok
     }
+    go(pat, rel, 0, 0, &mut HashSet::new())
 }
 
 pub const SKIP_DIRS: [&str; 4] = [".git", "node_modules", "target", "__pycache__"];
 
 /// All files under `dir` (not following symlinked dirs), skipping SKIP_DIRS.
 pub fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 40 {
+    // a model can point grep or glob at a whole drive: stop at 200 000 files rather than walk for hours
+    if depth > 40 || out.len() >= 200_000 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -655,9 +800,75 @@ mod tests {
     }
 
     #[test]
+    fn plain_words_after_basic_or_bearer_are_kept() {
+        for prose in [
+            "A basic introduction to Rust.",
+            "The bearer bond, basic configuration, Basic Settings",
+            "Basic authentication sends a username and a password.",
+        ] {
+            assert_eq!(redact(prose), prose);
+        }
+        assert!(
+            !redact("curl -H 'Authorization: Bearer abcdefghijkl12'").contains("abcdefghijkl12")
+        );
+        assert!(!redact("use Basic dXNlcjpwYXNz to log in").contains("dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn authorization_headers_and_cookies_are_redacted_whole() {
+        let r = redact("Authorization: Bearer abcDEF123456.ghi\nauthorization=Basic dXNlcjpwYXNzd29yZA==\nCookie: sid=Abc123Def; theme=dark\nSet-Cookie: sid=Zzz999Yyy; Path=/\nProxy-Authorization: Bearer qqq111www222");
+        for leak in [
+            "abcDEF123456",
+            "dXNlcjpwYXNzd29yZA",
+            "Abc123Def",
+            "Zzz999Yyy",
+            "qqq111www222",
+        ] {
+            assert!(!r.contains(leak), "{leak} leaked: {r}");
+        }
+        assert!(r.contains("Bearer") || r.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redirect_locations_are_joined_to_where_they_came_from() {
+        assert_eq!(join_location("http://h/a/c", "b?x=1"), "http://h/a/b?x=1");
+        assert_eq!(join_location("http://h:8/a/c", "/z"), "http://h:8/z");
+        assert_eq!(join_location("https://h/a", "//other/p"), "https://other/p");
+        assert_eq!(
+            join_location("http://h/a", "http://169.254.169.254/"),
+            "http://169.254.169.254/"
+        );
+        assert_eq!(join_location("http://h", "x"), "http://h/x");
+    }
+
+    #[test]
+    fn secret_ids_are_long_and_never_repeat() {
+        let ids: std::collections::HashSet<String> = (0..2000).map(|_| secret_id()).collect();
+        assert_eq!(ids.len(), 2000);
+        assert!(ids
+            .iter()
+            .all(|i| i.len() == 32 && i.chars().all(|c| c.is_ascii_hexdigit())));
+    }
+
+    #[test]
     fn civil_dates() {
         assert_eq!(civil(0.0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil(1_793_923_200.0 + 3661.0), (2026, 11, 6, 1, 1, 1));
+    }
+
+    #[test]
+    fn hostile_patterns_finish_quickly() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let name = "a".repeat(80);
+            let r1 = glob_match("*a*a*a*a*a*a*a*a*a*a*a*a*b", &name);
+            let segs: Vec<String> = (0..40).map(|_| "d".to_string()).collect();
+            let rel: Vec<&str> = segs.iter().map(String::as_str).collect();
+            let r2 = segs_match(&["**", "**", "**", "**", "**", "**", "**", "x"], &rel);
+            let _ = tx.send((r1, r2));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(got, Ok((false, false)), "glob_match took exponential time");
     }
 
     #[test]

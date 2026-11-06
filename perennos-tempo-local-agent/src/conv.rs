@@ -27,10 +27,8 @@ impl Confirm for TtyConfirm {
         if !stdin.is_terminal() {
             return false;
         }
-        eprint!(
-            "\n[confirm] {what}: {} -- allow? [y/N] ",
-            head_chars(detail, 300)
-        );
+        // the whole request, so the answer is about what will really run
+        eprint!("\n[confirm] {what}:\n{detail}\n-- allow? [y/N] ");
         let _ = std::io::stderr().flush();
         let mut l = String::new();
         stdin.read_line(&mut l).is_ok() && matches!(l.trim().to_lowercase().as_str(), "y" | "yes")
@@ -96,8 +94,22 @@ pub struct Conv {
     pub guest: bool,
 }
 
+/// Windows treats `CON.json`, `nul.x.json`, `COM1.json` as devices, not files: reading one blocks
+/// on the console or discards the write, so those names are never conversation ids.
+fn reserved_device_name(id: &str) -> bool {
+    let stem = id.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|p| {
+        stem.strip_prefix(p)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0")
+    })
+}
+
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
+        && !reserved_device_name(id)
         && id.len() <= 80
         && id
             .chars()

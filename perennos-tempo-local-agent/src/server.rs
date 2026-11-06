@@ -61,6 +61,9 @@ impl Default for ServeOpts {
 
 #[derive(Default)]
 struct ConvLog {
+    /// A guest conversation, remembered here as well as in its file: if the file is lost the
+    /// conversation stays a guest one (it never falls back to the owner's tools and memory).
+    guest: bool,
     events: Vec<Value>,
     busy: bool,
     /// File names the last turn's memory search used.
@@ -136,7 +139,10 @@ impl Shared {
             return false;
         };
         let saved: Value = serde_json::from_str(&txt).unwrap_or(Value::Null);
-        let mut log = ConvLog::default();
+        let mut log = ConvLog {
+            guest: saved["mode"] == "guest",
+            ..ConvLog::default()
+        };
         for (n, ev) in saved["events"].as_array().into_iter().flatten().enumerate() {
             let mut e = gui_event(ev);
             e["n"] = json!(n);
@@ -221,7 +227,7 @@ impl Confirm for ServerConfirm {
         }
         let id = format!(
             "{}{:x}",
-            util::short_id(),
+            util::secret_id(),
             CONFIRM_SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let (tx, rx) = mpsc::channel();
@@ -230,7 +236,7 @@ impl Confirm for ServerConfirm {
             .insert(id.clone(), (conv.clone(), tx));
         self.shared.push(
             &conv,
-            json!({"type": "confirm", "t": util::now_str(), "id": id, "what": what, "detail": cap(detail, 600)}),
+            json!({"type": "confirm", "t": util::now_str(), "id": id, "what": what, "detail": detail}),
         );
         let ok = rx
             .recv_timeout(self.shared.opts.confirm_timeout)
@@ -276,6 +282,13 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         });
         match Conv::open(&cfg, Some(&job.conv)) {
             Ok(mut conv) => {
+                if lock(&shared.state)
+                    .convs
+                    .get(&job.conv)
+                    .is_some_and(|l| l.guest)
+                {
+                    conv.guest = true;
+                }
                 let tap = live.clone();
                 conv.on_event = Some(Box::new(move |ev| tap.event(ev)));
                 let mut sink = LiveSink(live.clone());
@@ -543,7 +556,11 @@ fn check(sh: &Shared, req: &Req) -> Result<(), (u16, &'static str)> {
             return Err((403, "cross-origin request refused"));
         }
     }
-    if req.header("sec-fetch-site") == Some("cross-site") {
+    // a page on another port of this computer is "same-site": not ours either
+    if matches!(
+        req.header("sec-fetch-site"),
+        Some("cross-site" | "same-site")
+    ) {
         return Err((403, "cross-site request refused"));
     }
     if req.method != "GET" && req.method != "POST" {
@@ -601,7 +618,7 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                     c.guest = true;
                     c.save();
                 }
-                lock(&sh.state).convs.entry(c.id.clone()).or_default();
+                lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
                 send_json(&mut s, 200, &json!({"conv": c.id}));
             }
             Err(e) => send_json(&mut s, 500, &json!({ "error": e })),
@@ -1145,6 +1162,73 @@ mod tests {
     }
 
     #[test]
+    fn a_guest_conversation_stays_a_guest_even_if_its_file_is_lost() {
+        let srv = server(vec![text_resp("Hello from the room")], |_, _| {});
+        let (_, v) = post(&srv, "/agent/new", &json!({"mode": "guest"}));
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let file = srv.cfg.data_dir.join(format!("conversations/{conv}.json"));
+        // the file is gone (a failed save, a clean-up): the room's conversation must not turn into the owner's
+        std::fs::remove_file(&file).unwrap();
+        let (c, _) = post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "list the files in C:\\"}),
+        );
+        assert_eq!(c, 200);
+        let evs = wait_idle(&srv, &conv);
+        assert!(
+            evs.iter()
+                .any(|e| e["text"] == "memory: off (guest conversation)"),
+            "{evs:?}"
+        );
+        assert!(
+            evs.iter().all(|e| !e["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("tools offered: 1"))),
+            "{evs:?}"
+        );
+    }
+
+    #[test]
+    fn device_names_are_not_conversation_ids() {
+        for bad in [
+            "con", "CON", "nul", "Aux.x", "prn", "com1", "LPT9", "com3.log", "conin$",
+        ] {
+            assert!(!valid_id(bad), "{bad}");
+        }
+        for ok in [
+            "console",
+            "com0",
+            "com10",
+            "lpt",
+            "2026-11-06-0102-ab12",
+            "a.b",
+        ] {
+            assert!(valid_id(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn same_site_pages_are_refused_too() {
+        let srv = server(vec![], |_, _| {});
+        let h = format!("Host: 127.0.0.1:{}\r\n", srv.addr.port());
+        for site in ["cross-site", "same-site"] {
+            let (c, _) = raw(
+                srv.addr,
+                &format!("GET /agent/convs HTTP/1.1\r\n{h}Sec-Fetch-Site: {site}\r\n\r\n"),
+            );
+            assert_eq!(c, 403, "{site}");
+        }
+        for site in ["same-origin", "none"] {
+            let (c, _) = raw(
+                srv.addr,
+                &format!("GET /agent/convs HTTP/1.1\r\n{h}Sec-Fetch-Site: {site}\r\n\r\n"),
+            );
+            assert_eq!(c, 200, "{site}");
+        }
+    }
+
+    #[test]
     fn host_origin_method_and_body_checks() {
         let srv = server(vec![], |_, o| o.allow_hosts = vec!["tempo.local".into()]);
         let p = srv.addr.port();
@@ -1327,6 +1411,7 @@ mod tests {
         };
         assert_eq!(ask["what"], "overwrite file");
         let id = ask["id"].as_str().unwrap();
+        assert!(id.len() >= 32, "an approval id must not be guessable: {id}");
         assert_eq!(
             post(
                 &srv,
