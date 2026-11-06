@@ -1,0 +1,23 @@
+{
+  "title": "Chat",
+  "placeholder": "Talk to Tempo. Enter sends, Shift+Enter adds a line.",
+  "send": "Send",
+  "newChat": "New chat",
+  "approve": "Approve",
+  "deny": "Deny",
+  "needsYou": "Needs you",
+  "you": "You",
+  "tempo": "Tempo",
+  "tasks": "Workflow",
+  "noTasks": "No workflow yet. Tempo writes one when a job has more than one step.",
+  "chats": "Chats",
+  "engine": "Engine",
+  "net": "Network",
+  "netUp": "Internet up",
+  "netDown": "Offline",
+  "hosts": "Machines",
+  "none": "none reachable",
+  "empty": "Ask anything. Tempo answers from your memory and soul files, runs tools, makes images and can hand work to other machines.",
+  "busy": "Working",
+  "failed": "The local agent did not answer. Start it with the Perennos Tempo (offline) shortcut."
+}
