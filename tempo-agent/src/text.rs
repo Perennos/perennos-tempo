@@ -24,8 +24,10 @@ pub fn cap(s: &str, n: usize) -> String {
 
 const KEY_WORDS: [&str; 8] = ["api_key", "api-key", "apikey", "token", "secret", "password", "passwd", "authorization"];
 
-/// Known token shapes: (prefix, minimum body length, allowed body bytes).
-const TOKEN_SHAPES: [(&str, usize, fn(u8) -> bool); 9] = [
+/// A token shape: (prefix, minimum body length, allowed body bytes).
+type Shape = (&'static str, usize, fn(u8) -> bool);
+
+const TOKEN_SHAPES: [Shape; 9] = [
     ("sk-", 20, |b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
     ("ghp_", 20, |b| b.is_ascii_alphanumeric()),
     ("gho_", 20, |b| b.is_ascii_alphanumeric()),
