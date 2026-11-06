@@ -91,7 +91,8 @@ fn index_path(cfg: &Config) -> PathBuf {
     cfg.data_dir.join("rag-index.json")
 }
 
-fn load_index(cfg: &Config) -> Vec<RagFile> {
+/// The persisted index (empty if it was never built). Readable while a turn runs.
+pub fn load_index(cfg: &Config) -> Vec<RagFile> {
     let Ok(txt) = std::fs::read_to_string(index_path(cfg)) else {
         return vec![];
     };

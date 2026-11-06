@@ -77,6 +77,9 @@ impl Sink for VecSink {
     }
 }
 
+/// Receives each conversation event as it is emitted.
+pub type EventHook = Box<dyn Fn(&Value)>;
+
 pub struct Conv {
     pub id: String,
     pub path: PathBuf,
@@ -87,6 +90,8 @@ pub struct Conv {
     pub seen_calls: HashMap<String, (String, u32)>,
     /// MCP tools offered so far in this conversation (prefix-stable mode keeps them).
     pub mcp_offered: Vec<String>,
+    /// Called with every event as it is emitted (the HTTP server streams them live).
+    pub on_event: Option<EventHook>,
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -127,6 +132,7 @@ impl Conv {
             events: vec![],
             seen_calls: HashMap::new(),
             mcp_offered: vec![],
+            on_event: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)
@@ -168,8 +174,11 @@ impl Conv {
 
     pub fn emit(&mut self, kind: &str, text: &str) {
         let n = self.events.len();
-        self.events
-            .push(json!({"n": n, "t": now_str(), "type": kind, "text": util::cap(text, 3000)}));
+        let ev = json!({"n": n, "t": now_str(), "type": kind, "text": util::cap(text, 3000)});
+        if let Some(f) = &self.on_event {
+            f(&ev);
+        }
+        self.events.push(ev);
     }
 
     pub fn wf_text(&self) -> String {

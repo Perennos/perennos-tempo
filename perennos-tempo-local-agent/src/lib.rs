@@ -7,5 +7,6 @@ pub mod fstools;
 pub mod mcp;
 pub mod ollama;
 pub mod rag;
+pub mod server;
 pub mod tools;
 pub mod util;

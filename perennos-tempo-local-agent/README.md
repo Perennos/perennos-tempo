@@ -18,6 +18,20 @@ MCP servers load only from a file you name. That can be a plain `{"mcpServers": 
 
 Streamed text goes to stdout, status lines to stderr. With no config file it uses safe defaults: Ollama at `http://127.0.0.1:11434`, data in env `TEMPO_AGENT_DATA` or `./tempo-agent-data`. Env `OLLAMA_URL` (or `TEMPO_OLLAMA`) overrides the Ollama URL.
 
+## Serve the Tempo GUI
+
+```
+./target/release/tempo-local-agent serve --config config.json --port 8765 \
+    --chat-dir ../tempo-agent/gui-chat --gui-port 18795
+```
+
+`serve` runs the HTTP API the Tempo GUI chat surface uses (`/agent/new`, `send`, `events`, `confirm`, `workflow`, `health`, `convs`, and the second-brain views `memory`, `memory/file`, `memory/graph`), plus a server-sent-events stream at `/agent/stream?conv=ID` that the chat surface uses instead of polling. `--chat-dir` serves the chat surface files at `/chat/`; `--gui-port` passes every other path through to the Tempo GUI server on loopback, so the GUI and the agent share one origin.
+
+- Listens on 127.0.0.1 only unless `--bind` says otherwise (with a warning). The Host header must be `127.0.0.1`, `localhost` or `[::1]` with the port, or a name given with `--allow-host`, and a present Origin must be ours, so neither DNS rebinding nor a web page in the browser can drive the agent.
+- Only GET and POST. POST bodies must be `application/json` and at most 1 MB.
+- Approvals appear in the GUI. `/agent/confirm` resolves only an id this server issued for that conversation, and only an explicit `true` approves; an unanswered approval is denied after `--confirm-timeout` seconds (default 900).
+- One worker runs turns in order; reading memory or events never waits for a turn and never creates a conversation. Event text and file excerpts are redacted.
+
 ## What it does
 
 - Agent loop: up to 40 steps, history trimmed to a character budget, repeat-call guard (the same call is not re-run), and at the step cap one last request with no tools that asks what is done and what is next.
