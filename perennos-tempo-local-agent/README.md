@@ -14,7 +14,9 @@ cargo build --release
 
 Options: `--config PATH` (or env `TEMPO_AGENT_CONFIG`), `--mcp-config PATH` (or env `TEMPO_MCP_CONFIG`), `--conv ID` to continue a conversation, `--reindex` to rebuild the RAG index, `--help`.
 
-Streamed text goes to stdout, status lines to stderr. With no config file it uses safe defaults: Ollama at `http://127.0.0.1:11434`, data in env `TEMPO_AGENT_DATA` or `./tempo-agent-data`. Env `TEMPO_OLLAMA` overrides the Ollama URL.
+MCP servers load only from a file you name. That can be a plain `{"mcpServers": {...}}` file or your Claude Code `~/.claude.json` (`--mcp-config ~/.claude.json`); with the latter, the per-project servers and `.mcp.json` of the folders in env `TEMPO_MCP_PROJECT_DIRS` (path-list separated) load too.
+
+Streamed text goes to stdout, status lines to stderr. With no config file it uses safe defaults: Ollama at `http://127.0.0.1:11434`, data in env `TEMPO_AGENT_DATA` or `./tempo-agent-data`. Env `OLLAMA_URL` (or `TEMPO_OLLAMA`) overrides the Ollama URL.
 
 ## What it does
 

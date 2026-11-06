@@ -5,7 +5,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -19,67 +19,98 @@ pub struct ServerCfg {
 }
 
 /// `{"mcpServers": {name: {command, args, env}}}`; entries without `command` are skipped.
-pub fn load_server_configs(path: &Path) -> Result<BTreeMap<String, ServerCfg>, String> {
+/// The `~/.claude.json` shape works too, when that file is passed explicitly: its global
+/// `mcpServers`, then `projects[dir].mcpServers` and `dir/.mcp.json` for each of `project_dirs`
+/// (env TEMPO_MCP_PROJECT_DIRS). Later entries win. Nothing is ever loaded implicitly.
+pub fn load_server_configs(
+    path: &Path,
+    project_dirs: &[PathBuf],
+) -> Result<BTreeMap<String, ServerCfg>, String> {
     let txt = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read mcp config {}: {e}", path.display()))?;
-    parse_server_configs(&txt)
+    parse_server_configs_for(&txt, project_dirs)
 }
 
 pub fn parse_server_configs(txt: &str) -> Result<BTreeMap<String, ServerCfg>, String> {
-    let v: Value = serde_json::from_str(txt).map_err(|e| format!("bad mcp config JSON: {e}"))?;
-    let mut out = BTreeMap::new();
-    for (name, s) in v
-        .get("mcpServers")
-        .and_then(|m| m.as_object())
-        .into_iter()
-        .flatten()
-    {
-        let Some(command) = s
-            .get("command")
-            .and_then(|c| c.as_str())
-            .filter(|c| !c.is_empty())
-        else {
-            continue;
-        };
-        let args = s
-            .get("args")
-            .and_then(|a| a.as_array())
-            .map(|a| {
-                a.iter()
-                    .map(|x| {
-                        x.as_str()
-                            .map(String::from)
-                            .unwrap_or_else(|| x.to_string())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let env = s
-            .get("env")
-            .and_then(|e| e.as_object())
-            .map(|e| {
-                e.iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            v.as_str()
-                                .map(String::from)
-                                .unwrap_or_else(|| v.to_string()),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert(
-            name.clone(),
-            ServerCfg {
-                command: command.into(),
-                args,
-                env,
-            },
-        );
+    parse_server_configs_for(txt, &[])
+}
+
+fn norm_dir(s: &str) -> String {
+    let s = s.replace('\\', "/").trim_end_matches('/').to_string();
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
     }
-    Ok(out)
+}
+
+pub fn parse_server_configs_for(
+    txt: &str,
+    project_dirs: &[PathBuf],
+) -> Result<BTreeMap<String, ServerCfg>, String> {
+    let v: Value = serde_json::from_str(txt).map_err(|e| format!("bad mcp config JSON: {e}"))?;
+    let mut raw: BTreeMap<String, Value> = BTreeMap::new();
+    let mut merge = |doc: &Value| {
+        for (name, s) in doc.get("mcpServers").and_then(|m| m.as_object()).into_iter().flatten() {
+            raw.insert(name.clone(), s.clone());
+        }
+    };
+    merge(&v);
+    let wanted: Vec<String> = project_dirs.iter().map(|d| norm_dir(&d.to_string_lossy())).collect();
+    for (dir, p) in v.get("projects").and_then(|p| p.as_object()).into_iter().flatten() {
+        if wanted.contains(&norm_dir(dir)) {
+            merge(p);
+        }
+    }
+    for d in project_dirs {
+        if let Ok(t) = std::fs::read_to_string(d.join(".mcp.json")) {
+            if let Ok(j) = serde_json::from_str::<Value>(&t) {
+                merge(&j);
+            }
+        }
+    }
+    Ok(raw.iter().filter_map(|(name, s)| server_cfg(s).map(|c| (name.clone(), c))).collect())
+}
+
+fn server_cfg(s: &Value) -> Option<ServerCfg> {
+    let command = s
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())?;
+    let args = s
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| x.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let env = s
+        .get("env")
+        .and_then(|e| e.as_object())
+        .map(|e| {
+            e.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| v.to_string()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ServerCfg {
+        command: command.into(),
+        args,
+        env,
+    })
 }
 
 type Pending = Arc<Mutex<HashMap<u64, Sender<Value>>>>;
@@ -568,6 +599,30 @@ mod tests {
         assert_eq!(c["a"].env["K"], "v");
         assert!(parse_server_configs("{").is_err());
         assert!(parse_server_configs("{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn claude_json_shape_with_project_dirs() {
+        let d = crate::util::testutil::tmpdir("mcpproj");
+        let proj = d.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join(".mcp.json"), r#"{"mcpServers":{"d":{"command":"srv-d"}}}"#).unwrap();
+        // Project keys in .claude.json may use backslashes and a trailing slash.
+        let key = format!("{}/", proj.to_string_lossy().replace('/', "\\"));
+        let doc = json!({
+            "mcpServers": {"a": {"command": "srv-a"}},
+            "projects": {key: {"mcpServers": {"b": {"command": "srv-b"}, "a": {"command": "srv-a2"}}},
+                         "/elsewhere": {"mcpServers": {"c": {"command": "srv-c"}}}}
+        });
+        let file = d.join("claude.json");
+        std::fs::write(&file, doc.to_string()).unwrap();
+        let got = load_server_configs(&file, std::slice::from_ref(&proj)).unwrap();
+        assert_eq!(got.keys().collect::<Vec<_>>(), ["a", "b", "d"]);
+        assert_eq!(got["a"].command, "srv-a2", "project entries override global ones");
+        // Without project dirs only the global servers load.
+        let global = load_server_configs(&file, &[]).unwrap();
+        assert_eq!(global.keys().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(global["a"].command, "srv-a");
     }
 
     #[test]

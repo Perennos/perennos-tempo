@@ -328,7 +328,10 @@ impl Config {
                 Config::from_json(&v, data_env)?
             }
         };
-        if let Some(u) = env("TEMPO_OLLAMA").filter(|u| !u.is_empty()) {
+        let url = ["OLLAMA_URL", "TEMPO_OLLAMA"]
+            .iter()
+            .find_map(|k| env(k).map(|u| u.trim().to_string()).filter(|u| !u.is_empty()));
+        if let Some(u) = url {
             c.ollama_url = u.trim_end_matches('/').to_string();
         }
         Ok(c)
@@ -367,10 +370,33 @@ pub fn resolve_path(cli: Option<&str>, env: Option<String>) -> Option<String> {
 }
 
 /// MCP config path: CLI flag, then env TEMPO_MCP_CONFIG, then the main config's `mcp_config`.
+/// Explicit only: nothing is loaded unless one of these names a file. A leading `~` is the home folder.
 pub fn mcp_path(cli: Option<&str>, env: Option<String>, cfg: &Config) -> Option<PathBuf> {
     resolve_path(cli, env)
         .or_else(|| cfg.mcp_config.clone())
+        .map(|p| expand_home(&p, home_dir()))
+}
+
+/// The user's home folder: `HOME`, else `USERPROFILE` (Windows).
+pub fn home_dir() -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .find(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+/// `~`, `~/x` or `~\x` under `home`; anything else unchanged.
+pub fn expand_home(p: &str, home: Option<PathBuf>) -> PathBuf {
+    let rest = if p == "~" {
+        Some("")
+    } else {
+        p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\"))
+    };
+    match (rest, home) {
+        (Some(r), Some(h)) => h.join(r),
+        _ => PathBuf::from(p),
+    }
 }
 
 pub fn ensure_dirs(c: &Config) -> Result<(), String> {
@@ -446,6 +472,29 @@ mod tests {
             Some(PathBuf::from("/cli.json"))
         );
         assert_eq!(mcp_path(None, None, &c), None);
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(expand_home("~/.claude.json", home.clone()), PathBuf::from("/home/u/.claude.json"));
+        assert_eq!(expand_home("~", home.clone()), PathBuf::from("/home/u"));
+        assert_eq!(expand_home("~other/x", home.clone()), PathBuf::from("~other/x"));
+        assert_eq!(expand_home("/abs/m.json", home), PathBuf::from("/abs/m.json"));
+    }
+
+    #[test]
+    fn ollama_url_wins_over_tempo_ollama() {
+        let both = |k: &str| match k {
+            "OLLAMA_URL" => Some("http://gpu-box.local:11434/".to_string()),
+            "TEMPO_OLLAMA" => Some("http://127.0.0.1:9".to_string()),
+            _ => None,
+        };
+        assert_eq!(Config::load(None, None, &both).unwrap().ollama_url, "http://gpu-box.local:11434");
+        let blank = |k: &str| match k {
+            "OLLAMA_URL" => Some("  ".to_string()),
+            "TEMPO_OLLAMA" => Some("http://127.0.0.1:9".to_string()),
+            _ => None,
+        };
+        assert_eq!(Config::load(None, None, &blank).unwrap().ollama_url, "http://127.0.0.1:9");
+        let none = |_: &str| None;
+        assert_eq!(Config::load(None, None, &none).unwrap().ollama_url, "http://127.0.0.1:11434");
     }
 
     #[test]

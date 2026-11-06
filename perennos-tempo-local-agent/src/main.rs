@@ -16,13 +16,17 @@ With a PROMPT it runs one turn and exits. With no PROMPT it starts a line REPL
 
 OPTIONS:
     --config PATH       JSON config file (env TEMPO_AGENT_CONFIG)
-    --mcp-config PATH   MCP servers file, {\"mcpServers\": {...}} (env TEMPO_MCP_CONFIG)
+    --mcp-config PATH   MCP servers file, {\"mcpServers\": {...}} (env TEMPO_MCP_CONFIG).
+                        ~/.claude.json works too; its per-project servers load for
+                        the folders in env TEMPO_MCP_PROJECT_DIRS. Nothing loads by default.
     --conv ID           continue the conversation ID (workflow and history are kept)
     --reindex           rebuild the RAG index from scratch first
     -h, --help          show this help
 
 Risky actions (overwrite, trash, shell commands that write) ask y/N on the
 terminal. When stdin is not a terminal they are denied.
+
+Env OLLAMA_URL (or TEMPO_OLLAMA) overrides the Ollama URL.
 ";
 
 struct Args {
@@ -72,7 +76,17 @@ fn real_main() -> Result<(), String> {
     )?;
     config::ensure_dirs(&cfg)?;
     let servers = match config::mcp_path(args.mcp.as_deref(), getenv("TEMPO_MCP_CONFIG"), &cfg) {
-        Some(p) => mcp::load_server_configs(&p)?,
+        Some(p) => {
+            let project_dirs: Vec<std::path::PathBuf> = std::env::var_os("TEMPO_MCP_PROJECT_DIRS")
+                .map(|v| {
+                    std::env::split_paths(&v)
+                        .filter(|d| !d.as_os_str().is_empty())
+                        .map(|d| config::expand_home(&d.to_string_lossy(), config::home_dir()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            mcp::load_server_configs(&p, &project_dirs)?
+        }
         None => Default::default(),
     };
     let host = McpHost::new(&cfg, servers);
