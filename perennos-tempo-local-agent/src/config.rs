@@ -95,8 +95,25 @@ pub struct Config {
     pub vault_write: bool,
     /// Folders Tempo Studio may read and write (env TEMPO_STUDIO_ROOTS wins; default ~/Music).
     pub studio_roots: Vec<String>,
-    /// Where connectors/ and packs/ live (env TEMPO_HOME wins; default ~/.tempo).
-    pub tempo_home: Option<String>,
+}
+
+/// The agent's data folder when nothing names one: `TEMPO_AGENT_DATA`, else `<Tempo home>/agent`,
+/// the home found by the rule every Perennos Tempo product shares (`tempo_home`).
+pub fn default_agent_data(data_dir_env: Option<String>) -> PathBuf {
+    data_dir_env
+        .filter(|d| !d.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::tempo_home::tempo_home().dir.join("agent"))
+}
+
+/// The settings file the agent reads when neither `--config` nor `TEMPO_AGENT_CONFIG` names one,
+/// in the launcher's order: an older `<agent data>/agent-config.json`, else the `config.json`
+/// that `tempo-launch setup` writes there.
+pub fn default_config_file(agent_data: &Path) -> Option<PathBuf> {
+    ["agent-config.json", "config.json"]
+        .iter()
+        .map(|n| agent_data.join(n))
+        .find(|p| p.is_file())
 }
 
 fn strs(v: &Value, k: &str) -> Option<Vec<String>> {
@@ -140,11 +157,9 @@ fn path_list(v: &Value, k: &str) -> Vec<(String, usize)> {
 
 impl Config {
     /// Defaults only. `data_dir_env` is the value of TEMPO_AGENT_DATA, if any; without it the data
-    /// lives in `<tempo home>/agent` (see `home`).
+    /// lives in `<tempo home>/agent` (see `tempo_home`).
     pub fn defaults(data_dir_env: Option<String>) -> Config {
-        let data_dir = data_dir_env
-            .map(PathBuf::from)
-            .unwrap_or_else(|| crate::home::agent_data(&|k| std::env::var(k).ok(), None));
+        let data_dir = default_agent_data(data_dir_env);
         Config {
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_fallbacks: vec![],
@@ -189,7 +204,6 @@ impl Config {
             vault: None,
             vault_write: true,
             studio_roots: vec![],
-            tempo_home: None,
             mcp_skip: vec![],
             mcp_blocked: BTreeMap::new(),
             mcp_confirm: vec![],
@@ -222,14 +236,6 @@ impl Config {
         let mut c = Config::defaults(data_dir_env.clone());
         if let Some(d) = string(v, "data_dir") {
             c.set_data_dir(PathBuf::from(d));
-        } else if data_dir_env.is_none() {
-            // a config that names the Tempo home keeps the agent's data in <home>/agent
-            if let Some(th) = string(v, "tempo_home") {
-                c.set_data_dir(crate::home::agent_data(
-                    &|k| std::env::var(k).ok(),
-                    Some(&th),
-                ));
-            }
         }
         if let Some(x) = string(v, "ollama_url") {
             c.ollama_url = x.trim_end_matches('/').to_string();
@@ -366,7 +372,6 @@ impl Config {
         if let Some(x) = strs(v, "studio_roots") {
             c.studio_roots = x;
         }
-        c.tempo_home = string(v, "tempo_home");
         if let Some(x) = strs(v, "mcp_skip") {
             c.mcp_skip = x;
         }
@@ -426,20 +431,30 @@ impl Config {
         Ok(c)
     }
 
-    /// Load from `--config` or env value; neither given means defaults. A given but unreadable file is an error.
+    /// Load from `--config` or the env value; with neither, from the agent's own settings file if
+    /// there is one (`default_config_file`), else defaults. A file that is there but cannot be read
+    /// is an error, wherever it was named: settings such as `command_deny` must never be dropped
+    /// quietly.
     pub fn load(
         cli_path: Option<&str>,
         env_path: Option<String>,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Config, String> {
         let data_env = env("TEMPO_AGENT_DATA");
-        let mut c = match resolve_path(cli_path, env_path) {
+        let path = resolve_path(cli_path, env_path).or_else(|| {
+            default_config_file(&default_agent_data(data_env.clone()))
+                .map(|p| p.to_string_lossy().into_owned())
+        });
+        let mut c = match path {
             None => Config::defaults(data_env),
             Some(p) => {
                 let txt = std::fs::read_to_string(&p)
                     .map_err(|e| format!("cannot read config {p}: {e}"))?;
                 let v: Value = serde_json::from_str(&txt)
                     .map_err(|e| format!("bad config JSON in {p}: {e}"))?;
+                if v.get("tempo_home").is_some() {
+                    eprintln!("[config: {p} names tempo_home, which is not read: the Tempo home comes from TEMPO_HOME, as for every Perennos Tempo product (tempo-launch home shows it)]");
+                }
                 Config::from_json(&v, data_env)?
             }
         };
@@ -535,17 +550,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn the_agents_own_settings_file_is_read_when_nothing_names_one() {
+        let d = std::env::temp_dir().join(format!("tla-cfgfile-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let ds = d.to_string_lossy().into_owned();
+        let env = |k: &str| (k == "TEMPO_AGENT_DATA").then(|| ds.clone());
+        let models = |c: Config| c.models;
+        assert_eq!(
+            models(Config::load(None, None, &env).unwrap()),
+            Config::defaults(None).models
+        );
+        // the config.json that tempo-launch setup writes
+        std::fs::write(d.join("config.json"), r#"{"models": ["from-setup"]}"#).unwrap();
+        assert_eq!(
+            models(Config::load(None, None, &env).unwrap()),
+            ["from-setup"]
+        );
+        // an older agent-config.json comes first, as in the launcher
+        std::fs::write(d.join("agent-config.json"), r#"{"models": ["older"]}"#).unwrap();
+        assert_eq!(models(Config::load(None, None, &env).unwrap()), ["older"]);
+        // a file that is named wins over both
+        let named = d.join("named.json");
+        std::fs::write(&named, r#"{"models": ["named"]}"#).unwrap();
+        assert_eq!(
+            models(Config::load(named.to_str(), None, &env).unwrap()),
+            ["named"]
+        );
+        // a broken file is an error, never quietly skipped (it may hold command_deny)
+        std::fs::write(d.join("agent-config.json"), "{not json").unwrap();
+        assert!(Config::load(None, None, &env)
+            .unwrap_err()
+            .contains("bad config JSON"));
+    }
+
+    #[test]
     fn defaults_are_generic() {
         let c = Config::defaults(None);
         assert_eq!(c.ollama_url, "http://127.0.0.1:11434");
         // without TEMPO_AGENT_DATA the data lives in <tempo home>/agent
         assert_eq!(
             c.data_dir,
-            crate::home::agent_data(&|k| std::env::var(k).ok(), None)
-        );
-        assert!(
-            c.data_dir.ends_with("agent")
-                || c.data_dir.as_path() == Path::new("./tempo-agent-data")
+            crate::tempo_home::tempo_home().dir.join("agent")
         );
         assert_eq!(c.embed_model, "embeddinggemma");
         assert_eq!(c.max_steps, 40);

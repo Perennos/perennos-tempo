@@ -554,6 +554,7 @@ impl Env {
             "logs",
             "rag-index.json",
             "agent-config.json",
+            "config.json",
             "checkpoints",
             "control.key",
         ]

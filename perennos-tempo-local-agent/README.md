@@ -16,7 +16,11 @@ Options: `--config PATH` (or env `TEMPO_AGENT_CONFIG`), `--mcp-config PATH` (or 
 
 MCP servers load only from a file you name. That can be a plain `{"mcpServers": {...}}` file or your Claude Code `~/.claude.json` (`--mcp-config ~/.claude.json`); with the latter, the per-project servers and `.mcp.json` of the folders in env `TEMPO_MCP_PROJECT_DIRS` (path-list separated) load too.
 
-Streamed text goes to stdout, status lines to stderr. With no config file it uses safe defaults: Ollama at `http://127.0.0.1:11434`, data in env `TEMPO_AGENT_DATA` or `<Tempo home>/agent`. The Tempo home is found as every Perennos Tempo product finds it: `TEMPO_HOME` (or the older `PERENNOS_TEMPO_DATA`), else a folder an earlier version used if it exists (`C:\LocalAI\apps\decision-head` on Windows, `$XDG_STATE_HOME/perennos-tempo` or `~/.local/state/perennos-tempo` elsewhere), else `%LOCALAPPDATA%\Perennos Tempo` on Windows and `~/.tempo` elsewhere. Nothing is moved between them. Env `OLLAMA_URL` (or `TEMPO_OLLAMA`) overrides the Ollama URL.
+Streamed text goes to stdout, status lines to stderr. Settings come from `--config`, else `TEMPO_AGENT_CONFIG`, else the agent's own file in its data folder: an older `agent-config.json`, else the `config.json` that `tempo-launch setup` writes (the launcher uses the same order). A settings file that is there but cannot be read stops the agent with a message, rather than being skipped. With no file at all it uses safe defaults: Ollama at `http://127.0.0.1:11434`, data in env `TEMPO_AGENT_DATA` or `<Tempo home>/agent`. Env `OLLAMA_URL` (or `TEMPO_OLLAMA`) overrides the Ollama URL.
+
+The Tempo home is found by the one rule every Perennos Tempo product shares (`src/tempo_home.rs`, the same file byte for byte in each product, with the same conformance tests): `TEMPO_HOME` (or the older `PERENNOS_TEMPO_DATA`), else a folder an earlier version used if it exists (`C:\LocalAI\apps\decision-head` on Windows, `$XDG_STATE_HOME/perennos-tempo` or `~/.local/state/perennos-tempo` elsewhere), else `%LOCALAPPDATA%\Perennos Tempo` on Windows and `~/.tempo` elsewhere. Nothing is moved between them. The launcher passes `TEMPO_HOME` to every app it starts; `tempo-launch home` shows which folder was chosen and why.
+
+On Windows, `build.rs` gives `tempo-local-agent.exe` its icon (`assets/tempo-local-agent.ico`) and version details (Perennos Tempo Agent, by Perennos) when a resource compiler (`rc.exe` or `windres`) is there; without one it is built the same, minus those.
 
 ## Serve the Tempo GUI
 

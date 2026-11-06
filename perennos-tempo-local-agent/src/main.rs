@@ -20,7 +20,8 @@ it in. In the chat, /help lists the commands (/cd, /mode, /plan, /undo, /diff,
 !cmd runs a command yourself and @file attaches a file.
 
 OPTIONS:
-    --config PATH       JSON config file (env TEMPO_AGENT_CONFIG)
+    --config PATH       JSON config file (env TEMPO_AGENT_CONFIG; else agent-config.json or
+                        config.json in the agent's data folder, if there is one)
     --mcp-config PATH   MCP servers file, {\"mcpServers\": {...}} (env TEMPO_MCP_CONFIG).
                         ~/.claude.json works too; its per-project servers load for
                         the folders in env TEMPO_MCP_PROJECT_DIRS. Nothing loads by default.

@@ -52,9 +52,13 @@ pub fn find_bin(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The Tempo home, found as every Perennos Tempo product finds it (`crate::home`).
-pub fn tempo_home(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    crate::home::tempo_home(getenv, cfg.tempo_home.as_deref())
+/// The Tempo home, found by the rule every Perennos Tempo product shares (`crate::tempo_home`),
+/// against `getenv`.
+pub fn tempo_home(getenv: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    let env = |k: &str| getenv(k).map(std::ffi::OsString::from);
+    let windows = cfg!(windows);
+    let user = crate::tempo_home::user_home_from(windows, &env);
+    crate::tempo_home::resolve(windows, &env, user.as_deref(), &|p| p.is_dir()).dir
 }
 
 /// The only `pack.json` keys a pack may have; anything else is ignored and noted.
@@ -221,7 +225,8 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
         );
     }
     // Your own connectors (they may replace a product), then every enabled pack's (add only).
-    if let Some(home) = tempo_home(cfg, getenv) {
+    {
+        let home = tempo_home(getenv);
         for file in json_files(&home.join("connectors")) {
             match connector(&file) {
                 Ok(Some((name, sc, confirm))) => {

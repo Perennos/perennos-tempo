@@ -345,7 +345,7 @@ impl Agent {
 
     /// The Tempo home: the owner's own AGENTS.md and commands live there.
     fn home(&self) -> Option<PathBuf> {
-        crate::home::tempo_home(&|k| std::env::var(k).ok(), self.cfg().tempo_home.as_deref())
+        Some(crate::tempo_home::tempo_home().dir)
     }
 
     /// The instruction files for this conversation's folder (none in a guest room).
@@ -1767,10 +1767,7 @@ mod tests {
     #[test]
     fn owner_commands_are_handled_without_the_model() {
         let m = Mock::start(chat_script(vec![]));
-        let home = tmpdir("cmd-home");
-        let (mut a, mut conv) = agent(&m, |c| {
-            c.tempo_home = Some(home.to_string_lossy().into_owned())
-        });
+        let (mut a, mut conv) = agent(&m, |_| {});
         let mut sink = VecSink::default();
         let r = a.turn(&mut conv, "/help", &mut sink).unwrap();
         assert!(r.contains("/undo") && sink.text.contains("/compact"), "{r}");
@@ -1963,11 +1960,8 @@ mod tests {
             "Fix the bug in $1 and explain.",
         )
         .unwrap();
-        let home = tmpdir("instr-home");
         let m = Mock::start(chat_script(vec![text_resp("one"), text_resp("two")]));
-        let (mut a, mut conv) = agent(&m, |c| {
-            c.tempo_home = Some(home.to_string_lossy().into_owned())
-        });
+        let (mut a, mut conv) = agent(&m, |_| {});
         conv.cwd = Some(p.clone());
         say(&mut a, &mut conv, "summarize @notes.md please");
         let b = &m.bodies("/api/chat")[0];
