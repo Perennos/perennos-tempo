@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -57,7 +59,32 @@ def _parser():
     _add_home(config)
     config.add_argument("--host", choices=sorted(LOOPBACK_HOSTS), default="127.0.0.1")
     config.add_argument("--port", type=int, default=8765)
+
+    # Listed for --help only; main() forwards `agent ...` before argparse sees it.
+    modes.add_parser("agent", help="run the local agent loop (Rust tempo-agent) against Ollama at OLLAMA_URL; "
+                                   "`tempo agent --help` for its options")
     return parser
+
+
+def _agent_binary():
+    """The Rust tempo-agent: TEMPO_AGENT_BIN, a cargo build in this checkout, or PATH."""
+    exe = "tempo-agent.exe" if os.name == "nt" else "tempo-agent"
+    root = Path(__file__).resolve().parent
+    candidates = [os.environ.get("TEMPO_AGENT_BIN")]
+    candidates += [str(root / "target" / kind / exe) for kind in ("release", "debug")]
+    candidates.append(shutil.which("tempo-agent"))
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
+def _run_agent(agent_args):
+    binary = _agent_binary()
+    if not binary:
+        print("tempo agent: the tempo-agent binary was not found. Build it with "
+              "`cargo build --release -p tempo-agent` in this folder, or set TEMPO_AGENT_BIN.", file=sys.stderr)
+        return 2
+    env = dict(os.environ)
+    env.setdefault("OLLAMA_URL", "http://127.0.0.1:11434")
+    return subprocess.call([binary, *agent_args], env=env)
 
 
 def _home_path(value, *, required=True):
@@ -180,6 +207,9 @@ def _print_mcp_config(args, home):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["agent"]:
+        return _run_agent(argv[1:])
     parser = _parser()
     args = parser.parse_args(argv)
     try:
