@@ -14,8 +14,9 @@ models/
 *.exe
 payload.zip
 python-runtime.zip
-# Rust build output
+# Rust build output and the local agent's default data folder
 target/
+tempo-agent-data/
 # tempo-agent run-time data and machine settings: built locally, never committed
 tempo-agent/agent-config.json
 tempo-agent/conversations/

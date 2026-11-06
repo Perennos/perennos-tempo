@@ -1,124 +1,84 @@
-# tempo-agent: the Rust port
+# The Rust port of the local agent
 
-The Rust crate in this folder (`tempo-agent`, library `tempo_agent`, binary `tempo-agent`) ports the core of
-`tempo_agent.py` and `mcphost.py`: the agent loop over Ollama tool calling and the MCP stdio host. The Python
-harness still runs the GUI chat surface; the crate is the tested core that will replace it piece by piece.
+The Rust port of this folder's harness (`tempo_agent.py`, `mcphost.py`) is the standalone crate
+[`perennos-tempo-local-agent/`](../perennos-tempo-local-agent/README.md) at the repository root: library
+`tempo_local_agent`, binary `tempo-local-agent`. The same crate lives in the private Perennos core, and the two
+copies are kept byte-identical. The Python harness still serves the GUI chat surface until the Rust side has an
+HTTP API (see "What is left").
 
-Dependencies: `serde` and `serde_json` only. HTTP to Ollama is a small `std::net` client, because engines serve
-plain HTTP on loopback or the LAN.
+An earlier, smaller port lived in this folder (`tempo-agent/src`). It was retired so there is one port, not two.
+Its history is in commits `b5f02b1` to `30e6d83`; for example `git show 30e6d83:tempo-agent/src/agent.rs`.
 
 ## Build, test, run
 
-From the repository root (a Cargo workspace) or from this folder:
-
 ```bash
-cargo build --release -p tempo-agent
+cargo build --release --manifest-path perennos-tempo-local-agent/Cargo.toml
 ```
 
 ```bash
-cargo test
+cargo test --manifest-path perennos-tempo-local-agent/Cargo.toml
 ```
 
 ```bash
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --manifest-path perennos-tempo-local-agent/Cargo.toml -- -D warnings
 ```
 
-The tests need no GPU, no Ollama and no network: they run against a scripted mock Ollama HTTP server and a mock
-MCP server (over in-process pipes, and as a real child process). CI runs both commands on every push.
+The tests need no GPU, no Ollama and no network beyond loopback: they use an in-process mock Ollama and a mock
+stdio MCP server. CI runs both commands on every push.
 
-Run it:
+Run it through the repo CLI, which looks for the binary in `TEMPO_AGENT_BIN`, then
+`perennos-tempo-local-agent/target/{release,debug}`, then `PATH`:
 
 ```bash
-target/release/tempo-agent "what is in ~/notes?"
+python tempo.py agent "list the files in ~/notes"
 ```
 
-```bash
-python tempo.py agent --lane heavy --model qwen3:14b "list the files in ~/notes"
-```
-
-`tempo agent ...` (the repo CLI, `tempo.sh` / `tempo.cmd`) forwards to the binary. It looks in `TEMPO_AGENT_BIN`,
-then `target/release`, `target/debug`, then `PATH`. With no prompt the binary reads one turn per line from stdin.
-`tempo-agent --help` lists every option.
+`tempo.sh agent ...` and `tempo.cmd agent ...` do the same. With no prompt it reads one turn per line from stdin.
 
 ## Configuration
 
-Nothing machine-specific is in the code. Precedence: command-line flag, then environment, then the config file,
-then the defaults (which mirror the Python harness).
+Nothing machine-specific is in the code.
 
 | Setting | Where |
 |---|---|
-| Engine URL | `--url`, `OLLAMA_URL` (or `TEMPO_OLLAMA`), `ollama_url`, default `http://127.0.0.1:11434` |
-| Run-time data (workflow files, default write root) | `TEMPO_AGENT_HOME`, default `~/.perennos-tempo-agent` |
-| Config file | `--config`, `TEMPO_AGENT_CONFIG`, else `$TEMPO_AGENT_HOME/agent-config.json` if present |
-| MCP servers | `TEMPO_CLAUDE_JSON` or `claude_json`, default `~/.claude.json`; plus `.mcp.json` in each of `TEMPO_MCP_PROJECT_DIRS` / `mcp_project_dirs` |
-| Models | `--model` / `--fast-model` (repeat for fallbacks), `heavy_models` / `fast_models` |
+| Engine URL | `OLLAMA_URL` (or `TEMPO_OLLAMA`), else `ollama_url` in the config file, else `http://127.0.0.1:11434` |
+| Config file | `--config PATH` or `TEMPO_AGENT_CONFIG`; see `perennos-tempo-local-agent/config.example.json` |
+| Run-time data | `data_dir`, or `TEMPO_AGENT_DATA`, else `./tempo-agent-data` (git-ignored) |
+| MCP servers | Only from a file you name: `--mcp-config`, `TEMPO_MCP_CONFIG` or `mcp_config`. It may be a `{"mcpServers": {...}}` file or your `~/.claude.json`; with the latter, the per-project servers and `.mcp.json` of the folders in `TEMPO_MCP_PROJECT_DIRS` load too. Nothing loads implicitly, because those files can hold tokens in `env` blocks. |
 
-`agent-config.example.json` shows every key. The Python harness reads the same file (its `TEMPO_AGENT_HOME` defaults
-to this folder) and each side ignores the keys it does not use. Copy it to `agent-config.json`, which git ignores.
+The Python harness reads `agent-config.json` in this folder (see `agent-config.example.json`) and `TEMPO_CLAUDE_JSON`
+for its MCP servers. The two config files have different keys; keep both local, never committed.
 
 ## What is ported
 
-| Python | Rust | Notes |
+Everything the harness does in its agent loop, plus a few things the Python version lacks:
+
+| Python | Rust crate | Notes |
 |---|---|---|
-| Ollama `/api/chat` messages, tool calls, tool definitions, options | `ollama.rs` | Streams NDJSON (chunked, Content-Length or read-to-close); tolerates string or null arguments and the newer `id`/`index` fields |
-| `chat_once` | `Ollama::chat` | Content deltas, tool calls and timings (first token, total, load, prompt and output tokens) |
-| `agent_turn` loop, `MAX_STEPS` | `agent.rs` `Agent::run_turn` | Events: user, status, delta, partial, assistant, tool call, tool result, error |
-| Engine retry and fallback | `send_with_retry` | One retry after an HTTP error (wait `retry_delay_secs`), then the next model in the lane |
-| Repeat-call guard | `run_call` | Same name and arguments (keys sorted) answered from the first result, with the `(xN)` count |
-| Step-cap summary | end of `turn` | One call without tools asking for done/left/next, then the "say continue" note |
-| `pick_lane`, `TOOLISH`, `HARDISH`, fast lane `NEEDS_TOOLS` hand-off | `lanes.rs`, `agent.rs` | Word-boundary matching without a regex crate; sticky heavy lane when only the big model is loaded |
-| `trim` | `trim_history` | See differences below |
-| `Tools.select`, `HINTS`, `BLOCKED_MCP`, `CONFIRM_MCP` | `select_tools`, config | Same scoring (name words x3, description words, hint +1, 3 to qualify, at most 8) |
-| `Tools.shrink` | `mcp::shrink_schema` | Drops `title`/`$schema`/`examples`/`default` metadata, cuts descriptions to 120 chars, keeps properties with those names |
-| `mcphost.load_server_configs` | `mcp::load_server_configs` | Global, per-project and `.mcp.json` servers; stdio entries only |
-| `McpServer` start, `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, decline server requests, `stop` | `mcp::McpServer` | Follows `nextCursor` paging; fails fast when a server exits; kills only its own child |
-| Lazy server start | `mcp::McpHost` | All servers start in parallel the first time the catalog is needed |
-| Workflow file (task list, notes, log) | `workflow.rs` | Same Markdown layout, so both harnesses can continue one file |
-| `list_dir`, `read_file`, `write_file`, `workflow_update` | `tools.rs` | Secret-path refusal, write roots, approval for overwrites |
-| `redact`, `cap` | `text.rs` | Also redacts the token after `Bearer` and a few more token shapes |
-| CLI client (`ask.py`) | `main.rs` | Terminal client for the loop itself rather than the HTTP API |
-
-### Deliberate differences
-
-- On a fast-to-heavy hand-off the "FAST LANE: no tools" note is removed from the system prompt (the Python loop
-  left it in, telling the heavy model it had no tools while offering them).
-- The repeat guard is per turn. The Python guard lived on the conversation, so asking to list a folder again in a
-  later turn returned the old listing.
-- The step-cap summary is kept in history as an assistant message.
-- History trimming drops earlier turns first, then the oldest steps of the current turn, and never the current
-  question. The Python `trim` could drop the question when several large tool results landed in one step.
-- The fast-lane hand-off word is never shown in the CLI.
-- Timestamps are UTC (`2026-11-06 12:00:00Z`): the standard library has no local time zone.
-- The system prompt does not cite memory excerpts yet, because retrieval is not ported (below).
+| `agent_turn`, `MAX_STEPS`, `trim` | `agent.rs` | Step cap with a tool-free summary request, repeat-call guard, history budget |
+| `pick_lane`, fast lane `NEEDS_TOOLS` hand-off | `agent.rs` | Fast model without tools, heavy model with tools |
+| `chat_once`, engine fallback | `ollama.rs`, `agent.rs` | Streams `/api/chat`; retries a model (configurable, default 3) before falling back; timings to `logs/timing.jsonl` |
+| (new) prompt reuse | `prefix_stable`, default on | System message and offered tools stay fixed within a conversation and per-turn context goes in the user message, so each request extends the previous one and Ollama only reads the new tokens |
+| `mcphost.py`, `Tools.select`, `Tools.shrink` | `mcp.rs` | `initialize`, `tools/list`, `tools/call`, declining server requests, schema shrinking, keyword selection of up to 8 MCP tools, blocked and confirm lists |
+| RAG (`rag_search`, `build_index`) | `rag.rs` | `embeddinggemma` on the CPU, per-file index cache, keyword fallback, pinned "current work" files |
+| `Conv`, workflow file | `conv.rs` | Conversations saved atomically; `workflows/<conv>.md` with task list, notes and log |
+| Built-in tools | `tools.rs`, `fstools.rs` | `list_dir`, `read_file`, `write_file`, `trash`, `run_command`, `fetch_url`, `search_memory`, `workflow_update`, `delegate`, `comfy_image`, plus new `edit_file`, `grep`, `glob` |
+| `redact`, `cap`, offline probe | `util.rs` | |
 
 ## What is left
 
-In rough order of value:
-
-1. **HTTP API for the GUI** (`/agent/new`, `send`, `events`, `confirm`, `workflow`, `health`, `convs`), the static
-   `/chat/` files and the proxy to the Tempo GUI server, ideally with a server-sent-events stream instead of
-   polling, then switch `Start-TempoOffline.ps1` to the binary.
-2. **Conversation persistence**: `conversations/<id>.json`, one workflow file per conversation, confirmations that
-   wait for the GUI (with the 15-minute timeout).
-3. **Retrieval** ("second brain"): chunking, `embeddinggemma` through `/api/embed`, the index file, and the hybrid
-   score (keywords, title and description lines, recency, definitional boost, "current work" files first).
-4. **Remaining built-ins**: `search_memory`, `delegate` (host probing, house-model protection, the sub-loop),
-   `run_command` (delete refusal, confirmation and protection rules), `trash`, `fetch_url` (with the offline probe),
-   `claude_code`, `comfy_image` (GPU lease, unloading Tempo's own models).
-5. Timing log (`logs/timing.jsonl`) and delta batching for the GUI.
-6. Windows checks in CI. The code builds for Windows (child processes start with `CREATE_NO_WINDOW`, paths compare
-   case-insensitively), but CI runs the Rust tests on Linux only.
-
-## Known limits
-
-- Engine URLs must be `http://`. No TLS and no proxy support, on purpose.
-- Write roots are checked lexically after resolving `.` and `..`; a symlink inside a root that points elsewhere is
-  not detected (same as the Python harness).
-- Stopping an MCP server closes its stdin, waits up to 300 ms, then kills that child process. Grandchildren (for
-  example `npx` starting `node`) can outlive it, as with the Python host.
+1. **HTTP API for the GUI.** The chat surface talks to `/agent/new`, `send`, `events`, `confirm`, `workflow`,
+   `health` and `convs`, and the Python server also serves `/chat/` and proxies the Tempo GUI. Port these to the
+   Rust binary, ideally with server-sent events instead of polling, then switch `Start-TempoOffline.ps1` to it.
+   Confirmations then come from the GUI instead of the terminal.
+2. **`claude_code`**, the Python tool that hands a task to Claude Code on the local engine, has no Rust
+   equivalent yet.
+3. **Measure on the real machine.** The prompt-reuse saving on the 27B model, and real MCP servers, have only been
+   tested against mocks.
+4. **Windows in CI.** The crate is written for Windows too, but CI runs the Rust tests on Linux only.
 
 ## Keeping private data out
 
-The repository is public. Never commit `agent-config.json`, conversations, workflows, logs, `rag-index.json`,
-memory files or tokens; `.gitignore` covers the defaults. The CI leak scan rejects token shapes and home-network
-addresses, and the redaction tests build their token-shaped strings at run time for that reason.
+The repository is public. Never commit config files with real paths or hosts, conversations, workflows, logs,
+`rag-index.json`, memory files or tokens; `.gitignore` covers the defaults. The CI leak scan rejects token shapes
+and home-network addresses, so tests build token-shaped strings at run time.

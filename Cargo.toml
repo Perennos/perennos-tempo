@@ -1,3 +1,0 @@
-[workspace]
-members = ["tempo-agent"]
-resolver = "2"

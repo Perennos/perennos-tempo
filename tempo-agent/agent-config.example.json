@@ -1,5 +1,5 @@
 {
-  "_about": "Copy to agent-config.json in TEMPO_AGENT_HOME (default: the tempo-agent folder for the Python harness, ~/.perennos-tempo-agent for the Rust binary). It is git-ignored: keep real paths, hosts and names there, never in the repository. Every key is optional; ~ expands to your home folder. The Python harness and the Rust tempo-agent read the same file and ignore keys they do not use.",
+  "_about": "Settings for the Python harness (tempo_agent.py). Copy to agent-config.json in TEMPO_AGENT_HOME (default: this folder). It is git-ignored: keep real paths, hosts and names there, never in the repository. Every key is optional; ~ expands to your home folder. The Rust tempo-local-agent has its own config file: see perennos-tempo-local-agent/config.example.json.",
   "ollama_url": "http://127.0.0.1:11434",
   "heavy_models": ["qwen3:14b", "qwen3:8b"],
   "fast_models": ["qwen3:4b"],
@@ -8,7 +8,6 @@
   "owner_note": "Sam runs a small design studio.",
   "write_roots": ["~/tempo-work"],
   "scratch_dir": "~/tempo-work/scratch",
-  "heavy_words": ["gpu-box"],
   "local_host": "local",
   "hosts": {
     "gpu-box": {"urls": ["http://gpu-box.local:11434"], "models": ["house-model"]}
@@ -22,7 +21,5 @@
   "gpu_lease_script": "",
   "comfy_output_dir": "",
   "claude_json": "~/.claude.json",
-  "mcp_project_dirs": ["~/projects/my-project"],
-  "confirm_tools": ["comfy-media:run_workflow"],
-  "max_steps": 40
+  "mcp_project_dirs": ["~/projects/my-project"]
 }

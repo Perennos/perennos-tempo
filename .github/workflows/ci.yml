@@ -33,11 +33,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: tempo-agent tests (mock Ollama and MCP servers, no GPU)
-        run: cargo test --locked
-      - name: Clippy, warnings are errors
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: perennos-tempo-local-agent tests (standalone crate)
+      - name: perennos-tempo-local-agent tests (mock Ollama and MCP servers, no GPU)
         run: cargo test --locked --manifest-path perennos-tempo-local-agent/Cargo.toml
-      - name: perennos-tempo-local-agent clippy
+      - name: Clippy, warnings are errors
         run: cargo clippy --locked --all-targets --manifest-path perennos-tempo-local-agent/Cargo.toml -- -D warnings

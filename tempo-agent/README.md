@@ -11,4 +11,4 @@ The harness that lets a local model (Ollama) work like a frontier coding agent: 
 Private data (memory files, the retrieval index, conversations, workflows) is never committed; it is built locally at run time.
 Machine settings (folders, hosts, memory files, owner) come from a local, git-ignored `agent-config.json`; see `agent-config.example.json`.
 
-The Rust port of the loop and the MCP host lives in this folder too (`Cargo.toml`, `src/`): see [RUST-PORT.md](RUST-PORT.md) for what is ported, how to build and test it, and what is left. `tempo agent` runs it.
+The Rust port is the crate `perennos-tempo-local-agent/` at the repository root; `tempo agent` runs it. [RUST-PORT.md](RUST-PORT.md) says what is ported, how to build and test it, and what is left.
