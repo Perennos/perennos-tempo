@@ -46,6 +46,7 @@ All keys are optional. See `config.example.json` for placeholders.
 | `exclusive_models` | Name fragments; before such a model loads, our other models are unloaded |
 | `retries`, `retry_delay_ms`, `chat_timeout_s` | Engine retry behaviour |
 | `max_steps`, `tool_cap`, `hist_chars`, `rag_k`, `rag_chars` | Loop and prompt limits |
+| `prefix_stable` (default `true`) | Keep the system message and the offered tools fixed within a conversation, put per-turn context (date, workflow tail, memory) in that turn's user message, and trim history with headroom. Every request then starts with the previous one, so Ollama reuses its cached prompt and only processes new tokens. `false` restores the original layout. |
 | `embed_model`, `rag_files`, `rag_globs`, `pinned_current_files` | RAG sources; `rag_globs` entries are `{"pattern", "newest"}`; pinned files lead the results for "what am I working on" style questions |
 | `core_file`, `owner_context` | Text pinned into every system prompt |
 | `write_roots`, `trash_dir`, `protect_regex`, `command_cwd`, `command_timeout_s` | Safety and shell settings |

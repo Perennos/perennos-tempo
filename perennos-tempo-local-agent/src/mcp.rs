@@ -360,6 +360,14 @@ impl McpHost {
             .collect()
     }
 
+    /// Look up a catalog tool by its exposed `server__tool` name.
+    pub fn find(&mut self, exposed_name: &str) -> Option<Offered> {
+        self.load_catalog()
+            .into_iter()
+            .find(|(s, t)| exposed(s, t["name"].as_str().unwrap_or("")) == exposed_name)
+            .map(|(server, tool)| Offered { server, tool })
+    }
+
     /// Up to min(room, 8) tools ranked by keyword fit to the prompt.
     pub fn select(&mut self, prompt: &str, n_builtin: usize, tool_cap: usize) -> Vec<Offered> {
         let room = tool_cap.saturating_sub(n_builtin);

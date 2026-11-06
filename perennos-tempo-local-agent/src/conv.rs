@@ -85,6 +85,8 @@ pub struct Conv {
     pub events: Vec<Value>,
     /// repeat-call guard: key -> (result, times)
     pub seen_calls: HashMap<String, (String, u32)>,
+    /// MCP tools offered so far in this conversation (prefix-stable mode keeps them).
+    pub mcp_offered: Vec<String>,
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -124,12 +126,21 @@ impl Conv {
             messages: vec![],
             events: vec![],
             seen_calls: HashMap::new(),
+            mcp_offered: vec![],
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)
                 .map_err(|e| format!("conversation file {} is corrupt: {e}", c.path.display()))?;
             c.messages = d["messages"].as_array().cloned().unwrap_or_default();
             c.events = d["events"].as_array().cloned().unwrap_or_default();
+            c.mcp_offered = d["mcp_offered"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
         }
         if !c.wf.exists() {
             std::fs::create_dir_all(c.wf.parent().unwrap_or(&cfg.data_dir))
@@ -147,7 +158,7 @@ impl Conv {
         }
         if std::fs::write(
             &tmp,
-            json!({"messages": self.messages, "events": self.events}).to_string(),
+            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered}).to_string(),
         )
         .is_ok()
         {

@@ -51,7 +51,26 @@ pub fn pick_lane(cfg: &Config, text: &str) -> Lane {
 }
 
 /// Drop oldest messages until the history fits the char budget; never start the history with a tool message.
+/// Prefix-stable tool choice: names offered before stay (while they exist), new matches fill free
+/// slots up to `cap`, and the result is sorted so the tool block renders identically every turn.
+pub fn sticky_tools(previous: &[String], ranked: &[String], cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in previous.iter().chain(ranked.iter()) {
+        if out.len() < cap && !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
 pub fn trim(messages: Vec<Value>, budget: usize) -> Vec<Value> {
+    trim_to(messages, budget, budget)
+}
+
+/// Trim only when the history exceeds `budget`, and then down to `target` (<= budget), so that in
+/// prefix-stable mode a trim (which invalidates the engine's cached prefix) happens rarely.
+pub fn trim_to(messages: Vec<Value>, budget: usize, target: usize) -> Vec<Value> {
     if messages.is_empty() {
         return messages;
     }
@@ -63,7 +82,12 @@ pub fn trim(messages: Vec<Value>, budget: usize) -> Vec<Value> {
             .map(|m| m.to_string().chars().count())
             .sum::<usize>()
     };
-    while size(&rest) > budget && rest.len() > 2 {
+    if size(&rest) <= budget {
+        let mut out = vec![sysm];
+        out.extend(rest);
+        return out;
+    }
+    while size(&rest) > target && rest.len() > 2 {
         rest.remove(0);
         while rest.first().is_some_and(|m| m["role"] == "tool") {
             rest.remove(0);
@@ -75,6 +99,8 @@ pub fn trim(messages: Vec<Value>, budget: usize) -> Vec<Value> {
 }
 
 const SYSTEM: &str = "You are Perennos Tempo, a local superagent: the harness around a local model. You run on the user's own machine with no cloud and may have no internet and no other machines.\n{owner}Today is {today}.\nRules:\n- Answer from the MEMORY excerpts below when they cover the question, and cite each source as [filename]. If they do not cover it, say so; never invent facts.\n- Use tools to do things (list folders, run commands, make images, ask other machines with delegate). Check results before claiming success. Report failures plainly.\n- Never delete anything; the only removal is the trash tool (it moves into a trash folder and needs approval). Never touch secrets.\n- To change part of a file use edit_file (exact text), not write_file; use grep/glob to find things.\n- Keep a task list for multi-step jobs with workflow_update. The saved workflow is below; continue from it.\n- Be brief and direct: under 120 words unless asked for detail; do not dump whole lists. No disclaimers.\nWORKFLOW FILE (persistent):\n{wf}\n";
+
+const SYSTEM_STABLE: &str = "You are Perennos Tempo, a local superagent: the harness around a local model. You run on the user's own machine with no cloud and may have no internet and no other machines.\n{owner}Rules:\n- Each user message may end with a [context] block: the latest WORKFLOW FILE and MEMORY excerpts for that message. Answer from those excerpts when they cover the question, and cite each source as [filename]. If they do not cover it, say so; never invent facts.\n- Use tools to do things (list folders, run commands, make images, ask other machines with delegate). Check results before claiming success. Report failures plainly.\n- Never delete anything; the only removal is the trash tool (it moves into a trash folder and needs approval). Never touch secrets.\n- To change part of a file use edit_file (exact text), not write_file; use grep/glob to find things.\n- Keep a task list for multi-step jobs with workflow_update, and continue from the saved workflow.\n- Be brief and direct: under 120 words unless asked for detail; do not dump whole lists. No disclaimers.\n";
 
 const FAST_NOTE: &str = "\nFAST LANE: no tools this turn. If the request needs a tool, a file, a command, another machine or a long careful analysis, reply with exactly NEEDS_TOOLS and nothing else.";
 
@@ -143,6 +169,16 @@ impl Agent {
         } else {
             format!("{}\n", cfg.owner_context)
         };
+        if cfg.prefix_stable {
+            // Fixed for the whole conversation (the core file changes rarely), so the engine's
+            // cached prefix covers the system message, the tools and all earlier turns.
+            let mut c = SYSTEM_STABLE.replace("{owner}", &owner);
+            let core = self.core_text();
+            if !core.is_empty() {
+                c.push_str(&format!("\nCORE (pinned, always true):\n{core}\n"));
+            }
+            return json!({"role": "system", "content": c});
+        }
         let mut c = SYSTEM
             .replace("{owner}", &owner)
             .replace("{today}", &util::today_long())
@@ -158,11 +194,45 @@ impl Agent {
         json!({"role": "system", "content": c})
     }
 
-    fn tools_for(&self, text: &str) -> (Vec<Value>, HashMap<String, (String, String)>, usize) {
+    /// The user message for this turn. In prefix-stable mode the per-turn context (date, workflow
+    /// tail, memory excerpts, fast-lane note) rides here instead of in the system message.
+    fn user_message(&self, conv: &Conv, text: &str, mem: &str, fast: bool) -> Value {
+        if !self.cfg().prefix_stable {
+            return json!({"role": "user", "content": text});
+        }
+        let mut c = format!(
+            "{text}\n\n[context]\nToday is {}.\nWORKFLOW FILE (latest):\n{}\nMEMORY EXCERPTS:\n{mem}",
+            util::today_long(),
+            tail_chars(&conv.wf_text(), 1500)
+        );
+        if fast {
+            c.push_str(FAST_NOTE);
+        }
+        json!({"role": "user", "content": c})
+    }
+
+    fn tools_for(
+        &self,
+        text: &str,
+        conv: &mut Conv,
+    ) -> (Vec<Value>, HashMap<String, (String, String)>, usize) {
         let builtins = builtin_schemas();
         let cfg = self.cfg();
         let mut host = self.env.mcp.borrow_mut();
-        let sel: Vec<Offered> = host.select(text, builtins.len(), cfg.tool_cap);
+        let mut sel: Vec<Offered> = host.select(text, builtins.len(), cfg.tool_cap);
+        if cfg.prefix_stable {
+            // Sticky and sorted: tools offered earlier in this conversation stay offered (the tool
+            // block sits before the history in the prompt, so any change would void the cache);
+            // new matches only fill free slots.
+            let cap = cfg.tool_cap.saturating_sub(builtins.len()).min(8);
+            let ranked = sel.iter().map(Offered::exposed_name).collect::<Vec<_>>();
+            conv.mcp_offered = sticky_tools(&conv.mcp_offered, &ranked, cap);
+            sel = conv
+                .mcp_offered
+                .iter()
+                .filter_map(|n| host.find(n))
+                .collect();
+        }
         let mut tools = builtins;
         for o in &sel {
             tools.push(json!({"type": "function", "function": {
@@ -313,15 +383,19 @@ impl Agent {
         let mut lane = pick_lane(self.cfg(), text);
         let sysmsg = self.system_message(conv, &mem, lane == Lane::Fast);
         if conv.messages.first().is_some_and(|m| m["role"] == "system") {
-            conv.messages[0] = sysmsg;
+            if conv.messages[0] != sysmsg {
+                conv.messages[0] = sysmsg;
+            }
         } else {
             conv.messages.insert(0, sysmsg);
         }
-        conv.messages.push(json!({"role": "user", "content": text}));
+        let user_at = conv.messages.len();
+        conv.messages
+            .push(self.user_message(conv, text, &mem, lane == Lane::Fast));
 
         let (mut tools, mut route, mut n_mcp) = (vec![], HashMap::new(), 0);
         if lane == Lane::Heavy {
-            (tools, route, n_mcp) = self.tools_for(text);
+            (tools, route, n_mcp) = self.tools_for(text, conv);
         }
         let mut models: Vec<String> = if lane == Lane::Heavy || self.cfg().fast_models.is_empty() {
             self.cfg().models.clone()
@@ -342,7 +416,11 @@ impl Agent {
         let hist = self.cfg().hist_chars;
 
         for _step in 0..max_steps {
-            conv.messages = trim(std::mem::take(&mut conv.messages), hist);
+            conv.messages = if self.cfg().prefix_stable {
+                trim_to(std::mem::take(&mut conv.messages), hist, hist * 6 / 10)
+            } else {
+                trim(std::mem::take(&mut conv.messages), hist)
+            };
             let mut hold = Hold {
                 active: lane == Lane::Fast && tools.is_empty(),
                 acc: String::new(),
@@ -362,9 +440,18 @@ impl Agent {
                 let m = "fast lane handed this turn to the heavy lane";
                 conv.emit("status", m);
                 sink.status(m);
-                (tools, route, _) = self.tools_for(text);
+                (tools, route, _) = self.tools_for(text, conv);
                 let sysmsg = self.system_message(conv, &mem, false);
                 conv.messages[0] = sysmsg;
+                // drop the fast-lane note from this turn's own user message (only this turn changes)
+                let fresh = self.user_message(conv, text, &mem, false);
+                if let Some(m) = conv
+                    .messages
+                    .get_mut(user_at)
+                    .filter(|m| m["role"] == "user")
+                {
+                    *m = fresh;
+                }
                 models = self.cfg().models.clone();
                 idx = 0;
                 continue;
@@ -730,7 +817,7 @@ mod tests {
             text_resp("NEEDS_TOOLS"),
             text_resp("heavy says hi"),
         ]));
-        let (mut a, mut conv) = agent(&m, |_| {});
+        let (mut a, mut conv) = agent(&m, |c| c.prefix_stable = false);
         let mut sink = VecSink::default();
         let r = a.turn(&mut conv, "hello there", &mut sink).unwrap();
         assert_eq!(r, "heavy says hi");
@@ -778,6 +865,7 @@ mod tests {
         let (mut a, mut conv) = agent(&m, |c| {
             c.core_file = Some(cp);
             c.owner_context = "Owner context line.".into();
+            c.prefix_stable = false;
         });
         conv.wf_update(Some(&json!([{"text": "pending thing"}])), None);
         a.turn(&mut conv, "please read it", &mut VecSink::default())
@@ -838,13 +926,133 @@ mod tests {
     }
 
     #[test]
+    fn prefix_stable_requests_only_ever_append() {
+        let d = tmpdir("stable");
+        let f = d.join("facts.md");
+        std::fs::write(&f, "The launch date is the fourth of May.").unwrap();
+        let fp = f.to_string_lossy().into_owned();
+        let m = Mock::start(chat_script(vec![
+            (
+                200,
+                ndjson(&[
+                    json!({"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "workflow_update", "arguments": {"note": "noted"}}}]}, "done": true}),
+                ]),
+            ),
+            text_resp("done one"),
+            text_resp("done two"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| c.rag_files = vec![fp]);
+        assert!(a.cfg().prefix_stable, "on by default");
+        a.turn(
+            &mut conv,
+            "read: when is the launch date",
+            &mut VecSink::default(),
+        )
+        .unwrap();
+        a.turn(
+            &mut conv,
+            "read: and the venue please",
+            &mut VecSink::default(),
+        )
+        .unwrap();
+        let bodies = m.bodies("/api/chat");
+        assert_eq!(bodies.len(), 3);
+        // the system message never changes, and memory rides in the user message
+        let sys = |b: &Value| b["messages"][0].clone();
+        assert_eq!(sys(&bodies[0]), sys(&bodies[2]));
+        assert!(!sys(&bodies[0])["content"]
+            .as_str()
+            .unwrap()
+            .contains("fourth of May"));
+        assert!(bodies[0]["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[facts.md] The launch date is the fourth of May."));
+        // every request's messages start with the previous request's messages: the engine can
+        // reuse its cached prefix and only processes the new tokens, across steps AND turns
+        for pair in bodies.windows(2) {
+            let (prev, next) = (
+                pair[0]["messages"].as_array().unwrap(),
+                pair[1]["messages"].as_array().unwrap(),
+            );
+            assert!(next.len() > prev.len());
+            assert_eq!(
+                &next[..prev.len()],
+                &prev[..],
+                "a request rewrote earlier messages"
+            );
+            assert_eq!(pair[0]["tools"], pair[1]["tools"], "the tool block changed");
+        }
+    }
+
+    #[test]
+    fn sticky_tools_keep_earlier_offers_sorted_and_capped() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            sticky_tools(&[], &s(&["b__x", "a__y"]), 8),
+            s(&["a__y", "b__x"])
+        );
+        assert_eq!(
+            sticky_tools(&s(&["a__y", "b__x"]), &s(&["c__z"]), 8),
+            s(&["a__y", "b__x", "c__z"])
+        );
+        assert_eq!(
+            sticky_tools(&s(&["a__y", "b__x"]), &s(&["c__z", "a__y"]), 2),
+            s(&["a__y", "b__x"]),
+            "earlier offers win"
+        );
+        assert_eq!(
+            sticky_tools(&s(&["a__y"]), &[], 8),
+            s(&["a__y"]),
+            "an unrelated prompt keeps the block"
+        );
+    }
+
+    #[test]
+    fn trimming_with_headroom_happens_rarely() {
+        let msg =
+            |i: usize| json!({"role": "user", "content": format!("{i:04} {}", "x".repeat(90))});
+        let mut history = vec![json!({"role": "system", "content": "s"})];
+        let mut trims = 0;
+        for i in 0..200 {
+            history.push(msg(i));
+            let before = history.len();
+            history = trim_to(history, 2000, 1200);
+            if history.len() < before {
+                trims += 1;
+            }
+        }
+        assert!(trims <= 25, "{trims} trims in 200 appends");
+        let plain = (0..200)
+            .fold(
+                (vec![json!({"role": "system", "content": "s"})], 0),
+                |(h, n), i| {
+                    let mut h = h;
+                    h.push(msg(i));
+                    let before = h.len();
+                    let h = trim(h, 2000);
+                    let n = n + usize::from(h.len() < before);
+                    (h, n)
+                },
+            )
+            .1;
+        assert!(
+            plain > 150,
+            "without headroom almost every append trims ({plain})"
+        );
+    }
+
+    #[test]
     fn rag_memory_goes_into_system_prompt() {
         let d = tmpdir("ragturn");
         let f = d.join("facts.md");
         std::fs::write(&f, "The launch date is the fourth of May.").unwrap();
         let fp = f.to_string_lossy().into_owned();
         let m = Mock::start(chat_script(vec![text_resp("May 4 [facts.md]")]));
-        let (mut a, mut conv) = agent(&m, |c| c.rag_files = vec![fp]);
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.rag_files = vec![fp];
+            c.prefix_stable = false;
+        });
         a.turn(
             &mut conv,
             "read: when is the launch date",

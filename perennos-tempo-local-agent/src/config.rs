@@ -25,6 +25,10 @@ pub struct Config {
     pub rag_k: usize,
     pub rag_chars: usize,
     pub hist_chars: usize,
+    /// Keep the system message and offered tools fixed within a conversation, put per-turn
+    /// context in the user message and trim with headroom, so the engine reuses the cached
+    /// prompt prefix every turn (only new tokens are processed). Default on.
+    pub prefix_stable: bool,
     pub max_steps: usize,
     pub tool_cap: usize,
     pub retries: usize,
@@ -114,6 +118,7 @@ impl Config {
             rag_k: 4,
             rag_chars: 700,
             hist_chars: 11000,
+            prefix_stable: true,
             max_steps: 40,
             tool_cap: 40,
             retries: 3,
@@ -202,6 +207,9 @@ impl Config {
             if let Some(n) = num(v, k) {
                 *slot = n as usize;
             }
+        }
+        if let Some(b) = v.get("prefix_stable").and_then(Value::as_bool) {
+            c.prefix_stable = b;
         }
         if let Some(n) = num(v, "retry_delay_ms") {
             c.retry_delay_ms = n as u64;
