@@ -243,6 +243,83 @@ def rag_search(q, k=6):
     return out
 
 
+# ---------------------------------------------------------------- second brain views (read-only, indexed files only)
+GRAPH_STOP = set("""that this with from have will your what when they there their which about would should could into also been
+were than then them only some more most other such each here just like make made does done over very after before because where
+while these those name description type true false none null http https file files using used need needs want first last next
+still even much many well back down same both every until within without across between""".split())
+_graph = {"key": None, "val": None}
+
+
+def mem_docs():
+    if _rag["docs"] is None:
+        try:
+            _rag["docs"] = json.load(open(INDEX, encoding="utf-8"))["files"]
+        except Exception:
+            return []
+    return _rag["docs"]
+
+
+def mem_kind(src):
+    if src == S16_PACK:
+        return "pack"
+    if src in RAG_FILES:
+        return "core"
+    if any(src == p for p, _ in CURRENT_FILES):
+        return "current"
+    return "memory"
+
+
+def memory_files():
+    return [{"src": d["src"], "name": os.path.basename(d["src"]), "kind": mem_kind(d["src"]),
+             "chunks": len(d.get("chunks") or []), "mtime": d.get("mtime", 0)} for d in mem_docs()]
+
+
+def memory_file(src):
+    """Excerpts of one indexed file (never an arbitrary path), redacted and capped."""
+    for d in mem_docs():
+        if d["src"] == src:
+            cs = d.get("chunks") or []
+            return {"src": src, "name": os.path.basename(src), "kind": mem_kind(src), "total": len(cs), "chunks": [cap(c, 1200) for c in cs[:6]]}
+    return None
+
+
+def memory_graph(max_nodes=400, terms=12, per_node=4):
+    """Files as nodes; an edge joins two files that share at least two of their most distinctive terms (tf-idf)."""
+    docs = mem_docs()[:max_nodes]
+    key = tuple((d["src"], d.get("mtime")) for d in docs)
+    if _graph["key"] == key:
+        return _graph["val"]
+    tfs, df = [], {}
+    for d in docs:
+        cnt = {}
+        for c in d.get("chunks") or []:
+            for w in re.findall(r"[a-z][a-z0-9]{3,}", c.lower()):
+                if w not in GRAPH_STOP:
+                    cnt[w] = cnt.get(w, 0) + 1
+        tfs.append(cnt)
+        for w in cnt:
+            df[w] = df.get(w, 0) + 1
+    n = len(docs)
+    tops = [set(sorted(cnt, key=lambda w: (-cnt[w] * math.log((1 + n) / (1 + df[w])), w))[:terms]) for cnt in tfs]
+    cand = [[] for _ in docs]
+    for i in range(n):
+        for j in range(i + 1, n):
+            s = len(tops[i] & tops[j])
+            if s >= 2:
+                cand[i].append((s, j))
+                cand[j].append((s, i))
+    edges = {}
+    for i, lst in enumerate(cand):
+        for s, j in sorted(lst, key=lambda x: (-x[0], x[1]))[:per_node]:
+            edges[(min(i, j), max(i, j))] = s
+    val = {"nodes": [{"id": i, "src": d["src"], "name": os.path.basename(d["src"]), "kind": mem_kind(d["src"]),
+                      "chunks": len(d.get("chunks") or [])} for i, d in enumerate(docs)],
+           "edges": [{"a": a, "b": b, "w": w} for (a, b), w in sorted(edges.items())]}
+    _graph.update(key=key, val=val)
+    return val
+
+
 # ---------------------------------------------------------------- safety helpers
 def in_roots(path):
     p = os.path.abspath(path).lower()
@@ -284,7 +361,7 @@ class Conv:
         self.id = cid or time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         self.path = os.path.join(CONVS, self.id + ".json")
         self.wf = os.path.join(WFS, self.id + ".md")
-        self.messages, self.events, self.busy = [], [], False
+        self.messages, self.events, self.busy, self.last_mem = [], [], False, []
         self.confirms, self.lock = {}, threading.Lock()
         if os.path.exists(self.path):
             d = json.load(open(self.path, encoding="utf-8"))
@@ -768,6 +845,7 @@ def agent_turn(conv, text):
     try:
         conv.emit("user", text=text)
         hits = rag_search(text, RAG_K)
+        conv.last_mem = sorted({h["src"] for h in hits})
         mem = "\n\n".join(f"[{os.path.basename(h['src'])}] {h['text'][:RAG_CHARS]}" for h in hits)
         conv.emit("status", text="memory: " + ", ".join(sorted({os.path.basename(h['src']) for h in hits})))
         sysmsg = {"role": "system", "content": SYSTEM.format(owner=OWNER, owner_note=OWNER_NOTE + "\n" if OWNER_NOTE else "", today=time.strftime("%d %b %Y"), wf=conv.wf_text()[-2500:]) + "\nMEMORY EXCERPTS:\n" + mem}
@@ -944,6 +1022,14 @@ class H(BaseHTTPRequestHandler):
             self.send_json({"events": c.events[since:], "busy": c.busy})
         elif u.path == "/agent/workflow":
             self.send_json({"text": get_conv(q["conv"]).wf_text()})
+        elif u.path == "/agent/memory":
+            c = CONVOS.get(q.get("conv", ""))  # never create a conversation just to read
+            self.send_json({"files": memory_files(), "used": c.last_mem if c else [], "embed": _rag["embed_ok"]})
+        elif u.path == "/agent/memory/graph":
+            self.send_json(memory_graph())
+        elif u.path == "/agent/memory/file":
+            r = memory_file(q.get("src", ""))
+            self.send_json(r if r else {"error": "not an indexed memory file"}, 200 if r else 404)
         elif u.path == "/agent/health":
             hosts = {n: (probe_host(n)[1] or "up") for n in HOSTS}
             self.send_json({"net": net_up(), "models": MODELS, "hosts": hosts, "rag": _rag["embed_ok"]})
