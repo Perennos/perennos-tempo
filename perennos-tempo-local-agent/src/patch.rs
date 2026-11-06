@@ -245,38 +245,74 @@ pub fn apply_hunks(text: &str, hunks: &[Hunk], name: &str) -> Result<String, Str
 }
 
 /// What the patch does to each file, relative to `dir`, without writing anything.
-pub fn plan(src: &str, dir: &Path) -> Result<Vec<Change>, String> {
-    let at = |p: &str| -> PathBuf {
-        let p = Path::new(p);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            dir.join(p)
-        }
+/// The most files one patch may change.
+pub const MAX_FILES: usize = 200;
+
+/// What a patch path means: absolute, or from `dir`; never with a `..` part (a link and `..`
+/// mean one place to a check and another to the system); resolved through any links, so the
+/// path that is checked is the path that is written.
+fn place(p: &str, dir: &Path) -> Result<PathBuf, String> {
+    let raw = Path::new(p.trim());
+    if p.trim().is_empty() {
+        return Err("a patch names an empty path".into());
+    }
+    if raw
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("{p}: a path in a patch may not contain `..`"));
+    }
+    Ok(crate::util::resolve(&if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        dir.join(raw)
+    }))
+}
+
+/// What a file holds now: None when nothing is there. Anything that is there but is not a plain
+/// UTF-8 text file is an error, so a patch never writes over a picture, a folder or a link (and
+/// never loses what was there).
+fn current(p: &Path, name: &str) -> Result<Option<String>, String> {
+    let Ok(m) = std::fs::symlink_metadata(p) else {
+        return Ok(None);
     };
-    let read = |p: &Path| std::fs::read_to_string(p).ok();
-    let mut out: Vec<Change> = vec![];
+    if !m.is_file() {
+        return Err(format!("{name}: what is there is not a plain file (a folder or a link); apply_patch changes plain text files only"));
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("{name}: cannot read it ({e})"))?;
+    String::from_utf8(bytes).map(Some).map_err(|_| {
+        format!("{name} is not a text file; apply_patch changes text files only, so nothing was changed")
+    })
+}
+
+pub fn plan(src: &str, dir: &Path) -> Result<Vec<Change>, String> {
     let ops = parse(src)?;
+    if ops.len() > MAX_FILES {
+        return Err(format!(
+            "a patch changes at most {MAX_FILES} files; split it"
+        ));
+    }
+    let at = |p: &str| place(p, dir);
+    let mut out: Vec<Change> = vec![];
     // each file once: two changes to one file would each start from what is on disk now
-    let mut named: Vec<PathBuf> = vec![];
+    let mut named: std::collections::HashSet<PathBuf> = Default::default();
     for op in &ops {
         let (p, m) = match op {
             Op::Add { path, .. } | Op::Delete { path } => (path, None),
             Op::Update { path, move_to, .. } => (path, move_to.as_ref()),
         };
         for q in [Some(p), m].into_iter().flatten() {
-            let q = crate::util::resolve(&at(q));
-            if named.contains(&q) {
+            let q = at(q)?;
+            if !named.insert(q.clone()) {
                 return Err(format!("the patch names {} more than once; put all its changes under one *** Update File", q.display()));
             }
-            named.push(q);
         }
     }
     for op in ops {
         match op {
             Op::Add { path, lines } => {
-                let p = at(&path);
-                let before = read(&p);
+                let p = at(&path)?;
+                let before = current(&p, &path)?;
                 let mut text = lines.join("\n");
                 text.push('\n');
                 out.push(Change {
@@ -288,9 +324,9 @@ pub fn plan(src: &str, dir: &Path) -> Result<Vec<Change>, String> {
                 });
             }
             Op::Delete { path } => {
-                let p = at(&path);
-                let before =
-                    read(&p).ok_or_else(|| format!("Delete File {path}: there is no such file"))?;
+                let p = at(&path)?;
+                let before = current(&p, &path)?
+                    .ok_or_else(|| format!("Delete File {path}: there is no such file"))?;
                 out.push(Change {
                     path: p,
                     before: Some(before),
@@ -304,16 +340,16 @@ pub fn plan(src: &str, dir: &Path) -> Result<Vec<Change>, String> {
                 move_to,
                 hunks,
             } => {
-                let p = at(&path);
-                let before = read(&p).ok_or_else(|| {
+                let p = at(&path)?;
+                let before = current(&p, &path)?.ok_or_else(|| {
                     format!("Update File {path}: there is no such file (use *** Add File)")
                 })?;
                 let after = apply_hunks(&before, &hunks, &path)?;
                 match move_to {
                     Some(m) => {
-                        let to = at(&m);
+                        let to = at(&m)?;
                         out.push(Change {
-                            before: read(&to),
+                            before: current(&to, &m)?,
                             path: to,
                             after: Some(after),
                             moved_from: Some(p),

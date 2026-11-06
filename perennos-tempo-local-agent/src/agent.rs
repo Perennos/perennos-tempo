@@ -1041,6 +1041,9 @@ impl Agent {
         conv.emit("status", &m);
         sink.status(&m);
         let mut idx = 0usize;
+        // a guest room has no tools: a model that keeps calling them gets one refusal, then the
+        // turn ends politely instead of holding the owner's model for every step
+        let mut guest_refused = false;
         let max_steps = self.cfg().max_steps;
         let hist = self.cfg().hist_chars;
 
@@ -1113,6 +1116,15 @@ impl Agent {
                     calls = found;
                 }
             }
+            if conv.guest && !calls.is_empty() && guest_refused {
+                let out = "Sorry, in a room I can only answer in words, and that one needed tools. Could you ask it another way?".to_string();
+                sink.text(&out);
+                conv.messages
+                    .push(json!({"role": "assistant", "content": out}));
+                conv.emit("assistant", &out);
+                return Ok(out);
+            }
+            guest_refused |= conv.guest && !calls.is_empty();
             conv.messages.push(msg.clone());
             if calls.is_empty() {
                 conv.emit("assistant", &content);
@@ -2037,6 +2049,23 @@ mod tests {
             .contains("the owner ran `echo hello-bang`")));
         assert!(say(&mut a, &mut conv, "!git push").contains("command_deny"));
         assert!(m.bodies("/api/chat").is_empty());
+    }
+
+    #[test]
+    fn a_guest_turn_that_keeps_calling_tools_ends_politely() {
+        let calls: Vec<(u16, String)> = (0..10)
+            .map(|_| call_resp("run_command", json!({"command": "ls"})))
+            .collect();
+        let m = Mock::start(chat_script(calls));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        conv.guest = true;
+        let r = say(&mut a, &mut conv, "list the files please");
+        assert!(r.contains("only answer in words"), "{r}");
+        assert_eq!(
+            m.bodies("/api/chat").len(),
+            2,
+            "one refusal, then the turn ends"
+        );
     }
 
     #[test]

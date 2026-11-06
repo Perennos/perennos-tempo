@@ -4,17 +4,38 @@
 //! and `/diff` shows what that turn did. Like Claude Code's rewind and Codex's undo.
 use crate::util;
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct Checkpoints {
     root: PathBuf,
 }
 
-/// One file a turn changed: where it is and what it held before (None: it did not exist).
+/// One file a turn changed: where it is, and the copy of what it held before (None: it did not
+/// exist). The copy is byte for byte, so `/undo` restores any file exactly, text or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub path: PathBuf,
-    pub before: Option<String>,
+    pub kept: Option<PathBuf>,
+}
+
+impl Entry {
+    /// What the file held before the turn, exactly.
+    pub fn before(&self) -> Option<Vec<u8>> {
+        self.kept.as_ref().and_then(|k| std::fs::read(k).ok())
+    }
+
+    /// The same, as text for diffs and counts (bytes that are not UTF-8 are shown replaced).
+    pub fn before_text(&self) -> Option<String> {
+        self.before()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+}
+
+fn text_of(p: &Path) -> Option<String> {
+    std::fs::read(p)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 impl Checkpoints {
@@ -29,32 +50,34 @@ impl Checkpoints {
     }
 
     /// Keep what `path` holds now, before the turn changes it (only the first time in a turn).
+    /// Only the list of kept files is read here, never their contents, and the copy is streamed.
     pub fn keep(&self, conv: &str, turn: u64, path: &Path) -> Result<(), String> {
         let d = self.dir(conv, turn);
         let path = util::resolve(path);
-        if self.entries_in(&d).iter().any(|e| e.path == path) {
+        let listed = self.entries_in(&d);
+        if listed.iter().any(|e| e.path == path) {
             return Ok(());
         }
         std::fs::create_dir_all(&d).map_err(|e| format!("cannot keep a checkpoint: {e}"))?;
-        let n = self.entries_in(&d).len();
-        let before = match std::fs::read(&path) {
-            Ok(b) => {
-                let f = d.join(format!("{n}.before"));
-                std::fs::write(&f, b).map_err(|e| format!("cannot keep a checkpoint: {e}"))?;
-                Some(
-                    f.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                )
-            }
-            Err(_) => None,
+        let before = if path.is_file() {
+            let f = d.join(format!("{}.before", listed.len()));
+            std::fs::copy(&path, &f).map_err(|e| format!("cannot keep a checkpoint: {e}"))?;
+            Some(
+                f.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        } else {
+            None
         };
         let row = json!({"path": path.to_string_lossy(), "before": before});
-        let mut text = std::fs::read_to_string(d.join("manifest.jsonl")).unwrap_or_default();
-        text.push_str(&format!("{row}\n"));
-        std::fs::write(d.join("manifest.jsonl"), text)
-            .map_err(|e| format!("cannot keep a checkpoint: {e}"))
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(d.join("manifest.jsonl"))
+            .map_err(|e| format!("cannot keep a checkpoint: {e}"))?;
+        writeln!(f, "{row}").map_err(|e| format!("cannot keep a checkpoint: {e}"))
     }
 
     fn entries_in(&self, d: &Path) -> Vec<Entry> {
@@ -63,10 +86,7 @@ impl Checkpoints {
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .map(|v| Entry {
                 path: PathBuf::from(v["path"].as_str().unwrap_or("")),
-                before: v["before"]
-                    .as_str()
-                    .and_then(|f| std::fs::read(d.join(f)).ok())
-                    .map(|b| String::from_utf8_lossy(&b).into_owned()),
+                kept: v["before"].as_str().map(|f| d.join(f)),
             })
             .collect()
     }
@@ -83,8 +103,8 @@ impl Checkpoints {
             .find(|t| self.dir(conv, *t).join("manifest.jsonl").is_file())
     }
 
-    /// Put the files of the latest changed turn back as they were. What they hold now goes to
-    /// `trash` first; a file the turn created goes to the trash. Returns what was done.
+    /// Put the files of the latest changed turn back as they were, byte for byte. What they hold
+    /// now goes to `trash` first; a file the turn created goes to the trash. Returns what was done.
     pub fn undo(&self, conv: &str, turn: u64, trash: &Path) -> Result<(u64, Vec<String>), String> {
         let t = self
             .last_changed(conv, turn)
@@ -110,12 +130,12 @@ impl Checkpoints {
                     .or_else(|_| std::fs::copy(&e.path, &dest).map(|_| ()))
                     .map_err(|x| format!("cannot move {} to the trash: {x}", e.path.display()))?;
             }
-            match &e.before {
-                Some(text) => {
+            match &e.kept {
+                Some(k) => {
                     if let Some(p) = e.path.parent() {
                         let _ = std::fs::create_dir_all(p);
                     }
-                    std::fs::write(&e.path, text)
+                    std::fs::copy(k, &e.path)
                         .map_err(|x| format!("cannot restore {}: {x}", e.path.display()))?;
                     done.push(format!("restored {}", e.path.display()));
                 }
@@ -133,14 +153,15 @@ impl Checkpoints {
         self.entries(conv, turn)
             .into_iter()
             .map(|e| {
-                let now = std::fs::read_to_string(&e.path).ok();
-                let (a, r) = crate::patch::counts(e.before.as_deref(), now.as_deref());
+                let now = text_of(&e.path);
+                let before = e.before_text();
+                let (a, r) = crate::patch::counts(before.as_deref(), now.as_deref());
                 let name = e
                     .path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                match (e.before.is_some(), now.is_some()) {
+                match (before.is_some(), now.is_some()) {
                     (false, true) => format!("{name} (new) +{a}"),
                     (true, false) => format!("{name} (to the trash)"),
                     _ => format!("{name} +{a} -{r}"),
@@ -156,11 +177,10 @@ impl Checkpoints {
             self.entries(conv, t)
                 .into_iter()
                 .map(|e| {
-                    let now = std::fs::read_to_string(&e.path).ok();
                     crate::patch::diff(
                         &e.path.display().to_string(),
-                        e.before.as_deref(),
-                        now.as_deref(),
+                        e.before_text().as_deref(),
+                        text_of(&e.path).as_deref(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -213,5 +233,13 @@ mod tests {
             .undo("c1", 3, &trash)
             .unwrap_err()
             .contains("nothing to undo"));
+        // a file that is not text comes back exactly
+        let pic = work.join("pic.bin");
+        let bytes = [0xffu8, 0xfe, 0x00, 0x80, 0x81, b'\n'];
+        std::fs::write(&pic, bytes).unwrap();
+        c.keep("c1", 4, &pic).unwrap();
+        std::fs::write(&pic, "overwritten").unwrap();
+        c.undo("c1", 4, &trash).unwrap();
+        assert_eq!(std::fs::read(&pic).unwrap(), bytes);
     }
 }

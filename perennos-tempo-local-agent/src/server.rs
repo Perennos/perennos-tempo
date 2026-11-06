@@ -99,6 +99,8 @@ struct Shared {
     conns: AtomicUsize,
     streams: AtomicUsize,
     graph: Mutex<GraphCache>,
+    /// The engines' last probe for health, reused for 15 s (probing takes seconds per host).
+    hosts_seen: Mutex<Option<(Instant, Value)>>,
 }
 
 struct Job {
@@ -380,6 +382,7 @@ pub fn start(
         conns: AtomicUsize::new(0),
         streams: AtomicUsize::new(0),
         graph: Mutex::new(None),
+        hosts_seen: Mutex::new(None),
     });
     let w = shared.clone();
     std::thread::spawn(move || worker(w, servers, rx));
@@ -625,12 +628,16 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
     if let Err((code, why)) = check(sh, &req) {
         return refuse(&mut s, code, why);
     }
+    // a request with the key (or a server with none, as in tests)
+    let keyed = sh.opts.key.as_ref().is_none_or(|key| {
+        let given = req.header("x-tempo-key").unwrap_or("");
+        util::same_secret(given.trim().as_bytes(), key.as_bytes())
+    });
     if let Some(api) = req.path.strip_prefix("/agent/") {
         // everything but health needs the key (the page and its files do not)
-        if let Some(key) = &sh.opts.key {
+        if sh.opts.key.is_some() {
             let open = req.method == "GET" && api == "health";
-            let given = req.header("x-tempo-key").unwrap_or("");
-            if !open && !util::same_secret(given.trim().as_bytes(), key.as_bytes()) {
+            if !open && !keyed {
                 return send_json(
                     &mut s,
                     401,
@@ -646,12 +653,21 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
         } else {
             Value::Null
         };
+        if api == "health" && req.method == "GET" {
+            return send_json(&mut s, 200, &health(sh, keyed));
+        }
         return route(sh, &req, api, &body, s);
     }
     if let (Some(rel), Some(dir)) = (req.path.strip_prefix("/chat/"), &sh.opts.chat_dir) {
         return static_file(&mut s, dir, rel);
     }
     match sh.opts.gui_port {
+        // listening beyond this computer, the GUI behind the agent needs the key too
+        Some(_) if sh.opts.allow_remote && !keyed => send_json(
+            &mut s,
+            401,
+            &json!({"error": "this needs the agent's key", "hint": "open Perennos Tempo, or run tempo-launch open agent"}),
+        ),
         Some(port) => pass_through(&req, s, port),
         None => refuse(&mut s, 404, "not found"),
     }
@@ -660,7 +676,6 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
 fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream) {
     let post = req.method == "POST";
     match (post, api) {
-        (false, "health") => send_json(&mut s, 200, &health(sh)),
         (false, "convs") => send_json(&mut s, 200, &json!(convs(&sh.cfg))),
         (true, "new") => match Conv::open(&sh.cfg, None) {
             Ok(mut c) => {
@@ -825,29 +840,47 @@ fn used_srcs(sh: &Shared, conv: &str, files: &[RagFile]) -> Vec<String> {
         .collect()
 }
 
-fn health(sh: &Shared) -> Value {
-    let mut hosts = Map::new();
-    for (name, h) in sh.cfg.all_hosts() {
-        let up = h.urls.iter().any(|u| {
-            let t = if u.contains("127.0.0.1") || u.contains("localhost") {
-                5
-            } else {
-                2
-            };
-            http_json(&format!("{u}/api/tags"), None, Duration::from_secs(t)).is_ok()
-        });
-        let v = if up {
-            "up".to_string()
-        } else {
-            format!("unreachable on {}", h.urls.join(", "))
-        };
-        hosts.insert(name, json!(v));
-    }
-    let embed = lock(&sh.state).embed_ok;
+/// Health. Without the key it says only what a caller needs to talk to this agent (`auth`,
+/// `stream`, `guest`); with it, the engines too, probed at most every 15 s (an unkeyed caller
+/// can neither learn the machines' addresses nor make the agent probe them over and over).
+fn health(sh: &Shared, keyed: bool) -> Value {
     // `stream: true` tells the chat surface it can use /agent/stream instead of polling.
     // `guest: true`: POST /agent/new {"mode":"guest"} makes a room-safe conversation.
     // `auth: "key"`: every other call needs X-Tempo-Key (see `serve`).
-    json!({"net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "auth": if sh.opts.key.is_some() { "key" } else { "none" }})
+    let auth = if sh.opts.key.is_some() { "key" } else { "none" };
+    if !keyed {
+        return json!({"ok": true, "stream": true, "guest": true, "auth": auth});
+    }
+    let hosts = {
+        let mut seen = lock(&sh.hosts_seen);
+        match seen.as_ref() {
+            Some((t, v)) if t.elapsed() < Duration::from_secs(15) => v.clone(),
+            _ => {
+                let mut hosts = Map::new();
+                for (name, h) in sh.cfg.all_hosts() {
+                    let up = h.urls.iter().any(|u| {
+                        let t = if u.contains("127.0.0.1") || u.contains("localhost") {
+                            5
+                        } else {
+                            2
+                        };
+                        http_json(&format!("{u}/api/tags"), None, Duration::from_secs(t)).is_ok()
+                    });
+                    let v = if up {
+                        "up".to_string()
+                    } else {
+                        format!("unreachable on {}", h.urls.join(", "))
+                    };
+                    hosts.insert(name, json!(v));
+                }
+                let v = Value::Object(hosts);
+                *seen = Some((Instant::now(), v.clone()));
+                v
+            }
+        }
+    };
+    let embed = lock(&sh.state).embed_ok;
+    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "auth": auth})
 }
 
 fn convs(cfg: &Config) -> Vec<String> {
@@ -1309,7 +1342,17 @@ mod tests {
         );
         let (c, b) = get("/agent/health", "");
         assert_eq!(c, 200);
-        assert!(b.contains("\"auth\":\"key\""), "{b}");
+        assert!(
+            b.contains("\"auth\":\"key\"") && b.contains("\"guest\":true"),
+            "{b}"
+        );
+        // without the key, health names no engines, machines or models
+        assert!(!b.contains("hosts") && !b.contains("models"), "{b}");
+        let (_, b) = get(
+            "/agent/health",
+            &format!("X-Tempo-Key: {}\r\n", "k3y".repeat(20)),
+        );
+        assert!(b.contains("\"hosts\"") && b.contains("\"models\""), "{b}");
         // the page's own files need no key
         assert_eq!(get("/chat/chat.mjs", "").0, 200);
         // a POST without the key changes nothing
@@ -1466,6 +1509,7 @@ mod tests {
                 conns: AtomicUsize::new(0),
                 streams: AtomicUsize::new(0),
                 graph: Mutex::new(None),
+                hosts_seen: Mutex::new(None),
             };
             assert!(sh.ensure(&mut st, &conv));
             st.convs[&conv].events.clone()

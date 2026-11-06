@@ -30,33 +30,54 @@ pub fn project_root(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
-fn read_capped(p: &Path, cap: usize) -> Option<String> {
-    if is_secret_path(&p.to_string_lossy()) {
+/// At most this many `@file` imports are followed in one instruction file.
+pub const MAX_IMPORTS: usize = 10;
+
+/// A file's text, at most `cap` characters, redacted. None for a secret, by its name or by the
+/// name of the file a link points to; for anything that is not a plain file; and, with
+/// `within`, for a file whose real place (after links) is outside that folder. Only about
+/// `cap` characters are read, however big the file is.
+fn read_capped_in(p: &Path, cap: usize, within: Option<&Path>) -> Option<String> {
+    let real = util::resolve(p);
+    if is_secret_path(&p.to_string_lossy()) || is_secret_path(&real.to_string_lossy()) {
         return None;
     }
-    let md = std::fs::metadata(p).ok()?;
-    if !md.is_file() || md.len() > 4 << 20 {
+    if within.is_some_and(|w| !real.starts_with(util::resolve(w))) {
         return None;
     }
-    let b = std::fs::read(p).ok()?;
+    let md = std::fs::metadata(&real).ok()?;
+    if !md.is_file() {
+        return None;
+    }
+    use std::io::Read;
+    let mut b = Vec::new();
+    std::fs::File::open(&real)
+        .ok()?
+        .take((cap as u64).saturating_mul(4))
+        .read_to_end(&mut b)
+        .ok()?;
     Some(util::redact(&head_chars(&String::from_utf8_lossy(&b), cap)))
+}
+
+fn read_capped(p: &Path, cap: usize) -> Option<String> {
+    read_capped_in(p, cap, None)
 }
 
 /// Lines `@file.md` in an instruction file, inside `root` (one level; no secrets).
 fn with_imports(text: &str, base: &Path, root: &Path) -> String {
     let mut out = String::new();
+    let mut imported = 0;
     for line in text.lines() {
         let t = line.trim();
         if let Some(rel) = t
             .strip_prefix('@')
             .filter(|r| !r.is_empty() && !r.contains(char::is_whitespace))
+            .filter(|_| imported < MAX_IMPORTS)
         {
-            let p = util::resolve(&base.join(rel));
-            if p.starts_with(util::resolve(root)) {
-                if let Some(inner) = read_capped(&p, 6000) {
-                    out.push_str(&format!("(from {rel})\n{inner}\n"));
-                    continue;
-                }
+            if let Some(inner) = read_capped_in(&base.join(rel), 6000, Some(root)) {
+                imported += 1;
+                out.push_str(&format!("(from {rel})\n{inner}\n"));
+                continue;
             }
         }
         out.push_str(line);
@@ -90,7 +111,7 @@ fn gather(dir: &Path, home: Option<&Path>) -> Vec<(PathBuf, String)> {
     let root = project_root(&dir);
     let mut found: Vec<(PathBuf, String)> = vec![];
     if let Some(h) = home {
-        if let Some(t) = read_capped(&h.join("AGENTS.md"), MAX_INSTRUCTIONS) {
+        if let Some(t) = read_capped_in(&h.join("AGENTS.md"), MAX_INSTRUCTIONS, Some(h)) {
             found.push((h.join("AGENTS.md"), with_imports(&t, h, h)));
         }
     }
@@ -107,7 +128,8 @@ fn gather(dir: &Path, home: Option<&Path>) -> Vec<(PathBuf, String)> {
             if found.iter().any(|(q, _)| *q == p) {
                 continue;
             }
-            if let Some(t) = read_capped(&p, MAX_INSTRUCTIONS) {
+            // a link to a file outside the project (CLAUDE.md -> ~/.ssh/config) is not read
+            if let Some(t) = read_capped_in(&p, MAX_INSTRUCTIONS, Some(&root)) {
                 found.push((p, with_imports(&t, &d, &root)));
             }
         }
@@ -117,6 +139,29 @@ fn gather(dir: &Path, home: Option<&Path>) -> Vec<(PathBuf, String)> {
         found.remove(0);
     }
     found
+}
+
+/// Whether `p` is pulled into the instructions by an `@file` line of an instruction file between
+/// its project's top folder and its own folder (then changing it changes the instructions).
+pub fn imported_by_instructions(p: &Path) -> bool {
+    let p = util::resolve(p);
+    let Some(parent) = p.parent() else {
+        return false;
+    };
+    let root = project_root(parent);
+    parent
+        .ancestors()
+        .take_while(|a| a.starts_with(&root))
+        .any(|d| {
+            INSTRUCTION_FILES.iter().any(|name| {
+                read_capped_in(&d.join(name), MAX_INSTRUCTIONS, Some(&root)).is_some_and(|t| {
+                    t.lines()
+                        .filter_map(|l| l.trim().strip_prefix('@'))
+                        .filter(|r| !r.is_empty() && !r.contains(char::is_whitespace))
+                        .any(|r| util::resolve(&d.join(r)) == p)
+                })
+            })
+        })
 }
 
 /// `@path` mentions in a message: the files they name (inside `dir` or absolute), attached after
@@ -161,7 +206,7 @@ pub fn custom_command(name: &str, args: &str, dir: &Path, home: Option<&Path>) -
     }
     let body = places
         .iter()
-        .find_map(|d| read_capped(&d.join(format!("{name}.md")), 20_000))?;
+        .find_map(|d| read_capped_in(&d.join(format!("{name}.md")), 20_000, Some(d)))?;
     // a front-matter block (description: ...) is for the list, not the prompt
     let body = match body
         .strip_prefix("---\n")
@@ -269,6 +314,37 @@ mod tests {
         );
         assert!(!t.contains(&fake_key), "redacted: {t}");
         assert!(instructions(&tmpdir("proj-none"), None).is_empty());
+    }
+
+    #[test]
+    fn instructions_never_follow_a_link_out_of_the_project_and_imports_are_capped() {
+        let d = tmpdir("proj-links");
+        let repo = d.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(d.join("private.md"), "outside the project").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d.join("private.md"), repo.join("CLAUDE.md")).unwrap();
+        let mut agents = String::from("Top.\n");
+        for i in 0..12 {
+            std::fs::write(repo.join(format!("f{i}.md")), format!("import {i}")).unwrap();
+            agents.push_str(&format!("@f{i}.md\n"));
+        }
+        std::fs::write(repo.join("AGENTS.md"), agents).unwrap();
+        let t = instructions(&repo, None);
+        assert!(!t.contains("outside the project"), "{t}");
+        assert!(
+            t.contains("import 9") && !t.contains("import 10"),
+            "at most {MAX_IMPORTS} imports: {t}"
+        );
+        // a secret's name behind a link is a secret too
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(d.join(".ssh")).unwrap();
+            std::fs::write(d.join(".ssh/config"), "Host secret").unwrap();
+            std::os::unix::fs::symlink(d.join(".ssh/config"), repo.join("notes.md")).unwrap();
+            let (t, files) = attach_mentions("read @notes.md", &repo);
+            assert!(files.is_empty() && !t.contains("Host secret"), "{t}");
+        }
     }
 
     #[test]

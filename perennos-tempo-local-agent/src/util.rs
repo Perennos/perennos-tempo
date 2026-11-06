@@ -157,7 +157,7 @@ macro_rules! rx {
 
 rx!(
     secret_path_rx,
-    r"(?i)(\.claude\.json|\.token$|\.key$|\.env|secret|credential|executor-token|password|id_rsa|\.pem$)"
+    r"(?i)(\.claude\.json|\.token$|\.key$|\.env|secret|credential|executor-token|password|id_rsa|id_ed25519|id_ecdsa|id_dsa|\.pem$|\.netrc|\.npmrc|\.pypirc|\.pgpass|[/\\]\.ssh[/\\]|^\.ssh[/\\]|[/\\]\.gnupg[/\\]|[/\\]\.aws[/\\]|[/\\]\.kube[/\\]config|[/\\]\.docker[/\\]config\.json)"
 );
 rx!(
     secret_kv_rx,
@@ -408,11 +408,14 @@ pub fn tls() -> ureq::tls::TlsConfig {
     }
 }
 
-/// Whether an address is on the open internet: not this computer, not a private or link-local
-/// network (the cloud metadata address 169.254.169.254 is link-local), not carrier-grade NAT
-/// (Tailscale), not multicast.
+/// Whether an address is on the open internet. Refused: this computer, private and link-local
+/// networks (the cloud metadata address 169.254.169.254 is link-local), carrier-grade NAT (the
+/// range Tailscale uses), multicast, and the special-use ranges (documentation, benchmarking,
+/// reserved, protocol assignments). For IPv6 only global unicast (2000::/3) counts, without the
+/// documentation range and Teredo, and 6to4 and IPv4-mapped addresses are judged by the IPv4
+/// address inside them.
 pub fn public_ip(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
     match ip {
         IpAddr::V4(v) => {
             let o = v.octets();
@@ -423,19 +426,29 @@ pub fn public_ip(ip: std::net::IpAddr) -> bool {
                 || v.is_broadcast()
                 || v.is_multicast()
                 || o[0] == 0
-                || (o[0] == 100 && o[1] & 0xc0 == 64))
+                || o[0] >= 240
+                || (o[0] == 100 && o[1] & 0xc0 == 64)
+                || (o[0] == 192 && o[1] == 0 && (o[2] == 0 || o[2] == 2))
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113))
         }
-        IpAddr::V6(v) => match v.to_ipv4_mapped() {
-            Some(m) => public_ip(IpAddr::V4(m)),
-            None => {
-                let s = v.segments()[0];
-                !(v.is_loopback()
-                    || v.is_unspecified()
-                    || v.is_multicast()
-                    || s & 0xfe00 == 0xfc00
-                    || s & 0xffc0 == 0xfe80)
+        IpAddr::V6(v) => {
+            if let Some(m) = v.to_ipv4_mapped() {
+                return public_ip(IpAddr::V4(m));
             }
-        },
+            let s = v.segments();
+            if s[0] == 0x2002 {
+                // 6to4: the IPv4 address is in the next 32 bits
+                let [a, b] = s[1].to_be_bytes();
+                let [c, d] = s[2].to_be_bytes();
+                return public_ip(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+            }
+            s[0] & 0xe000 == 0x2000
+                && !(s[0] == 0x2001 && s[1] == 0x0db8)
+                && !(s[0] == 0x2001 && s[1] == 0)
+        }
     }
 }
 
@@ -490,6 +503,8 @@ pub struct Fetched {
     pub max_age: Option<u64>,
     /// `Cache-Control: no-store`: the site asks not to keep a copy.
     pub no_store: bool,
+    /// The address the page finally came from (after redirects).
+    pub final_url: String,
 }
 
 /// Like `get_text_capped`, but `check` approves the address of the request and of every redirect
@@ -586,6 +601,7 @@ pub fn get_checked(
             last_modified,
             max_age,
             no_store,
+            final_url: cur,
         });
     }
     Err("too many redirects".into())

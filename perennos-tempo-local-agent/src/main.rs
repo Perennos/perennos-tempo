@@ -160,6 +160,8 @@ fn real_main() -> Result<(), String> {
                         .collect()
                 })
                 .unwrap_or_default();
+            // the agent's own tools never write the file its servers come from
+            cfg.own_files.push(p.clone());
             mcp::load_server_configs(&p, &project_dirs)?
         }
         None => Default::default(),

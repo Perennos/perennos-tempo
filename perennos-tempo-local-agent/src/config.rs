@@ -95,6 +95,9 @@ pub struct Config {
     pub vault_write: bool,
     /// Folders Tempo Studio may read and write (env TEMPO_STUDIO_ROOTS wins; default ~/Music).
     pub studio_roots: Vec<String>,
+    /// The settings files this agent was started with (its config, its MCP file): never written
+    /// by its own tools, wherever they are. Set by whoever loads them, never from JSON.
+    pub own_files: Vec<PathBuf>,
 }
 
 /// The agent's data folder when nothing names one: `TEMPO_AGENT_DATA`, else `<Tempo home>/agent`,
@@ -204,6 +207,7 @@ impl Config {
             vault: None,
             vault_write: true,
             studio_roots: vec![],
+            own_files: vec![],
             mcp_skip: vec![],
             mcp_blocked: BTreeMap::new(),
             mcp_confirm: vec![],
@@ -455,7 +459,9 @@ impl Config {
                 if v.get("tempo_home").is_some() {
                     eprintln!("[config: {p} names tempo_home, which is not read: the Tempo home comes from TEMPO_HOME, as for every Perennos Tempo product (tempo-launch home shows it)]");
                 }
-                Config::from_json(&v, data_env)?
+                let mut c = Config::from_json(&v, data_env)?;
+                c.own_files.push(PathBuf::from(&p));
+                c
             }
         };
         let url = ["OLLAMA_URL", "TEMPO_OLLAMA"].iter().find_map(|k| {
