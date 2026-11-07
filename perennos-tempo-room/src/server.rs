@@ -41,6 +41,40 @@ pub const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub const APP_JS: &str = include_str!("../assets/app.mjs");
 pub const APP_CSS: &str = include_str!("../assets/app.css");
 pub const ICON_SVG: &str = include_str!("../assets/icon.svg");
+pub const THEME_CSS: &str = include_str!("../assets/tempo-theme.css");
+// The official artwork and the site's own fonts (SIL OFL 1.1), served as they are; same files in every Tempo crate.
+const BRAND_FILES: [(&str, &str, &[u8]); 6] = [
+    (
+        "/perennos-insignia.webp",
+        "image/webp",
+        include_bytes!("../assets/perennos-insignia.webp"),
+    ),
+    (
+        "/perennos-wordmark-cream.png",
+        "image/png",
+        include_bytes!("../assets/perennos-wordmark-cream.png"),
+    ),
+    (
+        "/favicon-64.png",
+        "image/png",
+        include_bytes!("../assets/favicon-64.png"),
+    ),
+    (
+        "/fonts/archivo-latin-variable.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/archivo-latin-variable.woff2"),
+    ),
+    (
+        "/fonts/instrument-serif-italic-latin.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/instrument-serif-italic-latin.woff2"),
+    ),
+    (
+        "/fonts/jetbrains-mono-latin-700.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/jetbrains-mono-latin-700.woff2"),
+    ),
+];
 pub const MANIFEST: &str = include_str!("../assets/manifest.webmanifest");
 
 const APP_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -683,6 +717,13 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
             APP_CSS.as_bytes(),
             &[],
         ),
+        "/tempo-theme.css" => respond(
+            &mut s,
+            200,
+            "text/css; charset=utf-8",
+            THEME_CSS.as_bytes(),
+            &[],
+        ),
         "/icon.svg" | "/favicon.ico" => {
             respond(&mut s, 200, "image/svg+xml", ICON_SVG.as_bytes(), &[])
         }
@@ -693,6 +734,10 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
             MANIFEST.as_bytes(),
             &[],
         ),
+        p if BRAND_FILES.iter().any(|f| f.0 == p) => {
+            let f = BRAND_FILES.iter().find(|f| f.0 == p).expect("listed");
+            respond(&mut s, 200, f.1, f.2, &[])
+        }
         _ => {
             refuse(&mut s, 404, "not found");
             Ok(())

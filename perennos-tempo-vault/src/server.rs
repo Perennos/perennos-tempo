@@ -36,6 +36,40 @@ pub const CANVAS_JS: &str = include_str!("../assets/canvas.mjs");
 pub const THREE_JS: &str = include_str!("../assets/vendor/three.module.min.js");
 pub const THREE_LICENSE: &str = include_str!("../assets/vendor/three.LICENSE");
 pub const ICON_SVG: &str = include_str!("../assets/icon.svg");
+pub const THEME_CSS: &str = include_str!("../assets/tempo-theme.css");
+// The official artwork and the site's own fonts (SIL OFL 1.1), served as they are; same files in every Tempo crate.
+const BRAND_FILES: [(&str, &str, &[u8]); 6] = [
+    (
+        "/perennos-insignia.webp",
+        "image/webp",
+        include_bytes!("../assets/perennos-insignia.webp"),
+    ),
+    (
+        "/perennos-wordmark-cream.png",
+        "image/png",
+        include_bytes!("../assets/perennos-wordmark-cream.png"),
+    ),
+    (
+        "/favicon-64.png",
+        "image/png",
+        include_bytes!("../assets/favicon-64.png"),
+    ),
+    (
+        "/fonts/archivo-latin-variable.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/archivo-latin-variable.woff2"),
+    ),
+    (
+        "/fonts/instrument-serif-italic-latin.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/instrument-serif-italic-latin.woff2"),
+    ),
+    (
+        "/fonts/jetbrains-mono-latin-700.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/jetbrains-mono-latin-700.woff2"),
+    ),
+];
 
 pub struct ServeOpts {
     pub bind: IpAddr,
@@ -617,6 +651,17 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
             THREE_LICENSE.as_bytes(),
             &[],
         ),
+        "/tempo-theme.css" => respond(
+            &mut s,
+            200,
+            "text/css; charset=utf-8",
+            THEME_CSS.as_bytes(),
+            &[],
+        ),
+        p if BRAND_FILES.iter().any(|f| f.0 == p) => {
+            let f = BRAND_FILES.iter().find(|f| f.0 == p).expect("listed");
+            respond(&mut s, 200, f.1, f.2, &[])
+        }
         "/icon.svg" | "/favicon.ico" => {
             respond(&mut s, 200, "image/svg+xml", ICON_SVG.as_bytes(), &[])
         }

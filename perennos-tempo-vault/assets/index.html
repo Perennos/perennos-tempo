@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="en" data-theme="charcoal">
+<html lang="en" data-theme="system">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <title>Perennos Tempo Vault</title>
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-64.png" type="image/png">
+<link rel="stylesheet" href="/tempo-theme.css">
 <link rel="stylesheet" href="/app.css">
 <script type="module" src="/app.mjs"></script>
 </head>
@@ -13,7 +14,7 @@
 <div id="app">
   <header class="top">
     <div class="l">
-      <span class="brand">tempo</span>
+      <span class="tt-brand"><span class="tt-ins" data-insignia><i class="tt-led"></i></span><span class="tt-wm" role="img" aria-label="perennos"></span><b>tempo</b></span>
       <span class="seg auto"><b>VAULT</b></span>
       <span class="sep">·</span>
       <span class="seg"><b id="vname">…</b></span>
@@ -23,12 +24,23 @@
       <span class="seg"><b>LOCAL</b> <i>only</i></span>
     </div>
     <div class="r">
+      <div class="tt-seg" id="layout" role="group" aria-label="View">
+        <button type="button" data-layout="brain" title="The graph, full (Shift+G)">B<span class="tt-word">rain</span></button>
+        <button type="button" data-layout="dashboard" title="Notes and details (Shift+D)">D<span class="tt-word">ashboard</span></button>
+        <button type="button" data-layout="both" title="The note and the graph side by side (Shift+B)">B<span class="tt-word">oth</span></button>
+      </div>
+      <div class="tt-seg" id="themesw" role="group" aria-label="Theme">
+        <button type="button" data-theme-pick="system" title="Follow the system">S<span class="tt-word">ystem</span></button>
+        <button type="button" data-theme-pick="light">L<span class="tt-word">ight</span></button>
+        <button type="button" data-theme-pick="dark">D<span class="tt-word">ark</span></button>
+      </div>
       <button class="seg pal-open" id="palbtn" type="button" title="Jump to a note or run a command (Ctrl+K)"><i>jump</i> <kbd>Ctrl</kbd><kbd>K</kbd></button>
       <span class="seg live" id="livebox"><i>live</i> <b id="livestate">SSE</b></span>
     </div>
   </header>
 
   <nav class="rail" aria-label="Views">
+    <i class="rail-bar" id="rail-bar" aria-hidden="true"></i>
     <div class="sub">Vault</div>
     <button type="button" data-view="files" aria-current="page"><kbd>F</kbd>Files<span class="n" id="n-files"></span></button>
     <button type="button" data-view="search"><kbd>S</kbd>Search</button>

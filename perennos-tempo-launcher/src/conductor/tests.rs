@@ -1392,15 +1392,16 @@ fn the_dashboard_holds_nothing_external_and_shows_the_band() {
     // strict policy, no script, nothing fetched
     assert!(html.contains("Content-Security-Policy"));
     assert!(html.contains(
-        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
     ));
     for external in [
         "http://",
         "https://",
         "<script",
-        "<link",
-        "src=",
-        "url(",
+        "<link rel=\"stylesheet\"",
+        "src=\"http",
+        "url(http",
+        "href=\"http",
         "@import",
         "<iframe",
         "<img",
@@ -2400,15 +2401,16 @@ fn the_conductor_page_shows_engines_bands_runs_and_apps_and_holds_nothing_extern
     }
     // strict, static, nothing fetched, and it fits a phone
     assert!(html.contains(
-        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
     ));
     for external in [
         "http://",
         "https://",
         "<script",
-        "<link",
-        "src=",
-        "url(",
+        "<link rel=\"stylesheet\"",
+        "src=\"http",
+        "url(http",
+        "href=\"http",
         "@import",
         "<iframe",
         "<img",

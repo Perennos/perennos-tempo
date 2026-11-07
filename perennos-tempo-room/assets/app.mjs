@@ -98,14 +98,29 @@ async function copy(text, input) {
 
 // ---------------------------------------------------------------- theme and greeting
 
-const THEMES = ['charcoal', 'ink', 'paper'];
-function applyTheme(t) {
-  if (!THEMES.includes(t)) t = 'charcoal';
+const THEMES = ['system', 'light', 'dark'];
+const systemLight = () => window.matchMedia('(prefers-color-scheme: light)').matches;
+function paintTheme(t) {
   document.documentElement.dataset.theme = t;
+  const light = t === 'light' || (t === 'system' && systemLight());
   const meta = document.querySelector('meta[name=theme-color]');
-  if (meta) meta.content = t === 'paper' ? '#efe9dc' : t === 'ink' ? '#070708' : '#1b1a1b';
+  if (meta) meta.content = light ? '#f1ece1' : '#1b1a1b';
   $('theme').firstElementChild.textContent = t;
+}
+// Fades between themes: a View Transition where there is one, a short colour transition where not.
+function applyTheme(t, animate = false) {
+  if (t === 'charcoal' || t === 'ink') t = t === 'ink' ? 'dark' : 'system'; // the old names
+  if (t === 'paper') t = 'light';
+  if (!THEMES.includes(t)) t = 'system';
   save('theme', t);
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (animate && !calm && document.startViewTransition) document.startViewTransition(() => paintTheme(t));
+  else if (animate && !calm) {
+    const root = document.documentElement;
+    root.classList.add('tt-fading');
+    paintTheme(t);
+    setTimeout(() => root.classList.remove('tt-fading'), 400);
+  } else paintTheme(t);
 }
 
 function greet() {
@@ -171,7 +186,8 @@ async function refreshMe() {
 }
 
 async function boot() {
-  applyTheme(load('theme') || 'charcoal');
+  applyTheme(load('theme') || 'system');
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => paintTheme(document.documentElement.dataset.theme));
   wire();
   const h = parseHash();
   if (h.owner) {
@@ -611,7 +627,9 @@ function addMsg(m) {
   const prev = list.length > 1 ? list[list.length - 2] : null;
   const sameDay = prev && dayLabel(prev.t) === dayLabel(m.t);
   if (!sameDay) box.append(el('div', 'day', dayLabel(m.t)));
-  box.append(msgNode(m, sameDay ? prev : null));
+  const node = msgNode(m, sameDay ? prev : null);
+  node.classList.add('new');
+  box.append(node);
   if (end || isMine(m)) box.scrollTop = box.scrollHeight;
   else $('jump').hidden = false;
 }
@@ -707,6 +725,7 @@ function updateTitle() {
 function renderThinking() {
   const since = S.room ? S.thinking.get(S.room) : 0;
   $('thinking').hidden = !since;
+  document.documentElement.dataset.busy = since ? 'true' : 'false'; // the insignia's circuit runs faster while Tempo thinks
   if (since) {
     const s = Math.floor((Date.now() - since) / 1000);
     const names = S.thinkers.get(S.room) || [];
@@ -1309,7 +1328,7 @@ async function haiku() {
 function wire() {
   $('theme').addEventListener('click', () => {
     const cur = document.documentElement.dataset.theme;
-    applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
+    applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length], true);
   });
   $('join-form').addEventListener('submit', join);
   $('back').addEventListener('click', () => { if (history.state && history.state.room) history.back(); else closeRoom(); });

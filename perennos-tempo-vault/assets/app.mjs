@@ -381,7 +381,7 @@ function parseHash() {
 async function route() {
   const r = parseHash();
   if (!r) return;
-  if (r.kind === 'n') { await openNote(r.arg, r.anchor, r.line); if (S.view === 'graph') setView('files'); }
+  if (r.kind === 'n') { await openNote(r.arg, r.anchor, r.line); if (S.view === 'graph' && !S.both) setView('files'); else applyLayout(S.view); }
   else if (r.kind === 's') { setView('search'); $('#filter').value = r.arg; renderSide(); }
   else if (r.kind === 'v') setView(r.arg);
 }
@@ -394,12 +394,42 @@ function setView(v) {
     if (b.dataset.view === v) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   }
   const graph = v === 'graph';
-  $('#graph').hidden = !graph;
-  $('#doc').hidden = graph;
-  if (graph) { document.body.classList.remove('side-on'); if (was !== 'graph' || !S.graph) openGraphView(); return; }
-  closeGraphView();
+  applyLayout(was);
+  if (graph) { document.body.classList.remove('side-on'); return; }
   if (v !== was) document.body.classList.add('side-on');
   renderSide();
+}
+
+// Shows the graph, the note or both, from the current view and the Both switch.
+function applyLayout(was) {
+  const graph = S.view === 'graph', showGraph = graph || S.both;
+  document.body.classList.toggle('lay-both', S.both);
+  $('#graph').hidden = !showGraph;
+  $('#doc').hidden = graph && !S.both;
+  syncLayout();
+  moveBar();
+  if (showGraph) { if (!S.graph || (graph && was !== 'graph')) openGraphView(); } else closeGraphView();
+}
+
+// Brain (the graph, full), Dashboard (notes and details) or Both (side by side; stacked on a phone).
+function setLayout(l) {
+  if (!['brain', 'dashboard', 'both'].includes(l)) l = 'dashboard';
+  store.set('layout', l);
+  S.both = l === 'both';
+  if (l === 'brain') { if (S.view === 'graph') setView('graph'); else go('#/v/graph'); }
+  else if (S.view === 'graph' && l === 'dashboard') go('#/v/files');
+  else setView(S.view);
+}
+function syncLayout() {
+  const l = S.both ? 'both' : S.view === 'graph' ? 'brain' : 'dashboard';
+  for (const b of $$('#layout button')) b.setAttribute('aria-pressed', String(b.dataset.layout === l));
+}
+// The orange bar slides to the current rail item (transform only).
+function moveBar() {
+  const bar = $('#rail-bar'), cur = $('.rail button[aria-current=page]');
+  if (!bar || !cur) return;
+  bar.style.height = `${cur.offsetHeight}px`;
+  bar.style.transform = `translateY(${cur.offsetTop}px)`;
 }
 
 async function action(v) {
@@ -417,13 +447,29 @@ async function action(v) {
     ], [['Close', closeSheet]]);
   } else if (v === 'new') createDialog();
   else if (v === 'theme') {
-    const order = ['charcoal', 'ink', 'paper'];
-    const t = order[(order.indexOf(document.documentElement.dataset.theme) + 1) % order.length];
-    document.documentElement.dataset.theme = t;
-    store.set('theme', t);
-    flashStatus(`theme: ${t}`);
-    if (S.view === 'graph') openGraphView();
+    const order = ['system', 'light', 'dark'];
+    setTheme(order[(order.indexOf(document.documentElement.dataset.theme) + 1) % order.length], true);
+    flashStatus(`theme: ${document.documentElement.dataset.theme}`);
   }
+}
+
+// Light, dark or the system's; a change fades (a View Transition, or a short colour fade) and is remembered.
+function paintTheme(t) {
+  document.documentElement.dataset.theme = t;
+  for (const b of $$('#themesw button')) b.setAttribute('aria-pressed', String(b.dataset.themePick === t));
+}
+function setTheme(t, animate = false) {
+  if (t === 'charcoal' || t === 'ink') t = t === 'ink' ? 'dark' : 'system'; // the old names
+  if (t === 'paper') t = 'light';
+  if (!['system', 'light', 'dark'].includes(t)) t = 'system';
+  store.set('theme', t);
+  if (animate && !reduced() && document.startViewTransition) document.startViewTransition(() => paintTheme(t));
+  else if (animate && !reduced()) {
+    document.documentElement.classList.add('tt-fading');
+    paintTheme(t);
+    setTimeout(() => document.documentElement.classList.remove('tt-fading'), 400);
+  } else paintTheme(t);
+  if (S.graph) openGraphView(); // the points take the new colours
 }
 
 // ------------------------------------------------------------------ the note
@@ -714,6 +760,8 @@ async function askPoll(once) {
   let r;
   try { r = await api(`agent/events?conv=${enc(ASK.conv)}&since=${ASK.since}`); } catch (e) { ASK.state.textContent = 'off'; return; }
   for (const ev of r.events || []) { ASK.since++; askEvent(ev); }
+  document.documentElement.dataset.busy = r.busy ? 'true' : 'false'; // the insignia's circuit and the graph's core follow
+  S.graph?.busy?.(!!r.busy);
   if (r.busy) { ASK.state.textContent = 'thinking…'; ASK.timer = setTimeout(askPoll, once ? 900 : 420); }
   else { ASK.state.textContent = ASK.online === false ? 'off' : ASK.label || 'on'; ASK.cur = null; }
   ASK.log.scrollTop = ASK.log.scrollHeight;
@@ -794,7 +842,7 @@ async function openGraphView() {
   const q = `graph?tags=${+o.tags}&attachments=${+o.attachments}&unresolved=${+o.unresolved}&orphans=${+o.orphans}&filter=${enc($('#gfilter').value.trim())}`;
   try {
     const [g, m] = await Promise.all([api(q), memgraph()]);
-    if (S.view !== 'graph') return;
+    if (!S.both && S.view !== 'graph') return;
     stage.replaceChildren();
     const kinds = {};
     for (const n of g.nodes) kinds[n.kind] = (kinds[n.kind] || 0) + 1;
@@ -925,7 +973,7 @@ const COMMANDS = [
   ['New note', () => action('new')], ['New canvas', () => createDialog('canvas')], ['New base (table, cards, board)', () => createDialog('base')], ['Map this note on a canvas', () => mapNote()], ['Present this note as slides', () => present()], ['Calendar of daily notes', () => go('#/v/calendar')], ['Open this note in Obsidian', () => openInObsidian()], ["Today's note", () => action('daily')], ['Graph', () => go('#/v/graph')], ['Search', () => go('#/v/search')],
   ['Open tasks', () => go('#/v/tasks')], ['Tags', () => go('#/v/tags')], ['Check the vault', () => go('#/v/health')], ['What Tempo learned', () => action('learned')],
   ['Read / edit', () => setMode(S.mode === 'edit' ? 'read' : 'edit')], ['Rename or move this note', () => renameDialog()], ['Earlier versions', () => historyDialog()],
-  ['Move this note to trash', () => trashDialog()], ['Copy a link to this note', () => copyLink()], ['Theme', () => action('theme')],
+  ['Move this note to trash', () => trashDialog()], ['Copy a link to this note', () => copyLink()], ['Theme', () => action('theme')], ['Brain: the graph, full', () => setLayout('brain')], ['Dashboard: notes and details', () => setLayout('dashboard')], ['Both: the note and the graph', () => setLayout('both')],
   ['Random note', () => randomNote()], ['Focus mode', () => document.body.classList.toggle('zen')], ['Keyboard shortcuts', () => helpSheet()],
   ['Show or hide attachments in Files', () => { store.set('showFiles', !store.get('showFiles', true)); renderSide(); }], ['Reload from disk', async () => { await api('refresh', {}); await loadTree(); if (S.current) openNote(S.current.path); }],
 ];
@@ -1200,6 +1248,7 @@ function connect() {
   es.addEventListener('change', e => {
     const d = JSON.parse(e.data);
     S.gen = d.gen;
+    S.graph?.ripple?.(); // a note changed: a ripple runs through the points
     refresh(d.paths);
   });
 }
@@ -1214,6 +1263,9 @@ function wire() {
     if (v === S.view && v !== 'graph') return document.body.classList.toggle('side-on');
     go(`#/v/${v}`);
   });
+  $('#layout').addEventListener('click', e => { const b = e.target.closest('button[data-layout]'); if (b) setLayout(b.dataset.layout); });
+  $('#themesw').addEventListener('click', e => { const b = e.target.closest('button[data-theme-pick]'); if (b) setTheme(b.dataset.themePick, true); });
+  addEventListener('resize', debounce(moveBar, 100));
   $('#filter').addEventListener('input', debounce(() => renderSide(), 120));
   $('#palbtn').addEventListener('click', () => openPal());
   $('#pal-in').addEventListener('input', palUpdate);
@@ -1296,6 +1348,9 @@ function wire() {
       if (S.mode === 'edit' && e.target.id !== 'editor') return setMode('read');
     }
     if (typing || mod || e.altKey || !$('#pal').hidden || !$('#sheet').hidden) return;
+    if (e.shiftKey && e.key === 'B') { e.preventDefault(); return setLayout('both'); }
+    if (e.shiftKey && e.key === 'G') { e.preventDefault(); return setLayout('brain'); }
+    if (e.shiftKey && e.key === 'D') { e.preventDefault(); return setLayout('dashboard'); }
     const map = { f: 'files', s: 'search', g: 'graph', t: 'tasks', h: 'tags', c: 'health', m: 'calendar' };
     const k = e.key.toLowerCase();
     if (map[k]) { e.preventDefault(); go(`#/v/${map[k]}`); if (k === 's') $('#filter').focus(); }
@@ -1392,7 +1447,7 @@ async function uploadFiles(files) {
 }
 function helpSheet() {
   const rows = [['Ctrl K', 'jump to a note, or > for commands'], ['Ctrl E or E', 'read / edit'], ['Ctrl S', 'save now (it saves as you type)'], ['[[', 'link a note while writing'],
-    ['F S G T H', 'files, search, graph, tasks, tags'], ['D', "today's note"], ['M', 'calendar'], ['P', 'present the note as slides'], ['L', 'what Tempo learned'], ['C', 'check the vault'], ['N', 'new note'], ['R', 'a random note'],
+    ['F S G T H', 'files, search, graph, tasks, tags'], ['Shift+G / D / B', 'Brain, Dashboard, Both'], ['D', "today's note"], ['M', 'calendar'], ['P', 'present the note as slides'], ['L', 'what Tempo learned'], ['C', 'check the vault'], ['N', 'new note'], ['R', 'a random note'],
     ['Z', 'focus mode'], ['I', 'links, outline, properties'], [',', 'theme'], ['F2', 'rename (links follow)'], ['Esc', 'back to reading'], ['?', 'this sheet'],
     ['On a canvas', 'double-click: a card · drag a dot: an arrow · Delete · Ctrl+Z · Ctrl+D · F fits · Ctrl+scroll zooms · Alt+drag: no snapping']];
   sheet('Keys', [h('div', { class: 'keys' }, ...rows.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)])), h('p', { class: 'hint' }, 'Paste or drop images and files into a note to attach them. Enter continues a list; Tab indents it.')], [['Close', closeSheet]]);
@@ -1432,8 +1487,9 @@ function signature() {
 }
 
 async function boot() {
-  const theme = store.get('theme', 'charcoal');
-  document.documentElement.dataset.theme = theme;
+  S.both = store.get('layout', 'dashboard') === 'both';
+  setTheme(store.get('theme', 'system'));
+  matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => { if (S.graph) openGraphView(); });
   wire();
   signature();
   konami();
@@ -1451,10 +1507,12 @@ async function boot() {
   await loadTree();
   connect();
   if (parseHash()) return route();
+  if (store.get('layout', 'dashboard') === 'brain') return go('#/v/graph');
   const last = store.get('last', null);
   const first = (last && S.notes.has(last) && last) || (S.notes.has('Welcome.md') && 'Welcome.md') || [...S.notes.values()].sort((a, b) => b.mtime - a.mtime).map(n => n.path)[0];
   if (first) go(noteHash(first));
   else renderMissing('Welcome.md');
+  applyLayout(S.view);
   api('unresolved').then(u => { $('#n-health').textContent = u.unresolved.length || ''; }).catch(() => {});
   api('tags').then(t => { $('#n-tags').textContent = t.tags.length || ''; }).catch(() => {});
 }
