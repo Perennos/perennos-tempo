@@ -1222,8 +1222,15 @@ fn members_never_get_tools_and_a_run_writes_only_under_the_bands_notes() {
             _ => vec![],
         };
         assert!(
-            keys.iter().all(|k| ["mode", "role", "model"].contains(k)),
+            // the band and part names only say whose lessons and faders to use; no tool is asked for
+            keys.iter()
+                .all(|k| ["mode", "role", "model", "band", "part"].contains(k)),
             "{keys:?}"
+        );
+        assert!(
+            j.str("band").is_some() && j.str("part").is_some(),
+            "{}",
+            r.body
         );
     }
     // the agent is only ever asked to create conversations and to send and read them

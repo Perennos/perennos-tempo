@@ -20,3 +20,4 @@ pub mod tempo_home;
 pub mod tools;
 pub mod util;
 pub mod voice;
+pub mod woodshed;

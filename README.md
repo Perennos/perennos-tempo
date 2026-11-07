@@ -86,7 +86,7 @@ A profile never declassifies a request, and a public label does not anonymize co
 
 The gateway behind the last three applies five generic **profiles** with a validator and a privacy boundary, and no customer prompts ([PROFILES-README.md](PROFILES-README.md)). It writes append-only, hash-chained **receipts** for every route and outcome, and gives GPU work **admission** and a lease gate.
 
-Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.md](docs/TEMPO-HOME.md)); setup is described in [docs/TEMPO-SETUP.md](docs/TEMPO-SETUP.md). Talking to Tempo, with speech that never leaves your computer: [docs/TALK-TO-TEMPO.md](docs/TALK-TO-TEMPO.md).
+Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.md](docs/TEMPO-HOME.md)); setup is described in [docs/TEMPO-SETUP.md](docs/TEMPO-SETUP.md). Talking to Tempo, with speech that never leaves your computer: [docs/TALK-TO-TEMPO.md](docs/TALK-TO-TEMPO.md). Your models getting better at their parts from your best takes (Lessons, the nightly Woodshed, the Mix): [docs/WOODSHED.md](docs/WOODSHED.md).
 
 ## Quick start
 

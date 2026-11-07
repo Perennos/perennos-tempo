@@ -443,6 +443,16 @@ impl Agent {
             .as_deref()
             .map(|r| format!("\nYOUR ROLE (set by the owner; the rules above still hold):\n{r}\n"))
             .unwrap_or_default();
+        // the Woodshed's lessons for this band (a guest with no band has none; the owner's own
+        // chat reads the `default` ones)
+        let role = format!(
+            "{role}{}",
+            if conv.guest && conv.band.is_none() {
+                String::new()
+            } else {
+                crate::woodshed::lessons_section(&self.cfg().data_dir, conv.band.as_deref())
+            }
+        );
         if conv.guest {
             return json!({"role": "system", "content": format!("{}{role}", SYSTEM_GUEST.replace("{today}", &util::today_long()))});
         }
@@ -600,9 +610,18 @@ impl Agent {
         let pin = pin.as_deref();
         // a conversation that was opened with a JSON Schema answers in that shape
         let format = conv.format.clone();
+        // a band's part that has faders set plays on the llama-server engine when there is one,
+        // unless it was pinned elsewhere. Only chats without tools (a guest): that engine takes none.
+        let lora = conv
+            .guest
+            .then(|| ollama::mix_for(cfg, conv.band.as_deref(), conv.part.as_deref()))
+            .flatten();
+        let mixed_pin = lora.as_ref().map(|(url, _)| url.clone());
+        let pin = pin.or(mixed_pin.as_deref());
         let extra = ollama::Extra {
             format: format.as_ref(),
             conv: Some(&key),
+            lora: lora.as_ref().map(|(_, s)| s),
             ..Default::default()
         };
         loop {

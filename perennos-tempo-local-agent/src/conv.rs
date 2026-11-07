@@ -119,6 +119,10 @@ pub struct Conv {
     pub engine: Option<String>,
     /// A JSON Schema every answer of this conversation must follow (Ollama's `format`).
     pub format: Option<Value>,
+    /// The band and the part in it this conversation plays for (the Conductor says so): the band's
+    /// lessons go into the system message, and its LoRA faders pick the scales.
+    pub band: Option<String>,
+    pub part: Option<String>,
     /// The engine that answered the last request. Not saved: it is for whoever is waiting on
     /// the turn (the Conductor files it in its notes).
     pub served_by: Option<String>,
@@ -236,6 +240,8 @@ impl Conv {
             role: None,
             engine: None,
             format: None,
+            band: None,
+            part: None,
             served_by: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
@@ -264,6 +270,13 @@ impl Conv {
                 .filter(|e| !e.trim().is_empty())
                 .map(str::to_string);
             c.format = d["format"].is_object().then(|| d["format"].clone());
+            let slug = |k: &str| {
+                d[k].as_str()
+                    .filter(|s| crate::woodshed::slug_ok(s))
+                    .map(str::to_string)
+            };
+            c.band = slug("band");
+            c.part = slug("part");
             let u = &d["usage"];
             c.usage = Usage {
                 requests: u["requests"].as_u64().unwrap_or(0),
@@ -297,7 +310,7 @@ impl Conv {
         if std::fs::write(
             &tmp,
             json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" },
-                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine, "format": self.format,
+                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine, "format": self.format, "band": self.band, "part": self.part,
                 "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
         .is_ok()

@@ -53,6 +53,9 @@ const DEFAULT_COPY = {
   wordmark: 'perennos tempo', brain: 'Brain', dashboard: 'Dashboard', both: 'Both', view: 'View', panels: 'Panels', settings: 'Settings',
   theme: 'Theme', system: 'System', light: 'Light', dark: 'Dark', pause: 'Pause motion', motionNote: 'Your system asks for less motion, so the sphere holds still.',
   brainOpen: 'Open', brainClose: 'Close', brainLinks: 'Linked to', brainChanged: 'Last changed', brainSearch: 'Search the score', brainNoMatch: 'Nothing by that name', brainLoadError: "The 3D view didn't load. Here's the flat one instead.", brainNodes: 'sources',
+  goodTake: 'Good take', missTake: 'Not this one',
+  takeKept: 'Kept as a take for the Woodshed.',
+  takeOff: band => `Heard, not kept. Turn the Woodshed on for ${band} with: tempo-launch woodshed on ${band}`,
   working: 'Working', idle: 'Idle', machinesUp: 'Machines up', memoryFiles: 'Memory files', chatCount: 'Chats', brainTitle: 'The second brain, as a field.', about: 'About', madeIn: 'Built and maintained in the Cayman Islands',
 };
 // Count a number up to its value (a few hundred ms); straight to it when motion is off.
@@ -110,6 +113,29 @@ export async function mount(el, ctx) {
     log.scrollTop = log.scrollHeight;
     return d;
   }
+  // A thumb on an answer is the owner's verdict. The agent keeps it as a take only when the owner
+  // turned the Woodshed on for this band, and says so; the line under the buttons tells which.
+  // one hand, turned over for the other verdict
+  const THUMB = 'M1 21h4V9H1v12zm22-11a2 2 0 0 0-2-2h-6.3l1-4.6v-.3c0-.4-.2-.8-.5-1.1L14.2 1 7.6 7.6C7.2 8 7 8.5 7 9v10a2 2 0 0 0 2 2h9c.8 0 1.5-.5 1.8-1.2l3-7c.1-.2.2-.5.2-.8v-2z';
+  function thumbs(d, n) {
+    if (n == null) return;
+    const note = h('span', { class: 'ch-thumbnote' });
+    const mk = (verdict, label) => {
+      const b = h('button', { class: 'ch-thumb', type: 'button', 'aria-label': label, title: label });
+      b.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="${THUMB}"/></svg>`;
+      if (verdict === 'down') b.firstChild.style.transform = 'rotate(180deg)';
+      b.addEventListener('click', async () => {
+        try {
+          const r = await api('verdict', { conv, n, verdict });
+          kids.forEach(k => k.setAttribute('aria-pressed', String(k === b)));
+          note.textContent = r.kept ? c.takeKept : r.kept === false ? c.takeOff(r.band || 'default') : '';
+        } catch { note.textContent = ''; }
+      });
+      return b;
+    };
+    const kids = [mk('up', c.goodTake), mk('down', c.missTake)];
+    d.append(h('div', { class: 'ch-thumbs' }, ...kids, note));
+  }
   function setLane(l, model) {
     lane = l;
     laneV.dataset.lane = l;
@@ -126,7 +152,7 @@ export async function mount(el, ctx) {
     }
     if (live && e.type !== 'status') { live.remove(); live = null; }
     if (e.type === 'user') row('ch-user', c.you, e.text);
-    else if (e.type === 'assistant') { graph?.ripple(); row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text); if (busy) voice?.say(e.text); }
+    else if (e.type === 'assistant') { graph?.ripple(); const d = row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text); thumbs(d, e.n); if (busy) voice?.say(e.text); }
     else if (e.type === 'assistant_partial') row('ch-bot', c.tempo, e.text);
     else if (e.type === 'tool_call') {
       empty.remove();

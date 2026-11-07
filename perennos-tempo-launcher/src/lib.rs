@@ -20,6 +20,7 @@ pub mod fleet;
 pub mod home;
 pub mod setup;
 pub mod tempo_home;
+pub mod woodshed;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const EXE: &str = std::env::consts::EXE_SUFFIX;
@@ -122,6 +123,22 @@ usage: tempo-launch [command]
   crate enable ID | disable ID | folders [add|remove DIR] | review SCRIPT
                     let Tempo play a tool, on the folders you allow; approve a Blender script
   crate mcp         the Crate's tools as an MCP server for the agent (turned-on tools only)
+  woodshed          the Woodshed (training): your local models get better at their parts from your best takes
+  woodshed on|off BAND
+                    start or stop keeping a band's judged takes (off until you say; `default` is the usual chat)
+  woodshed status | plan [BAND] | run [BAND] [--yes] | versions [BAND]
+                    what has been kept, what a run would do, the nightly run (asks y/N; trains only on a quiet
+                    machine of your own Fleet), and every version kept
+  woodshed promote [BAND] [--yes] | rollback [BAND] | rehearse [BAND]
+                    put a version that passed its Rehearsal to work, go back, or score the newest one again
+  woodshed lessons [BAND] [--add TEXT | --edit ID TEXT | --retire ID | --restore ID]
+                    the short notes that go into a band's prompt: read them, change them (nothing is deleted)
+  woodshed reflect [BAND] [--from FILE]
+                    learn new lessons from judged takes, with a local model or a file your own cloud model wrote
+  woodshed set BAND base|hf VALUE | allow-cloud-text on|off
+                    the model a band is trained on; whether text a cloud model wrote may be trained on (off)
+  woodshed mix [show | base PATH | add NAME [PATH] | start | set TARGET name=scale ... | check | global ...]
+                    llama-server with LoRA adapters loaded and a fader per band or part, moved live
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1933,6 +1950,8 @@ pub enum Cmd {
     Fleet(fleet::FleetCmd),
     /// `crate ...`: The Crate, a bank of free tools Tempo can set up and play.
     Crate(bank::BankCmd),
+    /// `woodshed ...`: lessons, nightly LoRA training, and the Mix (see docs/WOODSHED.md).
+    Woodshed(woodshed::WoodCmd),
     Help,
     Version,
 }
@@ -2072,6 +2091,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
         "fleet" => Cmd::Fleet(fleet::parse_args(&rest)?),
         "crate" => Cmd::Crate(bank::parse_args(&rest)?),
+        "woodshed" => Cmd::Woodshed(woodshed::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2140,6 +2160,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
         Cmd::Fleet(f) => Ok(fleet::run(ctx, f)),
         Cmd::Crate(c) => Ok(bank::run(ctx, c)),
+        Cmd::Woodshed(w) => Ok(woodshed::run(ctx, w)),
         Cmd::Schedule {
             remove,
             print,

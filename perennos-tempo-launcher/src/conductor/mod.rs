@@ -96,6 +96,21 @@ pub trait Chat {
         self.say(model, role, text)
             .map(|text| Said { text, engine: None })
     }
+
+    /// `say_on`, for the part `part` of band `band`: the agent puts the band's lessons in the
+    /// part's prompt and picks its LoRA faders by the names. A stand-in keeps this default.
+    fn say_for(
+        &self,
+        band: &str,
+        part: &str,
+        engine: &str,
+        model: &str,
+        role: &str,
+        text: &str,
+    ) -> Result<Said, String> {
+        let _ = (band, part);
+        self.say_on(engine, model, role, text)
+    }
 }
 
 /// An answer and, when the agent said so, the address of the engine that gave it.
@@ -636,13 +651,24 @@ fn run_flow_cmd(ctx: &Ctx, cmd: ConductorCmd, d: &Deps, out: &mut dyn Write) -> 
     let ConductorCmd::Run { band, flow, note } = cmd else {
         return 2;
     };
-    let band = match load(ctx, &band) {
+    let mut band = match load(ctx, &band) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("tempo-launch: {e}");
             return 1;
         }
     };
+    // a model the Woodshed trained for this band plays the parts that played its base model
+    let tuned = crate::woodshed::apply_tuned(ctx, &mut band);
+    if !tuned.is_empty() {
+        let _ = writeln!(
+            out,
+            "The Woodshed's version of {} plays for: {}. (`tempo-launch woodshed rollback {}` goes back.)",
+            band.name,
+            tuned.join(", "),
+            band.name
+        );
+    }
     let names: Vec<&str> = band.flows.iter().map(|f| f.name.as_str()).collect();
     let chosen = match flow.as_deref() {
         Some(f) => band.flow(f),

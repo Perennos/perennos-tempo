@@ -103,6 +103,9 @@ pub struct Config {
     /// More Ollama addresses (your other machines), used in this order when `ollama_url` cannot
     /// be reached; a conversation stays on the engine that served it last.
     pub ollama_fallbacks: Vec<String>,
+    /// Addresses of llama-server engines (OpenAI-compatible, with LoRA adapters loaded). A band's
+    /// part with faders set (`mix/faders.json`) plays on the first one; chats without tools only.
+    pub llama_servers: Vec<String>,
     pub data_dir: PathBuf,
     pub models: Vec<String>,
     pub fast_models: Vec<String>,
@@ -254,6 +257,7 @@ impl Config {
         Config {
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_fallbacks: vec![],
+            llama_servers: vec![],
             models: vec!["local-heavy".into()],
             fast_models: vec!["local-fast".into()],
             num_ctx: BTreeMap::new(),
@@ -336,6 +340,13 @@ impl Config {
         }
         if let Some(x) = strs(v, "ollama_fallbacks") {
             c.ollama_fallbacks = x
+                .into_iter()
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                .collect();
+        }
+        if let Some(x) = strs(v, "llama_servers") {
+            c.llama_servers = x
                 .into_iter()
                 .map(|u| u.trim().trim_end_matches('/').to_string())
                 .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
@@ -602,6 +613,7 @@ impl Config {
         }
         std::iter::once(&self.ollama_url)
             .chain(&self.ollama_fallbacks)
+            .chain(&self.llama_servers)
             .chain(self.hosts.values().flat_map(|h| &h.urls))
             .find(|u| u.trim_end_matches('/') == want)
             .cloned()

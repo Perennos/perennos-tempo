@@ -168,7 +168,27 @@ impl Agent {
         engine: &str,
         schema: &str,
     ) -> Result<String, String> {
+        self.new_guest_for(model, role, engine, schema, "", "")
+    }
+
+    /// `new_guest_with`, for the part `part` of band `band` (empty: none). An older agent does not
+    /// read the two names and plays the part as it always did.
+    pub fn new_guest_for(
+        &self,
+        model: &str,
+        role: &str,
+        engine: &str,
+        schema: &str,
+        band: &str,
+        part: &str,
+    ) -> Result<String, String> {
         let mut body = format!("{{\"mode\":\"guest\",\"role\":\"{}\"", json_escape(role));
+        if !band.is_empty() {
+            body.push_str(&format!(",\"band\":\"{}\"", json_escape(band)));
+            if !part.is_empty() {
+                body.push_str(&format!(",\"part\":\"{}\"", json_escape(part)));
+            }
+        }
         if !model.is_empty() {
             body.push_str(&format!(",\"model\":\"{}\"", json_escape(model)));
         }
@@ -256,10 +276,23 @@ impl Chat for Agent {
     /// refuses the address (its settings do not list it) is asked again without it, so the part
     /// is still played, on the agent's own order.
     fn say_on(&self, engine: &str, model: &str, role: &str, text: &str) -> Result<Said, String> {
+        self.say_for("", "", engine, model, role, text)
+    }
+
+    fn say_for(
+        &self,
+        band: &str,
+        part: &str,
+        engine: &str,
+        model: &str,
+        role: &str,
+        text: &str,
+    ) -> Result<Said, String> {
         let pin = !engine.is_empty() && self.knows_engines();
-        let conv = match self.new_guest_on(model, role, if pin { engine } else { "" }) {
+        let engine = if pin { engine } else { "" };
+        let conv = match self.new_guest_for(model, role, engine, "", band, part) {
             Err(e) if pin && e.starts_with("the agent said: engine:") => {
-                self.new_guest(model, role)?
+                self.new_guest_for(model, role, "", "", band, part)?
             }
             r => r?,
         };

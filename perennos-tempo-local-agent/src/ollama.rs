@@ -97,6 +97,82 @@ pub struct Extra<'a> {
     pub keep_alive: Option<&'a str>,
     /// The conversation, so its context size only ever steps up.
     pub conv: Option<&'a str>,
+    /// LoRA scales for this request, `[{"id":0,"scale":1.0}]`: only a llama-server engine takes
+    /// them (see `mix_for`); Ollama never sees the field.
+    pub lora: Option<&'a Value>,
+}
+
+/// The llama-server engine and the LoRA scales a band's part plays with right now, when the
+/// owner set both up (`llama_servers` in the settings, faders in `mix/faders.json`).
+pub fn mix_for(cfg: &Config, band: Option<&str>, part: Option<&str>) -> Option<(String, Value)> {
+    let url = cfg.llama_servers.first()?.clone();
+    band?;
+    Some((url, crate::woodshed::faders(&cfg.data_dir, band, part)?))
+}
+
+fn is_llama(cfg: &Config, engine: &str) -> bool {
+    let want = engine.trim_end_matches('/');
+    cfg.llama_servers
+        .iter()
+        .any(|u| u.trim_end_matches('/') == want)
+}
+
+/// One request to a llama-server engine through its OpenAI-compatible chat endpoint, answered in
+/// one piece. `lora` goes in the body as llama.cpp's server README documents it for `/completion`
+/// (`"lora": [{"id": 0, "scale": 0.5}]`; an adapter left out of the list runs at 0). The README
+/// says the chat endpoint also takes `/completion`'s own options, but it was not run against a
+/// real llama-server here: the tests use a stand-in that checks the body.
+fn chat_llama(
+    cfg: &Config,
+    engine: &str,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    extra: &Extra,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<ChatResult, String> {
+    if !tools.is_empty() {
+        return Err("a llama-server engine takes chats without tools".into());
+    }
+    let mut body = json!({"model": model, "messages": messages, "stream": false,
+        "temperature": cfg.temperature});
+    if let Some(l) = extra.lora {
+        body["lora"] = l.clone();
+    }
+    if let Some(f) = extra.format {
+        body["response_format"] = json!({"type": "json_object", "schema": f});
+    }
+    let t0 = Instant::now();
+    let v = util::http_json(
+        &format!("{}/v1/chat/completions", engine.trim_end_matches('/')),
+        Some(&body),
+        Duration::from_secs(cfg.chat_timeout_s),
+    )?;
+    let text = v["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("llama-server answered without text")?
+        .to_string();
+    if !text.is_empty() {
+        on_text(&text);
+    }
+    let total = t0.elapsed().as_secs_f64();
+    let info = ChatInfo {
+        model: model.to_string(),
+        engine: None,
+        served_by: engine.to_string(),
+        failover: None,
+        first_s: r2(total),
+        total_s: r2(total),
+        load_s: 0.0,
+        prompt_tok: v["usage"]["prompt_tokens"].as_u64(),
+        prompt_s: 0.0,
+        out_tok: v["usage"]["completion_tokens"].as_u64(),
+    };
+    log_timing(cfg, &info);
+    Ok(ChatResult {
+        message: json!({"role": "assistant", "content": text}),
+        info,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -477,6 +553,9 @@ fn chat_raw(
     extra: &Extra,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
+    if is_llama(cfg, engine) {
+        return chat_llama(cfg, engine, model, messages, tools, extra, on_text);
+    }
     let num_ctx = num_ctx_for_request(cfg, engine, model, messages, tools, extra.conv);
     let mut body = json!({"model": model, "messages": messages, "stream": true,
         "keep_alive": extra.keep_alive.unwrap_or(&cfg.keep_alive),
@@ -870,6 +949,7 @@ mod tests {
             format: Some(&schema),
             keep_alive: Some("0"),
             conv: None,
+            lora: None,
         };
         chat_pooled_with(
             &c,
