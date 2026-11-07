@@ -602,6 +602,12 @@ impl Agent {
             // none are offered; a model that calls one anyway gets nothing done
             return "tools are off in this conversation (a guest room)".into();
         }
+        // the owner's hooks: a before_tool hook may stop the call, an after_tool hook's output
+        // joins the result
+        let notes = match self.env.hook_before(conv, name, args) {
+            Ok(n) => n,
+            Err(blocked) => return cap(&blocked, RESULT_CAP),
+        };
         let r = if Env::is_builtin(name) {
             self.env.run_builtin(conv, name, args)
         } else if let Some((srv, tn)) = route.get(name) {
@@ -633,7 +639,15 @@ impl Agent {
         } else {
             format!("unknown tool {name}")
         };
-        cap(&r, RESULT_CAP)
+        let after = self.env.hook_after(conv, name, args, &r);
+        if notes.is_empty() && after.is_empty() {
+            cap(&r, RESULT_CAP)
+        } else {
+            cap(
+                &format!("{notes}{}{after}", cap(&r, RESULT_CAP)),
+                RESULT_CAP + 6000,
+            )
+        }
     }
 
     /// One user turn. Returns the final assistant text. Streams text to `sink` as it arrives.
@@ -671,6 +685,11 @@ impl Agent {
                 "changed this turn: {} (/diff shows it, /undo puts it back)",
                 changed.join(", ")
             );
+            conv.emit("status", &m);
+            sink.status(&m);
+        }
+        let reply = r.as_deref().unwrap_or_else(|e| e.as_str());
+        for m in self.env.hooks_after_turn(conv, &changed, reply) {
             conv.emit("status", &m);
             sink.status(&m);
         }
@@ -1155,7 +1174,12 @@ impl Agent {
                 );
                 // sorted keys: serde_json's default Map is a BTreeMap, so to_string() is key-sorted
                 let key = format!("{name}{args}");
-                if let Some(seen) = conv.seen_calls.get_mut(&key) {
+                // a background command's output changes while it runs: reading it again is not a loop
+                if let Some(seen) = conv
+                    .seen_calls
+                    .get_mut(&key)
+                    .filter(|_| name != "command_output")
+                {
                     seen.1 += 1;
                     let r = format!("You already ran this exact call (x{}). Its result was:\n{}\nUse that result: take the next step or give the final answer. Do not repeat it.", seen.1, head_chars(&seen.0, 1500));
                     conv.emit("tool_result", &format!("{name}: (repeat skipped)"));
@@ -1223,6 +1247,86 @@ mod tests {
         let conv = Conv::open(&c, Some("c1")).unwrap();
         let env = Env::new(c.clone(), Box::new(DenyAll), McpHost::empty(&c));
         (Agent::new(env), conv)
+    }
+
+    fn hooks(v: Value) -> crate::config::Hooks {
+        Config::from_json(&json!({ "hooks": v }), None)
+            .unwrap()
+            .hooks
+    }
+
+    fn tool_results(conv: &Conv) -> Vec<String> {
+        conv.messages
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn hooks_stop_calls_and_add_to_results() {
+        let (block, tell) = if cfg!(windows) {
+            (
+                "Write-Output not-today; exit 2",
+                "Write-Output \"checked $env:TEMPO_CONVERSATION $((ConvertFrom-Json $env:TEMPO_HOOK_EVENT).tool)\"",
+            )
+        } else {
+            (
+                "echo not-today; exit 2",
+                "echo \"checked $TEMPO_CONVERSATION $(echo \"$TEMPO_HOOK_EVENT\" | grep -o workflow_update | head -n 1)\"",
+            )
+        };
+        let m = Mock::start(chat_script(vec![
+            call_resp("run_command", json!({"command": "echo hi"})),
+            call_resp("workflow_update", json!({"note": "n"})),
+            text_resp("done"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.hooks = hooks(json!({
+                "before_tool": [{"match": "run_command", "command": block}],
+                "after_tool": [{"match": "workflow_update", "command": tell}]}));
+        });
+        let r = a
+            .turn(&mut conv, "please read the file", &mut VecSink::default())
+            .unwrap();
+        assert_eq!(r, "done");
+        let t = tool_results(&conv);
+        assert_eq!(t[0], "blocked by the owner's hook: not-today");
+        assert!(
+            t[1].ends_with("\n[hook] checked c1 workflow_update"),
+            "{}",
+            t[1]
+        );
+    }
+
+    #[test]
+    fn after_turn_hooks_run_for_the_owner_only() {
+        let mark = tmpdir("hookmark").join("mark.txt");
+        let cmd = if cfg!(windows) {
+            format!("Add-Content -Path '{}' -Value ran", mark.display())
+        } else {
+            format!("echo ran >> '{}'", mark.display())
+        };
+        let m = Mock::start(chat_script(vec![
+            text_resp("one"),
+            text_resp("two"),
+            text_resp("three"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.hooks = hooks(json!({"after_turn": [{"command": cmd}]}));
+        });
+        let mut sink = VecSink::default();
+        a.turn(&mut conv, "please read the file", &mut sink)
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&mark).unwrap().trim(), "ran");
+        // plan mode changes nothing; a guest room runs nothing of the owner's
+        conv.permission = Permission::Plan;
+        let _ = a.turn(&mut conv, "please read the file", &mut sink);
+        conv.permission = Permission::Default;
+        conv.guest = true;
+        let _ = a.turn(&mut conv, "please read the file", &mut sink);
+        assert_eq!(std::fs::read_to_string(&mark).unwrap().trim(), "ran");
+        assert!(!sink.status.iter().any(|s| s.contains("failed")));
     }
 
     fn chat_models(m: &Mock) -> Vec<String> {

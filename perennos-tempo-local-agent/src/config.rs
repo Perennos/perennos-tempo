@@ -13,6 +13,90 @@ pub struct HostCfg {
     pub trust_reads: bool,
 }
 
+/// A command the owner runs around Tempo's own steps (`hooks` in the settings file). Hooks come
+/// only from the agent's own settings, never from a project's files or a pack: what runs at
+/// every step is the owner's choice alone.
+#[derive(Clone, Debug)]
+pub struct Hook {
+    /// The tools it runs for (a regex the whole tool name must match); None: every tool.
+    pub matcher: Option<regex::Regex>,
+    pub command: String,
+    pub timeout_s: f64,
+}
+
+impl Hook {
+    pub fn matches(&self, tool: &str) -> bool {
+        self.matcher.as_ref().is_none_or(|m| m.is_match(tool))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Hooks {
+    /// Before a tool runs: exit code 2 stops the call, and what the hook printed is the result.
+    pub before_tool: Vec<Hook>,
+    /// After a tool ran: what the hook printed is added to the result the model reads.
+    pub after_tool: Vec<Hook>,
+    /// After each turn the model answered.
+    pub after_turn: Vec<Hook>,
+}
+
+/// `"hooks": {"before_tool": [{"match": "run_command", "command": "...", "timeout_s": 30}], ...}`.
+/// A hook that cannot be understood is an error, never skipped: it may be a check the owner
+/// relies on.
+fn parse_hooks(v: &Value, default_timeout: f64) -> Result<Hooks, String> {
+    let mut h = Hooks::default();
+    let Some(m) = v.get("hooks").filter(|x| !x.is_null()) else {
+        return Ok(h);
+    };
+    let m = m.as_object().ok_or("hooks must be an object")?;
+    for (k, list) in m {
+        let slot = match k.as_str() {
+            "before_tool" => &mut h.before_tool,
+            "after_tool" => &mut h.after_tool,
+            "after_turn" => &mut h.after_turn,
+            other => {
+                return Err(format!(
+                    "hooks: unknown event \"{other}\" (before_tool, after_tool, after_turn)"
+                ))
+            }
+        };
+        let list = list
+            .as_array()
+            .ok_or_else(|| format!("hooks.{k} must be a list"))?;
+        for (i, e) in list.iter().enumerate() {
+            let command = e
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| format!("hooks.{k}[{i}] has no command"))?;
+            let matcher = match e
+                .get("match")
+                .or_else(|| e.get("matcher"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+            {
+                None | Some("") | Some("*") => None,
+                Some(p) => Some(
+                    regex::Regex::new(&format!("^(?:{p})$"))
+                        .map_err(|err| format!("hooks.{k}[{i}] match: {err}"))?,
+                ),
+            };
+            let timeout_s = e
+                .get("timeout_s")
+                .and_then(Value::as_f64)
+                .unwrap_or(default_timeout)
+                .clamp(1.0, 600.0);
+            slot.push(Hook {
+                matcher,
+                command: command.to_string(),
+                timeout_s,
+            });
+        }
+    }
+    Ok(h)
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub ollama_url: String,
@@ -50,6 +134,10 @@ pub struct Config {
     pub protect_regex: Option<String>,
     pub command_cwd: PathBuf,
     pub command_timeout_s: f64,
+    /// Commands run before and after tools and after turns (`hooks`).
+    pub hooks: Hooks,
+    /// How long a hook may run when it does not say (`timeout_s`), in seconds.
+    pub hook_timeout_s: f64,
     pub offline_probe: String,
     /// Host names `fetch_url` may reach even though they are on this computer or its network
     /// (everything private, loopback or link-local, such as the cloud metadata address, is refused).
@@ -193,6 +281,8 @@ impl Config {
             protect_regex: None,
             command_cwd: data_dir.clone(),
             command_timeout_s: 60.0,
+            hooks: Hooks::default(),
+            hook_timeout_s: 30.0,
             offline_probe: "1.1.1.1:443".into(),
             fetch_allow_private: vec![],
             fetch_allow_hosts: vec![],
@@ -344,6 +434,10 @@ impl Config {
         if let Some(n) = num(v, "command_timeout_s") {
             c.command_timeout_s = n;
         }
+        if let Some(n) = num(v, "hook_timeout_s") {
+            c.hook_timeout_s = n.clamp(1.0, 600.0);
+        }
+        c.hooks = parse_hooks(v, c.hook_timeout_s)?;
         if let Some(x) = string(v, "offline_probe") {
             c.offline_probe = x;
         }
@@ -602,6 +696,33 @@ mod tests {
         assert_eq!(c.max_steps, 40);
         let c = Config::defaults(Some("/x/data".into()));
         assert_eq!(c.data_dir, PathBuf::from("/x/data"));
+    }
+
+    #[test]
+    fn hooks_parse_and_bad_ones_are_errors() {
+        let v = json!({"hook_timeout_s": 5, "hooks": {
+            "before_tool": [{"match": "run_command|apply_patch", "command": "check"}],
+            "after_tool": [{"matcher": "*", "command": "fmt", "timeout_s": 9000}],
+            "after_turn": [{"command": "note"}]}});
+        let c = Config::from_json(&v, None).unwrap();
+        let b = &c.hooks.before_tool[0];
+        assert!(b.matches("run_command") && b.matches("apply_patch"));
+        // the whole name must match
+        assert!(!b.matches("run_command_x") && !b.matches("my_run_command"));
+        assert_eq!(b.timeout_s, 5.0);
+        assert!(c.hooks.after_tool[0].matches("anything"));
+        assert_eq!(c.hooks.after_tool[0].timeout_s, 600.0);
+        assert_eq!(c.hooks.after_turn[0].command, "note");
+        assert!(Config::defaults(None).hooks.before_tool.is_empty());
+        for bad in [
+            json!({"hooks": {"before_tool": [{"match": "(", "command": "x"}]}}),
+            json!({"hooks": {"after_tool": [{"match": "x"}]}}),
+            json!({"hooks": {"before_tools": []}}),
+            json!({"hooks": {"after_turn": {"command": "x"}}}),
+            json!({"hooks": ["x"]}),
+        ] {
+            assert!(Config::from_json(&bad, None).is_err(), "{bad}");
+        }
     }
 
     #[test]
