@@ -59,7 +59,7 @@ The API exposes `GET /health`, authenticated `GET /v1/models`, and authenticated
 
 ### API token
 
-The gateway stores its token at `<data-folder>/ledger/gateway-token`. Keep the data folder under the same OS account that runs the gateway. Never print, paste, screenshot, commit, or place the token in a command-line argument or shared client configuration. A compatible local client should read the file inside its own process and set the bearer header without displaying the value. The MCP adapter does this itself.
+The gateway stores its token at `<data-folder>/ledger/gateway-token` (the folder keeps this older name; it holds your run records). Keep the data folder under the same OS account that runs the gateway. Never print, paste, screenshot, commit, or place the token in a command-line argument or shared client configuration. A compatible local client should read the file inside its own process and set the bearer header without displaying the value. The MCP adapter does this itself.
 
 Example for a local Python client, using a path you choose and without printing the token:
 
@@ -118,6 +118,6 @@ Keep the endpoint on loopback. Do not expose it through Docker, a firewall rule,
 
 ## Data and removal
 
-Conversation data, setup settings, profiles, receipts, and ledgers are stored under the selected data folder. That folder is a namespace, not an OS security boundary. This core has no automated uninstaller or verified recovery path; back up the data folder before manual removal. Keep application files, private data, and model files in separate folders.
+Conversation data, setup settings, profiles, receipts, and run records are stored under the selected data folder. That folder is a namespace, not an OS security boundary. This core has no automated uninstaller or verified recovery path; back up the data folder before manual removal. Keep application files, private data, and model files in separate folders.
 
 For current profile behavior, see [PROFILES-README.md](PROFILES-README.md). For deployment limits, see [DEPLOYMENT-OPTIONS.md](DEPLOYMENT-OPTIONS.md). The public core does not include office/customer packs, desks, approvals UX, Cayman verticals, or the private resident adapter.

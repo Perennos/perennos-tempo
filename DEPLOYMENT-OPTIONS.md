@@ -4,7 +4,7 @@ The public core runs under one user on one local machine. Check the matching Git
 
 ## Local deployment
 
-Run the desktop application or headless API under one OS account with its own `TEMPO_HOME`, local engine, and ledger. The HTTP gateway binds to `127.0.0.1`. The MCP adapter is a local stdio process that calls that loopback gateway.
+Run the desktop application or headless API under one OS account with its own `TEMPO_HOME`, local engine, and records. The HTTP gateway binds to `127.0.0.1`. The MCP adapter is a local stdio process that calls that loopback gateway.
 
 For separate owners, use separate OS accounts or machines. Separate `TEMPO_HOME` folders alone do not isolate OS processes or files. Keep application, data, and model folders separate.
 

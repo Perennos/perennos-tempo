@@ -11,13 +11,13 @@ Each program picks the first of these that applies:
 | Step | What | Windows | Linux and macOS |
 | --- | --- | --- | --- |
 | 1 | You said so: the `TEMPO_HOME` variable, if it is set and not empty. `PERENNOS_TEMPO_DATA` is the older name for the same thing and is checked second. | your folder | your folder |
-| 2 | An older Tempo folder, but only if it already exists | `C:\LocalAI\apps\decision-head` | `$XDG_STATE_HOME/perennos-tempo`, or `~/.local/state/perennos-tempo` |
+| 2 | An older Tempo folder, but only if it already exists | the folder named by `TEMPO_LEGACY_HOME`, if set | `TEMPO_LEGACY_HOME` if set, else `$XDG_STATE_HOME/perennos-tempo`, or `~/.local/state/perennos-tempo` |
 | 3 | The default | `%LOCALAPPDATA%\Perennos Tempo` | `~/.tempo` |
 
 Why each step is there:
 
 1. **You said so.** If you pin a folder, it always wins, on every program, so you can put it on another drive or share it between accounts.
-2. **An older folder.** An earlier Perennos Tempo on Windows kept its data in `C:\LocalAI\apps\decision-head`, with its receipts and `engines.json`. On Linux and macOS an earlier version kept it in the state folder. Using those when they exist means nobody loses sight of their data on the day they update. The check is "does the folder exist"; an empty folder counts, so make sure an old folder you no longer want is gone (move it to the trash) before you update.
+2. **An older folder.** If an earlier Perennos Tempo kept its data in a folder of its own, point `TEMPO_LEGACY_HOME` at it (receipts and `engines.json` live there). On Linux and macOS an earlier version kept it in the state folder. Using those when they exist means nobody loses sight of their data on the day they update. The check is "does the folder exist"; an empty folder counts, so make sure an old folder you no longer want is gone (move it to the trash) before you update.
 3. **The default.** A new machine gets one clean place, in the usual spot for the operating system.
 
 ## What lives in it

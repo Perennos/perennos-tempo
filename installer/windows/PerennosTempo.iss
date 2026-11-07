@@ -348,8 +348,8 @@ end;
 
 { ---- the Tempo home: the same rule as tempo-launch, Room, the CLI and the agent (docs/TEMPO-HOME.md)
   1. TEMPO_HOME, if set and not empty; PERENNOS_TEMPO_DATA (the older name) second.
-  2. Else C:\LocalAI\apps\decision-head (where an earlier Perennos Tempo kept its data), only if
-     that folder already exists.
+  2. Else the folder named by TEMPO_LEGACY_HOME (where an earlier Perennos Tempo kept its data),
+     only if that folder already exists.
   3. Else %LOCALAPPDATA%\Perennos Tempo.
   Nothing is created or moved here. The variables are read from this process, else from the user's
   saved environment (a value with a %VAR% in it is not expanded, so it is ignored there). }
@@ -371,9 +371,8 @@ begin
     Result := RemoveBackslashUnlessRoot(Trim(EnvValue('PERENNOS_TEMPO_DATA')));
   if Result = '' then
   begin
-    if DirExists('C:\LocalAI\apps\decision-head') then
-      Result := 'C:\LocalAI\apps\decision-head'
-    else
+    Result := RemoveBackslashUnlessRoot(Trim(EnvValue('TEMPO_LEGACY_HOME')));
+    if (Result = '') or (not DirExists(Result)) then
       Result := ExpandConstant('{localappdata}\{#AppName}');
   end;
 end;
