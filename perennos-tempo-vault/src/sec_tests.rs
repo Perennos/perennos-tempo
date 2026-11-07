@@ -321,10 +321,20 @@ mod hostile_markdown {
     #[test]
     fn sec_hostile_notes_render_inert() {
         let d = tmp("xss");
-        put(&d, "evil name\" onmouseover=\"alert(1).md", "x");
-        put(&d, "a.md", "x");
-        put(&d, "img/p\" onerror=\"alert(1).png", "PNG");
-        put(&d, "x.html", "<script>alert(1)</script>");
+        // Windows cannot hold a `"` in a file name, so there those notes do not exist and the
+        // links to them stay unresolved; every payload below must still render inert.
+        let can_hold =
+            |rel: &str| !cfg!(windows) || !rel.contains(['"', '<', '>', ':', '|', '?', '*']);
+        for (rel, body) in [
+            ("evil name\" onmouseover=\"alert(1).md", "x"),
+            ("a.md", "x"),
+            ("img/p\" onerror=\"alert(1).png", "PNG"),
+            ("x.html", "<script>alert(1)</script>"),
+        ] {
+            if can_hold(rel) {
+                put(&d, rel, body);
+            }
+        }
         let v = Vault::open(&d).unwrap();
         let payloads = [
             "<script>alert(1)</script>",

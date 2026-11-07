@@ -428,7 +428,11 @@ fn mcp_server_over_stdin_and_stdout() {
     assert!(!err, "{r:#}");
     assert_eq!(r["within_target"], true);
     let out = root.join("song-master.wav");
-    assert_eq!(r["path"], out.display().to_string());
+    // reports carry plain paths; on Windows `root` is verbatim (\\?\C:\...) from canonicalize
+    assert_eq!(
+        r["path"],
+        tempo_studio::util::strip_verbatim(&out.display().to_string())
+    );
     let (_, a) = m.call(
         5,
         "studio_analyze",

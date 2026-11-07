@@ -153,11 +153,19 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
         return f;
     }
     let s = |p: &Path| p.to_string_lossy().into_owned();
+    // the home folder from the same environment as everything else here (tests give their own)
+    let home = || {
+        ["HOME", "USERPROFILE"]
+            .iter()
+            .filter_map(|k| getenv(k))
+            .find(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
     // Vault: the notes, read and (by default) written through history snapshots.
     let vault = getenv("TEMPO_VAULT")
         .filter(|v| !v.trim().is_empty())
         .or_else(|| cfg.vault.clone())
-        .map(|v| expand_home(&v, home_dir()));
+        .map(|v| expand_home(&v, home()));
     match (find_bin("tempo-vault", dirs), vault) {
         (Some(b), Some(v)) if v.is_dir() => {
             let mut args = vec!["mcp".to_string()];
@@ -184,9 +192,9 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
                 None if !cfg.studio_roots.is_empty() => cfg
                     .studio_roots
                     .iter()
-                    .map(|r| expand_home(r, home_dir()))
+                    .map(|r| expand_home(r, home()))
                     .collect(),
-                None => home_dir().map(|h| h.join("Music")).into_iter().collect(),
+                None => home().map(|h| h.join("Music")).into_iter().collect(),
             };
         roots.retain(|r| r.is_dir());
         if roots.is_empty() {

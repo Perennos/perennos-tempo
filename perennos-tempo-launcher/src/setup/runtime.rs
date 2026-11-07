@@ -1230,7 +1230,7 @@ pub mod tests {
         let pins = test_pins();
         let (r, said) = run_install(&home, &host, &dl, &pins);
         let o = r.unwrap();
-        let folder = home.join("runtime/ollama-0.40.6");
+        let folder = home.join("runtime").join("ollama-0.40.6");
         assert_eq!(o.binary, folder.join("bin/ollama"));
         assert!(o.binary.is_file());
         // fetched into <file>.part, the pinned url, a long limit
@@ -1280,9 +1280,10 @@ pub mod tests {
         assert_eq!(j.str("version"), Some("0.40.6"));
         assert_eq!(j.str("sha256"), Some(pins.files[2].sha256.as_str()));
         assert_eq!(j.str("file"), Some("ollama-linux-amd64.tar.zst"));
+        // compared as text, so built with joins (Windows separates with a backslash)
         assert_eq!(
             j.str("binary"),
-            Some(folder.join("bin/ollama").to_str().unwrap())
+            Some(folder.join("bin").join("ollama").to_str().unwrap())
         );
         assert_eq!(j.str("installed_at"), Some("2026-10-26 07:33:20Z"));
         assert_eq!(read_record(&home), Some(o));
