@@ -1,8 +1,9 @@
 //! The fleet messenger: signed frames over persistent connections, and a durable outbox and inbox.
 //!
 //! A frame is `u32 length | 32-byte HMAC-SHA256 | 64-byte Ed25519 signature | header line | body`.
-//! The header is one line of compact JSON (kind, id, from, to, topic, time, nonce); the body is raw
-//! bytes, so a picture travels without being made bigger. The MAC covers header and body and uses
+//! The header is one line of compact JSON (kind, id, from, to, topic, time, nonce, and the
+//! 96-bit seal nonce); the body is sealed with ChaCha20-Poly1305 and the header is its associated
+//! data, so the routing fields stay readable and cannot be changed. The MAC covers header and body and uses
 //! the fleet key; the signature is the sender's own identity, which the receiver pinned when the
 //! two computers paired. A frame whose MAC is wrong, from a computer that is not pinned, signed by
 //! another identity, whose clock is more than two minutes off, whose nonce was seen, or that is
@@ -14,7 +15,7 @@
 //! a retry after a lost answer is never a second message. Heartbeats are the exception: a stale
 //! one is worth nothing, so they are sent and forgotten.
 
-use super::crypto::{hmac, same};
+use super::crypto::{aead_open, aead_seal, frame_keys, hex, hmac, random, same, unhex};
 use super::store::{now_ms, now_s, Machine, Paths};
 use crate::setup::json::{parse, J};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -52,7 +53,25 @@ pub struct Frame {
     pub body: Vec<u8>,
 }
 
+/// Frames that could not be opened (wrong seal, changed header or body): dropped, never parsed.
+static UNOPENED: AtomicU64 = AtomicU64::new(0);
+
+/// How many frames have been dropped for failing to open since this program started.
+pub fn unopened() -> u64 {
+    UNOPENED.load(Ordering::Relaxed)
+}
+
 pub fn encode(key: &[u8; 32], sk: &SigningKey, f: &Frame) -> Vec<u8> {
+    build(key, sk, f, false)
+}
+
+/// The frame as bytes. The body is sealed under a fresh random 96-bit nonce that rides in the
+/// header (`x`); the header line is the associated data, so who it is from and for, the time and
+/// the id stay readable to routing but cannot be changed. `spoil` flips one bit of the sealed body
+/// before the MAC and signature are made (tests only: a frame that is well formed but does not open).
+pub(super) fn build(key: &[u8; 32], sk: &SigningKey, f: &Frame, spoil: bool) -> Vec<u8> {
+    let (mac_key, seal_key) = frame_keys(key);
+    let x: [u8; 12] = random(12).try_into().unwrap_or([0; 12]);
     let mut o = vec![
         ("k".to_string(), J::s(&f.kind.to_string())),
         ("id".into(), J::s(&f.id)),
@@ -60,6 +79,7 @@ pub fn encode(key: &[u8; 32], sk: &SigningKey, f: &Frame) -> Vec<u8> {
         ("t".into(), J::s(&f.to)),
         ("ts".into(), J::n(f.ts as f64)),
         ("n".into(), J::s(&f.nonce)),
+        ("x".into(), J::s(&hex(&x))),
     ];
     if !f.topic.is_empty() {
         o.push(("tp".into(), J::s(&f.topic)));
@@ -71,9 +91,15 @@ pub fn encode(key: &[u8; 32], sk: &SigningKey, f: &Frame) -> Vec<u8> {
         o.push(("e".into(), J::Bool(true)));
     }
     let mut payload = J::Obj(o).compact().into_bytes();
+    let mut sealed = aead_seal(&seal_key, &x, &payload, &f.body);
+    if spoil {
+        if let Some(b) = sealed.first_mut() {
+            *b ^= 1;
+        }
+    }
     payload.push(b'\n');
-    payload.extend_from_slice(&f.body);
-    let mac = hmac(key, &[&payload]);
+    payload.extend_from_slice(&sealed);
+    let mac = hmac(&mac_key, &[&payload]);
     let sig = sk.sign(&payload).to_bytes();
     let mut out = Vec::with_capacity(payload.len() + 100);
     out.extend_from_slice(&((payload.len() + 96) as u32).to_be_bytes());
@@ -110,7 +136,8 @@ pub fn read_frame(r: &mut impl Read, key: &[u8; 32], pins: Pins) -> Result<Frame
         .map_err(|_| Bad::Refused("short frame"))?;
     let (mac, rest) = buf.split_at(32);
     let (sig, payload) = rest.split_at(64);
-    if !same(mac, &hmac(key, &[payload])) {
+    let (mac_key, seal_key) = frame_keys(key);
+    if !same(mac, &hmac(&mac_key, &[payload])) {
         return Err(Bad::Refused("wrong key"));
     }
     let nl = payload
@@ -126,6 +153,16 @@ pub fn read_frame(r: &mut impl Read, key: &[u8; 32], pins: Pins) -> Result<Frame
     let sig = Signature::from_slice(sig).map_err(|_| Bad::Refused("signature"))?;
     vk.verify(payload, &sig)
         .map_err(|_| Bad::Refused("wrong identity"))?;
+    // from here the header is trusted to be the sender's; the body is read only if it opens
+    let opened = h
+        .str("x")
+        .and_then(unhex)
+        .and_then(|x| <[u8; 12]>::try_from(x).ok())
+        .and_then(|x| aead_open(&seal_key, &x, &payload[..nl], &payload[nl + 1..]));
+    let Some(body) = opened else {
+        UNOPENED.fetch_add(1, Ordering::Relaxed);
+        return Err(Bad::Refused("did not open"));
+    };
     Ok(Frame {
         kind: h.str("k").and_then(|k| k.chars().next()).unwrap_or('?'),
         id: s("id"),
@@ -136,7 +173,7 @@ pub fn read_frame(r: &mut impl Read, key: &[u8; 32], pins: Pins) -> Result<Frame
         nonce: s("n"),
         created: h.f64("c").unwrap_or(0.0) as u64,
         eph: h.bool("e").unwrap_or(false),
-        body: payload[nl + 1..].to_vec(),
+        body,
     })
 }
 

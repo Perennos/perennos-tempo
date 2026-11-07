@@ -26,6 +26,43 @@ pub fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     outer.finish()
 }
 
+/// HKDF-SHA256 (RFC 5869), one 32-byte output: extract with `salt`, expand with `info`. The one
+/// block is all pairing needs, so this stops at T(1).
+pub fn hkdf32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
+    let prk = hmac(salt, &[ikm]);
+    hmac(&prk, &[info, &[1]])
+}
+
+/// The two keys a frame uses, both from the fleet key and told apart by their labels: one
+/// authenticates (HMAC), one seals the body (ChaCha20-Poly1305). A new fleet key gives two new
+/// ones; nothing is stored.
+pub fn frame_keys(fleet_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let salt = b"tempo-fleet-frame-v2";
+    (
+        hkdf32(salt, fleet_key, b"frame mac"),
+        hkdf32(salt, fleet_key, b"frame seal"),
+    )
+}
+
+/// ChaCha20-Poly1305: `pt` sealed under `key` and a 96-bit `nonce` that is never used twice,
+/// with `aad` authenticated but left readable.
+pub fn aead_seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], pt: &[u8]) -> Vec<u8> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    ChaCha20Poly1305::new(Key::from_slice(key))
+        .encrypt(Nonce::from_slice(nonce), Payload { msg: pt, aad })
+        .unwrap_or_default()
+}
+
+/// The plain text, or None when the key, nonce, aad or a single bit of `ct` is not what sealed it.
+pub fn aead_open(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ct: &[u8]) -> Option<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    ChaCha20Poly1305::new(Key::from_slice(key))
+        .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad })
+        .ok()
+}
+
 /// Equal without stopping at the first difference.
 pub fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
@@ -111,6 +148,20 @@ mod tests {
                 &[b"Test Using Larger Than Block-Size Key - Hash Key First"]
             )),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn hkdf_matches_rfc_5869_case_1() {
+        let okm = hkdf32(
+            &unhex("000102030405060708090a0b0c").unwrap(),
+            &[0x0bu8; 22],
+            &unhex("f0f1f2f3f4f5f6f7f8f9").unwrap(),
+        );
+        // the first 32 of the RFC's 42 output bytes
+        assert_eq!(
+            hex(&okm),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
         );
     }
 

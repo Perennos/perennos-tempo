@@ -24,6 +24,12 @@ getrandom = "0.2"
 spake2 = "0.4"
 chacha20poly1305 = "0.10"
 ed25519-dalek = "2"
+# Post-quantum half of pairing (ML-KEM-768, FIPS 203): RustCrypto's pure-Rust crate, Apache-2.0 or MIT,
+# no C and no unsafe to build. The one new crate for it; rand_core is already in its tree and only
+# lends the trait our random source plugs into. Not independently audited yet, which is why pairing
+# mixes it with SPAKE2 instead of trusting it alone.
+ml-kem = "0.3.4"
+rand_core = "0.10"
 
 # Elliptic-curve maths is unusably slow unoptimized (milliseconds a signature): keep it fast in
 # test and debug builds too, so the messenger's numbers there mean something.

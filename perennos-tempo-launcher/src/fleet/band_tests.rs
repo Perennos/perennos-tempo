@@ -159,6 +159,35 @@ fn a_wrong_code_fails_and_three_wrong_tries_burn_the_invitation() {
 }
 
 #[test]
+fn a_tampered_ml_kem_ciphertext_fails_closed() {
+    let (main, new) = main_and_new("kem-tamper");
+    let inv = pair::create_invite(&main.paths, store::now_s()).unwrap();
+    let addr = addr_of(&main);
+    let join = |see: &dyn Fn(&mut Vec<u8>)| {
+        pair::join_with(&new, addr, &inv.code, "box", 0, &engine_probe(), see)
+    };
+    // one bit of the ciphertext changed after it was opened: the right code, the wrong key
+    let e = join(&|ct| ct[0] ^= 1).unwrap_err();
+    assert!(e.contains("did not line up"), "{e}");
+    assert!(
+        store::load(&main.paths).machines.is_empty(),
+        "nothing was added"
+    );
+    assert!(
+        store::read_key(&new).is_none(),
+        "no fleet key was handed over"
+    );
+    // a ciphertext of the wrong shape is refused outright
+    let e = join(&|ct| ct.truncate(10)).unwrap_err();
+    assert!(e.contains("not ML-KEM-768"), "{e}");
+    assert!(store::load(&main.paths).machines.is_empty());
+    // the slips cost tries (two of three) but did not spend the code: an honest run still works
+    assert!(pair::invite_open(&main.paths));
+    assert!(join(&|_| {}).is_ok());
+    assert_eq!(store::load(&main.paths).machines.len(), 1);
+}
+
+#[test]
 fn an_expired_or_used_code_fails() {
     let (main, new) = main_and_new("old");
     // ten minutes and a second ago

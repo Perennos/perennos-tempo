@@ -7,14 +7,53 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
+/// A test's scratch folder, removed when the test's thread ends (every test gets its own
+/// thread), so a run leaves nothing behind. A `Rig` and every `paths()` live in one, and a test that
+/// drops a `Rig` to pretend the program restarted still finds its folder. It is test scratch, never user data.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+thread_local! {
+    static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Once per run: scratch folders an earlier, interrupted run left over (over 30 minutes old).
+fn sweep_stale() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let old = Duration::from_secs(30 * 60);
+        let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let stale = e.file_name().to_string_lossy().starts_with("tempo-fleet-")
+                && e.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > old);
+            if stale {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    });
+}
+
 pub fn tmp(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    sweep_stale();
     let d = std::env::temp_dir().join(format!(
         "tempo-fleet-{tag}-{}-{}",
         std::process::id(),
         N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     std::fs::create_dir_all(&d).unwrap();
+    MINE.with(|m| m.borrow_mut().push(Scratch(d.clone())));
     d
 }
 
@@ -557,6 +596,107 @@ fn a_frame_round_trips_and_a_wrong_key_or_a_flipped_byte_is_refused() {
     assert_eq!(
         read_frame(&mut &wire[..], &KEY, &|_| Some(other)),
         Err(Bad::Refused("wrong identity"))
+    );
+}
+
+fn sample() -> (Frame, SigningKey) {
+    let f = Frame {
+        kind: 'm',
+        id: "i1".into(),
+        from: "a".into(),
+        to: "b".into(),
+        topic: "note".into(),
+        ts: 5,
+        nonce: "n1".into(),
+        body: b"the plan is to meet at the old mill at noon".to_vec(),
+        ..Frame::default()
+    };
+    (f, SigningKey::from_bytes(&[5; 32]))
+}
+
+#[test]
+fn the_bytes_on_the_wire_never_contain_the_body_and_each_frame_has_its_own_seal() {
+    let (f, sk) = sample();
+    let wire = encode(&KEY, &sk, &f);
+    let has = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+    assert!(!has(&wire, &f.body), "plain text on the wire");
+    assert!(
+        !has(&wire, b"old mill"),
+        "part of the plain text on the wire"
+    );
+    // the routing fields are readable (they are the associated data), the body is not
+    assert!(has(&wire, br#""tp":"note""#));
+    // a blob piece, which is just bytes, is sealed the same way
+    let mut piece = f.clone();
+    piece.body = vec![0xAB; 256 << 10];
+    let wire = encode(&KEY, &sk, &piece);
+    assert!(!has(&wire, &piece.body[..64]));
+    assert_eq!(
+        wire.len(),
+        4 + 96 + wire_header_len(&wire) + 1 + (256 << 10) + 16
+    );
+    // the same frame twice: a new random nonce, so a different ciphertext
+    assert_ne!(encode(&KEY, &sk, &f), encode(&KEY, &sk, &f));
+    // and it opens for a pinned sender with the right key
+    let vk = sk.verifying_key();
+    let pins = |n: &str| (n == "a").then_some(vk);
+    assert_eq!(
+        read_frame(&mut &encode(&KEY, &sk, &f)[..], &KEY, &pins).unwrap(),
+        f
+    );
+}
+
+fn wire_header_len(wire: &[u8]) -> usize {
+    wire[4 + 96..].iter().position(|b| *b == b'\n').unwrap()
+}
+
+#[test]
+fn a_sealed_body_that_was_changed_does_not_open_and_is_counted_not_parsed() {
+    let (f, sk) = sample();
+    let vk = sk.verifying_key();
+    let pins = |n: &str| (n == "a").then_some(vk);
+    let before = crate::fleet::msg::unopened();
+    // well formed, right MAC, right signature, one bit of the body changed: only the seal can tell
+    let bad = crate::fleet::msg::build(&KEY, &sk, &f, true);
+    assert_eq!(
+        read_frame(&mut &bad[..], &KEY, &pins),
+        Err(Bad::Refused("did not open"))
+    );
+    assert!(crate::fleet::msg::unopened() > before);
+    // a flipped byte anywhere else is caught earlier, by the MAC
+    let mut wire = encode(&KEY, &sk, &f);
+    let at = wire.len() - 3;
+    wire[at] ^= 1;
+    assert_eq!(
+        read_frame(&mut &wire[..], &KEY, &pins),
+        Err(Bad::Refused("wrong key"))
+    );
+}
+
+#[test]
+fn a_header_is_bound_to_its_body_and_a_wrong_fleet_key_gets_nothing() {
+    let (key_a, key_b) = ([1u8; 32], [2u8; 32]);
+    let (mac_a, seal_a) = crypto::frame_keys(&key_a);
+    let (mac_b, seal_b) = crypto::frame_keys(&key_b);
+    // a rotated fleet key re-derives both, and the two never match each other
+    assert!(mac_a != mac_b && seal_a != seal_b && mac_a != seal_a);
+    let nonce = [3u8; 12];
+    let ct = crypto::aead_seal(&seal_a, &nonce, b"header-1", b"hello");
+    assert_eq!(
+        crypto::aead_open(&seal_a, &nonce, b"header-1", &ct).as_deref(),
+        Some(&b"hello"[..])
+    );
+    // the same sealed body under another header, nonce or key does not open
+    assert!(crypto::aead_open(&seal_a, &nonce, b"header-2", &ct).is_none());
+    assert!(crypto::aead_open(&seal_a, &[4u8; 12], b"header-1", &ct).is_none());
+    assert!(crypto::aead_open(&seal_b, &nonce, b"header-1", &ct).is_none());
+    // a frame made under one fleet key is refused under the other
+    let (f, sk) = sample();
+    let vk = sk.verifying_key();
+    let wire = encode(&key_a, &sk, &f);
+    assert_eq!(
+        read_frame(&mut &wire[..], &key_b, &|_| Some(vk)),
+        Err(Bad::Refused("wrong key"))
     );
 }
 

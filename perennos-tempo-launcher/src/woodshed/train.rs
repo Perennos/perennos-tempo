@@ -63,6 +63,8 @@ pub struct Planned {
     pub node: Node,
     pub built: Built,
     pub plan: Plan,
+    /// Said when the base was swapped for a smaller one that fits the machine.
+    pub note: Option<String>,
 }
 
 fn paths(ctx: &Ctx, set: &Settings, n: &Node) -> (String, String) {
@@ -103,13 +105,37 @@ pub fn plan_band(ctx: &Ctx, d: &Deps, set: &Settings, band: &str) -> Result<Plan
             "it is off. Turn it on with `tempo-launch woodshed on {band}`"
         )]);
     }
-    let base = base_of(ctx, set, band);
+    let mut base = base_of(ctx, set, band);
     if base.is_none() {
         why.push(format!("I don't know which model it plays on. Say so with `tempo-launch woodshed set {band} base qwen3:8b`"));
     }
-    let hf = base
-        .as_deref()
-        .and_then(|b| set.band_text(band, "hf").or_else(|| script::hf_for(b)));
+    // the machine decides the model: a small card or a processor trains a smaller one, or none
+    let pool: Vec<Node> = match set.text("node") {
+        Some(n) => d.nodes.iter().filter(|x| x.name == n).cloned().collect(),
+        None => d.nodes.clone(),
+    };
+    let mut chosen: Option<node::Chosen> = None;
+    match base.as_deref() {
+        Some(b) => match node::choose(&pool, b) {
+            Ok(c) => chosen = Some(c),
+            Err(e) => why.push(e),
+        },
+        None if pool.is_empty() => why.push(node::NO_NODE.into()),
+        None => {}
+    }
+    let mut note = None;
+    let mut swapped = false;
+    if let Some(c) = &chosen {
+        swapped = Some(&c.base) != base.as_ref();
+        base = Some(c.base.clone());
+        note = c.note.clone();
+    }
+    // the owner's `hf` line is for the model they named, so a swap leaves it behind
+    let hf = base.as_deref().and_then(|b| {
+        set.band_text(band, "hf")
+            .filter(|_| !swapped)
+            .or_else(|| script::hf_for(b))
+    });
     if let (Some(b), None) = (&base, &hf) {
         why.push(format!("I don't know where the weights of {b} live on Hugging Face. Say so with `tempo-launch woodshed set {band} hf <owner/name>`"));
     }
@@ -122,13 +148,7 @@ pub fn plan_band(ctx: &Ctx, d: &Deps, set: &Settings, band: &str) -> Result<Plan
             set.min_examples()
         ));
     }
-    let node = match set.text("node") {
-        Some(n) => d.nodes.iter().find(|x| x.name == n).cloned(),
-        None => node::pick(d.nodes.clone()),
-    };
-    if node.is_none() {
-        why.push("no computer in your fleet can train: it takes an NVIDIA card, or a Mac with Apple Silicon, that your own ssh reaches (`tempo-launch fleet check NAME`)".into());
-    }
+    let node = chosen.map(|c| c.node);
     match (base, hf, node, why.is_empty()) {
         (Some(base), Some(hf), Some(node), true) => {
             let plan = Plan {
@@ -147,6 +167,7 @@ pub fn plan_band(ctx: &Ctx, d: &Deps, set: &Settings, band: &str) -> Result<Plan
                 node,
                 built,
                 plan,
+                note,
             })
         }
         _ => Err(why),
@@ -170,6 +191,17 @@ fn plan_words(ctx: &Ctx, p: &Planned) -> String {
         epochs = p.plan.epochs,
         es = if p.plan.epochs == 1 { "" } else { "es" },
     );
+    if let Some(n) = &p.note {
+        s.push_str(&format!("  Fits     {n}.\n"));
+    }
+    if p.plan.backend == Backend::Cpu {
+        if let Some(b) = node::params_b(&p.base) {
+            s.push_str(&format!(
+                "  Time     {} (an estimate from the threads; Tempo has not timed it, and the real speed depends on the chip).\n",
+                node::cpu_estimate(p.plan.train_examples, p.plan.epochs, b, p.node.cores)
+            ));
+        }
+    }
     match &p.node.at {
         Where::Local => s.push_str("  Stays    everything stays on this computer.\n"),
         Where::Ssh(h) => s.push_str(&format!(
@@ -430,10 +462,10 @@ fn run_band(
         created: stamp(now),
         base: p.base.clone(),
         hf: p.hf.clone(),
-        backend: if p.plan.backend == Backend::Cuda {
-            "cuda"
-        } else {
-            "mlx"
+        backend: match p.plan.backend {
+            Backend::Cuda => "cuda",
+            Backend::Mlx => "mlx",
+            Backend::Cpu => "cpu",
         }
         .into(),
         node: p.node.name.clone(),
@@ -763,6 +795,7 @@ pub mod tests {
             gb: 24.0,
             what: "NVIDIA GeForce RTX 4090".into(),
             windows: false,
+            cores: 16,
         }
     }
 
@@ -868,6 +901,88 @@ pub mod tests {
         }
         assert!(e.log.borrow().is_empty(), "plan runs nothing");
         assert!(!versions::root(&ctx, "b").exists(), "plan writes nothing");
+    }
+
+    fn quick_plan(tag: &str, base: &str, nodes: Vec<Node>) -> String {
+        let ctx = world(tag, 50);
+        let mut set = Settings::load(&ctx);
+        set.set_band("b", "base", crate::setup::json::J::s(base));
+        set.save(&ctx, 1_800_000_001).unwrap();
+        let (e, g) = (
+            FakeExec::default(),
+            FakeGen {
+                tuned_boost: true,
+                tuned_breaks_canary: false,
+            },
+        );
+        said(|o| plan(&ctx, &deps(&e, &g, nodes), &[], o)).1
+    }
+
+    fn cpu_box(threads: u32, usable_gb: f64) -> Node {
+        Node {
+            name: "big-cpu".into(),
+            at: Where::Ssh("big-cpu".into()),
+            backend: Backend::Cpu,
+            gb: usable_gb,
+            what: format!("CPU only, {threads} threads"),
+            windows: false,
+            cores: threads,
+        }
+    }
+
+    #[test]
+    fn a_fleet_with_no_card_plans_a_small_model_on_the_processor_with_an_estimate() {
+        let text = quick_plan("t-cpu-small", "qwen3:1.7b", vec![cpu_box(16, 24.0)]);
+        for want in [
+            "big-cpu (CPU only, 16 threads, 24 GB usable)",
+            "the processor (LoRA in 16-bit",
+            "Qwen/Qwen3-1.7B",
+            "Time     about ",
+            "minutes for 42 examples (2 passes)",
+            "on 16 threads (an estimate from the threads; Tempo has not timed it",
+            "Nothing was started",
+        ] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+        assert!(
+            !text.contains("Fits"),
+            "the model it asked for fits: {text}"
+        );
+    }
+
+    #[test]
+    fn a_fleet_with_no_card_and_a_big_model_starts_nothing_and_names_the_better_tools() {
+        let text = quick_plan("t-cpu-big", "qwen3:8b", vec![cpu_box(64, 192.0)]);
+        assert!(text.contains("Not ready to practise b yet"), "{text}");
+        assert!(
+            text.contains("Tempo won't start a CPU job that size"),
+            "{text}"
+        );
+        assert!(
+            text.contains("A retune or Lessons is the better tool"),
+            "{text}"
+        );
+        assert!(!text.contains("Woodshed (training) for b"), "{text}");
+    }
+
+    #[test]
+    fn a_small_card_plans_qlora_on_the_model_that_fits_and_says_which() {
+        let mut card = cuda_node(Where::Ssh("big-box".into()));
+        card.gb = 6.0;
+        card.what = "NVIDIA GeForce RTX 3060".into();
+        let text = quick_plan("t-small-card", "qwen3:8b", vec![card]);
+        for want in [
+            "Base     qwen3:4b",
+            "Qwen/Qwen3-4B",
+            "QLoRA with TRL",
+            "Fits     qwen3:8b (8B) needs about 7 GB for QLoRA (an estimate) and big-box has 6, so this run trains qwen3:4b",
+        ] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+        assert!(
+            !text.contains("Time "),
+            "only a processor run gets a time: {text}"
+        );
     }
 
     #[test]

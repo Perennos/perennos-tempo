@@ -13,6 +13,8 @@
 pub enum Backend {
     Cuda,
     Mlx,
+    /// No graphics card to use: plain LoRA in 16-bit on the processor. Small models only.
+    Cpu,
 }
 
 impl Backend {
@@ -20,6 +22,7 @@ impl Backend {
         match self {
             Backend::Cuda => "an NVIDIA card (QLoRA with TRL)",
             Backend::Mlx => "Apple Silicon (mlx_lm.lora)",
+            Backend::Cpu => "the processor (LoRA in 16-bit with TRL, no graphics card)",
         }
     }
 }
@@ -85,7 +88,7 @@ pub fn mlx_iters(n: usize, epochs: u32) -> usize {
 /// The files written beside the data: (name, text).
 pub fn files(p: &Plan) -> Vec<(String, String)> {
     match p.backend {
-        Backend::Cuda => vec![("train.py".into(), train_py(p))],
+        Backend::Cuda | Backend::Cpu => vec![("train.py".into(), train_py(p))],
         Backend::Mlx => vec![
             ("lora.yaml".into(), lora_yaml(p)),
             ("mlx_to_peft.py".into(), MLX_TO_PEFT.into()),
@@ -99,27 +102,40 @@ fn train_py(p: &Plan) -> String {
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    // no 4-bit on a processor (bitsandbytes wants a card): the weights stay 16-bit, which is why
+    // the plan only picks this for small models, and the context is shorter to keep memory down
+    let cpu = p.backend == Backend::Cpu;
+    let (what, import, load, device, length) = if cpu {
+        (
+            "LoRA (16-bit, on the processor)",
+            "",
+            "torch_dtype=torch.bfloat16,\n",
+            "use_cpu=True,\n    gradient_checkpointing=True,\n    ",
+            1024,
+        )
+    } else {
+        (
+            "QLoRA",
+            ", BitsAndBytesConfig",
+            "quantization_config=BitsAndBytesConfig(\n        load_in_4bit=True,\n        bnb_4bit_quant_type=\"nf4\",\n        bnb_4bit_compute_dtype=torch.bfloat16,\n        bnb_4bit_use_double_quant=True,\n    ),\n    device_map={\"\": 0},\n",
+            "",
+            2048,
+        )
+    };
     format!(
-        r#"# Tempo Woodshed: QLoRA for the "{band}" band. Written by tempo-launch; read it, change it, run it yourself if you like.
+        r#"# Tempo Woodshed: {what} for the "{band}" band. Written by tempo-launch; read it, change it, run it yourself if you like.
 # The base is {base} (Ollama), trained from its weights on Hugging Face: {hf}.
 import torch
 from datasets import load_dataset
 from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer{import}
 from trl import SFTConfig, SFTTrainer
 
 BASE = "{hf}"
 tok = AutoTokenizer.from_pretrained(BASE)
 model = AutoModelForCausalLM.from_pretrained(
     BASE,
-    quantization_config=BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    ),
-    device_map={{"": 0}},
-)
+    {load})
 train = load_dataset("json", data_files="train.jsonl", split="train")
 valid = load_dataset("json", data_files="valid.jsonl", split="train")
 
@@ -139,11 +155,11 @@ args = SFTConfig(
     learning_rate=1e-4,
     lr_scheduler_type="cosine",
     warmup_ratio=0.05,
-    bf16=True,
+    {device}bf16=True,
     logging_steps=5,
     eval_strategy="epoch",
     save_strategy="no",
-    max_length=2048,
+    max_length={length},
     report_to=[],
 )
 trainer = SFTTrainer(model=model, args=args, train_dataset=train, eval_dataset=valid, peft_config=lora, processing_class=tok)
@@ -158,6 +174,11 @@ print("adapter saved")
         alpha = p.rank * 2,
         epochs = p.epochs,
         targets = targets,
+        what = what,
+        import = import,
+        load = load,
+        device = device,
+        length = length,
     )
 }
 
@@ -224,7 +245,7 @@ pub fn steps(p: &Plan, venv: &str, llama_cpp: &str, windows: bool) -> Vec<Vec<St
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
     let mut out = vec![];
     let adapter = match p.backend {
-        Backend::Cuda => {
+        Backend::Cuda | Backend::Cpu => {
             out.push(s(&[&py, "train.py"]));
             "adapter"
         }
@@ -263,6 +284,21 @@ pub fn pip_packages(b: Backend) -> (Vec<&'static str>, &'static str) {
                 "peft",
                 "trl",
                 "bitsandbytes",
+                "datasets",
+                "accelerate",
+                "sentencepiece",
+                "numpy",
+            ],
+            "about 5 GB",
+        ),
+        // no bitsandbytes (it needs a card); the usual Linux torch wheel brings its CUDA libraries along,
+        // so the size is the same as the card's
+        Backend::Cpu => (
+            vec![
+                "torch",
+                "transformers",
+                "peft",
+                "trl",
                 "datasets",
                 "accelerate",
                 "sentencepiece",
@@ -372,6 +408,30 @@ mod tests {
             assert_eq!(hf_for(none), None, "{none}");
         }
         assert_eq!(mlx_repo("Qwen/Qwen3-8B"), "mlx-community/Qwen3-8B-4bit");
+    }
+
+    #[test]
+    fn the_processor_script_is_plain_16_bit_lora_with_no_bitsandbytes() {
+        let f = files(&plan(Backend::Cpu));
+        let text = &f[0].1;
+        for want in [
+            "LoRA (16-bit, on the processor)",
+            "torch_dtype=torch.bfloat16",
+            "use_cpu=True",
+            "gradient_checkpointing=True",
+            "max_length=1024",
+            "r=16,",
+        ] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+        assert!(
+            !text.contains("BitsAndBytes") && !text.contains("load_in_4bit"),
+            "{text}"
+        );
+        assert!(!pip_packages(Backend::Cpu).0.contains(&"bitsandbytes"));
+        let st = steps(&plan(Backend::Cpu), "/w/venv", "/w/llama.cpp", false);
+        assert_eq!(st[0], ["/w/venv/bin/python", "train.py"]);
+        assert_eq!(st.len(), 2, "train, then convert");
     }
 
     #[test]
