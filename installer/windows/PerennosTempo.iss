@@ -11,7 +11,7 @@
 ;   task. It keeps the vault, Tempo's memory and the logs: they are the user's.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "2.0.0"
 #endif
 #ifndef Stage
   #define Stage AddBackslash(SourcePath) + "build\stage"

@@ -90,7 +90,12 @@ Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.
 
 ## Quick start
 
-**Windows.** Download `PerennosTempo-Setup-unsigned.exe` from the [latest release](https://github.com/Perennos/perennos-tempo/releases), check its published SHA-256, open it and click **Install and open**. First setup downloads pinned packages, the app-owned Ollama runtime and the local `qwen3:4b` model, which is several gigabytes. Setup shows the exact plan and free space before anything large is downloaded.
+**The apps, from a release.** Download the file for your computer from the [latest release](https://github.com/Perennos/perennos-tempo/releases) and check it against `SHA256SUMS.txt` there:
+
+- **Windows:** open `PerennosTempo-Setup-<version>-x64-source-available.exe`.
+- **macOS and Linux:** unpack `perennos-tempo-source-available-<version>-<target>.tar.gz` and run `./install.sh`. On Debian and Ubuntu, `sudo apt install ./<file>.deb` works too.
+
+Then run `tempo-launch setup`. It shows the exact plan and the free space, and downloads nothing large until you say yes. The gateway's own Windows desktop installer, `PerennosTempo-Setup-unsigned.exe`, is in the v1.0.0 release.
 
 **From source (headless).** With Python 3.12 or newer, a prepared data folder and a local engine:
 

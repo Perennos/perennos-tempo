@@ -248,7 +248,7 @@ Perennos Tempo Vault folder. Each message becomes a line in `Rooms/<room>/<YYYY-
 at `TEMPO_VAULT_BIN`. Text is redacted first. No `tempo-vault`, no problem: a warning in the log.
 
 **Other tools can check on it**: `GET /room/health` answers
-`{"ok":true,"app":"tempo-room","version":"0.1.0","rooms":2,"agent":"up"}` (`"agent":"down"` when
+`{"ok":true,"app":"tempo-room","version":"2.0.0","rooms":2,"agent":"up"}` (`"agent":"down"` when
 the agent does not answer).
 
 ## Command line
