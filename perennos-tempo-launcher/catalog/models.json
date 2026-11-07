@@ -46,23 +46,15 @@
   {
    "name": "UMBRA-2",
    "source": "local-only",
-   "gb": 1.10,
-   "params_b": 1.7,
    "roles": ["fast"],
    "licence": "Perennos own model, never released",
-   "min_ram_gb": 2.6,
-   "min_vram_gb": 2.6,
    "notes": "Perennos's own small model. Never downloaded and never uploaded: used only where it is already on this computer."
   },
   {
    "name": "UMBRA-3",
    "source": "local-only",
-   "gb": null,
-   "params_b": null,
    "roles": ["heavy", "thinking"],
    "licence": "Perennos own model, never released",
-   "min_ram_gb": null,
-   "min_vram_gb": null,
    "notes": "Perennos's own big model. Never downloaded and never uploaded: used only where it is already on this computer."
   }
  ]

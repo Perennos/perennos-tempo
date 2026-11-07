@@ -9,7 +9,7 @@ Perennos Tempo 2.0.1 is a set of small apps that run on your own computer and wo
 - **Tempo Studio**: mixing and mastering, with REAPER when you ask for it.
 - **Tempo Room**: private chat rooms where Tempo answers when you write `@tempo`.
 - **tempo-launch**: the launcher. It starts the apps, shows which models fit your computer and your goals, and sets things up after you say yes.
-- **Tempo Soundcheck**: coming in 2.1.
+- **Tempo Soundcheck**: local code and security review, included in this release.
 
 ## What you need
 

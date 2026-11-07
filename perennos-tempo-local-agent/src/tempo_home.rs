@@ -5,17 +5,15 @@
 //! a private crate path. Change one copy, change them all; `docs/TEMPO-HOME.md` has the rule.
 //!
 //! 1. `TEMPO_HOME`, if set and not empty; `PERENNOS_TEMPO_DATA` (older name) is checked second.
-//! 2. Else a legacy folder, only if it already exists: Windows `C:\LocalAI\apps\decision-head`;
-//!    Linux and macOS `$XDG_STATE_HOME/perennos-tempo`, else `~/.local/state/perennos-tempo`.
+//! 2. Else a legacy folder, only if it already exists: `TEMPO_LEGACY_HOME` if set (any OS);
+//!    otherwise, on Linux and macOS, `$XDG_STATE_HOME/perennos-tempo`, else
+//!    `~/.local/state/perennos-tempo`. Windows has no built-in legacy folder.
 //! 3. Else the default: Windows `%LOCALAPPDATA%\Perennos Tempo`; Linux and macOS `~/.tempo`.
 //!
 //! Nothing is created or moved here. Data is never moved automatically.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-
-/// The Tempo data folder of an earlier Perennos Tempo install (Windows), used only if it exists.
-pub const WINDOWS_LEGACY: &str = r"C:\LocalAI\apps\decision-head";
 
 /// Which step of the rule chose the folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,14 +33,17 @@ pub struct Home {
     pub why: Why,
 }
 
-/// The legacy folder for this OS (it may not exist).
+/// The legacy folder for this OS (it may not exist). `TEMPO_LEGACY_HOME` overrides the built-in one.
 pub fn legacy_dir(
     windows: bool,
     env: &dyn Fn(&str) -> Option<OsString>,
     user_home: Option<&Path>,
 ) -> Option<PathBuf> {
+    if let Some(v) = env("TEMPO_LEGACY_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(v));
+    }
     if windows {
-        return Some(PathBuf::from(WINDOWS_LEGACY));
+        return None;
     }
     let state = env("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
@@ -261,10 +262,13 @@ mod tempo_home_tests {
             (
                 "windows legacy only if it exists",
                 true,
-                vec![("LOCALAPPDATA", r"C:\Users\a\AppData\Local")],
+                vec![
+                    ("LOCALAPPDATA", r"C:\Users\a\AppData\Local"),
+                    ("TEMPO_LEGACY_HOME", "D:/old-tempo"),
+                ],
                 Some(r"C:\Users\a"),
-                vec![WINDOWS_LEGACY],
-                WINDOWS_LEGACY,
+                vec!["D:/old-tempo"],
+                "D:/old-tempo",
                 Why::Legacy,
             ),
             (
@@ -295,20 +299,20 @@ mod tempo_home_tests {
                 Why::Default,
             ),
             (
-                "linux ignores the Windows legacy folder",
-                false,
-                vec![],
-                Some("/home/a"),
-                vec![WINDOWS_LEGACY],
-                "/home/a/.tempo",
+                "windows has no built-in legacy folder",
+                true,
+                vec![("LOCALAPPDATA", "L")],
+                Some("U"),
+                vec!["C:/anything"],
+                "L/Perennos Tempo",
                 Why::Default,
             ),
             (
                 "env beats windows legacy",
                 true,
-                vec![("TEMPO_HOME", "D:/t")],
+                vec![("TEMPO_HOME", "D:/t"), ("TEMPO_LEGACY_HOME", "D:/old-tempo")],
                 Some("U"),
-                vec![WINDOWS_LEGACY],
+                vec!["D:/old-tempo"],
                 "D:/t",
                 Why::Env("TEMPO_HOME"),
             ),

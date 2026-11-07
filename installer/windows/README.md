@@ -42,7 +42,7 @@ one AppId, so installing the full edition over the source-available one adds the
 | Uninstall entry | Settings, Apps: Perennos Tempo (the source-available build says so), by Perennos, with its icon and size | the same |
 
 For the user who installs it, Setup also sets `TEMPO_VAULT` (the vault folder) and `TEMPO_AGENT_DATA`
-(`<the Tempo home>\agent`: `TEMPO_HOME` if set, else `C:\LocalAI\apps\decision-head` if that folder exists, else `%LOCALAPPDATA%\Perennos Tempo`; the same rule as `tempo-launch`, see `docs/TEMPO-HOME.md`), only where they are not set already, so the agent finds the vault as
+(`<the Tempo home>\agent`: `TEMPO_HOME` if set, else the `TEMPO_LEGACY_HOME` folder if it exists, else `%LOCALAPPDATA%\Perennos Tempo`; the same rule as `tempo-launch`, see `docs/TEMPO-HOME.md`), only where they are not set already, so the agent finds the vault as
 a tool and terminals find the same data. Hourly learning is the scheduled task "Perennos Tempo Vault Learn"
 (the same name `tempo-vault schedule` uses, so there is only ever one). Start at sign-in is
 `HKCU\...\Run\Perennos Tempo` running `tempo-launch start`.

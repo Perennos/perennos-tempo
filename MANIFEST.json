@@ -14,7 +14,7 @@
   "tests/",
   "test_resident_*.py",
   "repos.lock.json",
-  "owner configuration, ledgers, histories, training outputs, priors, and model weights"
+  "owner configuration, records, histories, training outputs, priors, and model weights"
  ],
  "built": "2026-10-23T01:26:12Z",
  "files": {
