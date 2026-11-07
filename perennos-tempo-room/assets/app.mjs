@@ -822,12 +822,36 @@ function suggestions(q) {
   return [...new Set(names)].filter((n) => n.toLowerCase().startsWith(ql) && !(S.me && n === S.me.name && n !== 'tempo')).slice(0, 8);
 }
 
+// "/" at the start of the message lists the room's own commands, then the people you can @.
+const ROOM_COMMANDS = [
+  ['/help', 'what Tempo can do in this room'],
+  ['/bpm', 'tap four times and Tempo says the tempo'],
+  ['/tap', 'the same as /bpm'],
+  ['/mode', 'plain, warm, playful, always or mention (owner only)'],
+  ['/mute', 'quiet @someone for now (owner only)'],
+  ['/unmute', 'let @someone talk again (owner only)'],
+];
+function slashItems(q) {
+  const ql = q.toLowerCase();
+  const cmds = ROOM_COMMANDS.filter(([n]) => n.slice(1).startsWith(ql)).map(([n]) => n);
+  const who = suggestions('').map((n) => '@' + n).filter((n) => !ql || n.slice(1).toLowerCase().startsWith(ql));
+  return [...cmds, ...who].slice(0, 12);
+}
+
 function onInput() {
   autosize();
   clearTimeout(draftTimer);
   draftTimer = setTimeout(saveDraft, 400);
   const t = $('text');
   const before = t.value.slice(0, t.selectionStart);
+  const sl = before === t.value ? before.match(/^\/([a-z]*)$/i) : null;
+  if (sl) {
+    const items = slashItems(sl[1]);
+    if (!items.length) { closeSuggest(); return; }
+    S.sugg = { items, i: 0, at: 0, slash: true };
+    renderSuggest();
+    return;
+  }
   const m = before.match(/(^|\s)@([\p{L}\p{N}_]*)$/u);
   if (!m) { closeSuggest(); return; }
   const items = suggestions(m[2]);
@@ -844,7 +868,13 @@ function renderSuggest() {
     b.type = 'button';
     b.setAttribute('role', 'option');
     b.setAttribute('aria-selected', String(i === S.sugg.i));
-    if (n === 'tempo') {
+    if (S.sugg.slash && n.startsWith('/')) {
+      b.append(el('span', null, n), el('i', null, ROOM_COMMANDS.find(([c]) => c === n)[1]));
+    } else if (S.sugg.slash) {
+      const h = n.slice(1), t = ((S.people.get(S.room) || {}).team || []).find((x) => x.handle === h);
+      if (h === 'tempo') b.append(el('span', 'mark', 'tempo'), el('i', null, 'ask Perennos Tempo'));
+      else b.append(el('span', null, n), el('i', null, t ? t.name + ' · teammate' : 'in this room'));
+    } else if (n === 'tempo') {
       b.append(el('span', 'mark', 'tempo'), el('i', null, 'ask Perennos Tempo'));
     } else {
       const t = ((S.people.get(S.room) || {}).team || []).find((x) => x.handle === n);
@@ -867,7 +897,7 @@ function pick(i) {
   const name = S.sugg.items[i];
   if (name == null) return;
   const caret = t.selectionStart;
-  const ins = '@' + name + ' ';
+  const ins = S.sugg.slash ? name + ' ' : '@' + name + ' ';
   t.value = t.value.slice(0, S.sugg.at) + ins + t.value.slice(caret);
   const pos = S.sugg.at + ins.length;
   t.setSelectionRange(pos, pos);

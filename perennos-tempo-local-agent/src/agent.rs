@@ -234,7 +234,7 @@ const INIT: &str = "Look at the folder {dir}: list it, glob for the build files,
 
 const COMPACT_SYSTEM: &str = "You summarize a conversation between an owner and their local agent so the agent can carry on without the full history. Keep: the goal; decisions made; facts learned (file paths, commands, results, errors); what is done; what is left; the next step. Plain text, under 300 words, no preamble.";
 
-const HELP_TEXT: &str = "Commands:
+pub(crate) const HELP_TEXT: &str = "Commands:
 /cd <folder>       work in another folder (commands, relative paths and AGENTS.md come from there)
 /mode [name]       default (asks before changes), accept-edits (file edits go ahead), plan (read and plan only)
 /plan [task]       plan mode; with a task, plan it

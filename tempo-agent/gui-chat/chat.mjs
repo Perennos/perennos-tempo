@@ -506,6 +506,9 @@ export async function mount(el, ctx) {
   requestAnimationFrame(moveBars);
   const ro = new ResizeObserver(moveBars);
   ro.observe(root);
+  // SLASH hook (palette.mjs): the "/" menu, suggestion cards, guides and help. One call; nothing else in this file knows about it.
+  let slash = null;
+  import(new URL('./palette.mjs', import.meta.url).href).then(m => m.attach({ root, input, log, empty, api, send })).then(s => { slash = s; if (dead) s.detach(); }).catch(() => {});
   const ready = health();
   loadMemory();
   convs();
@@ -514,7 +517,7 @@ export async function mount(el, ctx) {
   const ht = setInterval(health, 30000);
   return {
     unmount() {
-      dead = true; es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
+      dead = true; slash?.detach(); es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
       document.removeEventListener('keydown', onKey); links.forEach(l => l.remove()); root.remove();
     },
   };

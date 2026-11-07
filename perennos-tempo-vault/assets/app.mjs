@@ -989,8 +989,13 @@ const COMMANDS = [
   ['Read / edit', () => setMode(S.mode === 'edit' ? 'read' : 'edit')], ['Rename or move this note', () => renameDialog()], ['Earlier versions', () => historyDialog()],
   ['Move this note to trash', () => trashDialog()], ['Copy a link to this note', () => copyLink()], ['Theme', () => action('theme')], ['Brain: the graph, full', () => setLayout('brain')], ['Dashboard: notes and details', () => setLayout('dashboard')], ['Both: the note and the graph', () => setLayout('both')],
   ['Random note', () => randomNote()], ['Focus mode', () => document.body.classList.toggle('zen')], ['Keyboard shortcuts', () => helpSheet()],
+  ['Files', () => go('#/v/files')], ['Links, outline and properties of this note', () => document.body.classList.toggle('insp-on')], ['Tap the tempo', () => tap()], ['Save now', () => save()],
   ['Show or hide attachments in Files', () => { store.set('showFiles', !store.get('showFiles', true)); renderSide(); }], ['Reload from disk', async () => { await api('refresh', {}); await loadTree(); if (S.current) openNote(S.current.path); }],
 ];
+// The key that does the same, shown beside the command.
+const COMMAND_KEYS = { 'New note': 'N', 'Calendar of daily notes': 'M', "Today's note": 'D', Graph: 'G', Search: 'S', Files: 'F', 'Open tasks': 'T', Tags: 'H', 'Check the vault': 'C', 'What Tempo learned': 'L', 'Read / edit': 'E',
+  'Rename or move this note': 'F2', Theme: ',', 'Brain: the graph, full': '⇧G', 'Dashboard: notes and details': '⇧D', 'Both: the note and the graph': '⇧B', 'Random note': 'R', 'Focus mode': 'Z', 'Keyboard shortcuts': '?',
+  'Present this note as slides': 'P', 'Links, outline and properties of this note': 'I', 'Tap the tempo': 'B', 'Save now': 'Ctrl S' };
 let palItems = [], palSel = 0, palQuery = null;
 function openPal(prefix = '') {
   $('#pal').hidden = false;
@@ -1005,7 +1010,7 @@ function closePal() { $('#pal').hidden = true; }
 async function palRefresh() {
   const q = $('#pal-in').value;
   const list = $('#pal-list');
-  if (q.startsWith('>')) {
+  if (q.startsWith('>') || q.startsWith('/')) { // > or / lists every command
     const f = q.slice(1).trim().toLowerCase();
     palItems = COMMANDS.filter(([n]) => n.toLowerCase().includes(f)).map(([n, f2]) => ({ cmd: true, title: n, run: f2 }));
   } else {
@@ -1016,7 +1021,7 @@ async function palRefresh() {
   if ($('#pal-in').value !== q) return; // a newer query is on its way
   palSel = 0;
   palQuery = q;
-  list.replaceChildren(...palItems.map((it, k) => h('button', { class: `pi${it.cmd ? ' cmd' : ''}`, type: 'button', role: 'option', 'aria-selected': String(k === palSel), onclick: () => { closePal(); it.run(); } }, h('b', {}, it.title), it.path ? h('i', {}, it.path) : null)));
+  list.replaceChildren(...palItems.map((it, k) => h('button', { class: `pi${it.cmd ? ' cmd' : ''}`, type: 'button', role: 'option', 'aria-selected': String(k === palSel), onclick: () => { closePal(); it.run(); } }, h('b', {}, it.title), it.path ? h('i', {}, it.path) : null, it.cmd && COMMAND_KEYS[it.title] ? h('kbd', {}, COMMAND_KEYS[it.title]) : null)));
 }
 const palUpdate = debounce(palRefresh, 70);
 async function palKey(e) {
@@ -1031,7 +1036,7 @@ async function palKey(e) {
     if (palQuery !== $('#pal-in').value) await palRefresh(); // Enter right after typing: use what was typed
     const q = $('#pal-in').value.trim();
     closePal();
-    if (e.shiftKey && q && !q.startsWith('>')) return createNote(q, true);
+    if (e.shiftKey && q && !/^[>/]/.test(q)) return createNote(q, true);
     const it = palItems[palSel];
     if (it) it.run();
   }
@@ -1460,7 +1465,7 @@ async function uploadFiles(files) {
   }
 }
 function helpSheet() {
-  const rows = [['Ctrl K', 'jump to a note, or > for commands'], ['Ctrl E or E', 'read / edit'], ['Ctrl S', 'save now (it saves as you type)'], ['[[', 'link a note while writing'],
+  const rows = [['Ctrl K', 'jump to a note, or > or / for every command'], ['Ctrl E or E', 'read / edit'], ['Ctrl S', 'save now (it saves as you type)'], ['[[', 'link a note while writing'],
     ['F S G T H', 'files, search, graph, tasks, tags'], ['Shift+G / D / B', 'Brain, Dashboard, Both'], ['D', "today's note"], ['M', 'calendar'], ['P', 'present the note as slides'], ['L', 'what Tempo learned'], ['C', 'check the vault'], ['N', 'new note'], ['R', 'a random note'],
     ['Z', 'focus mode'], ['I', 'links, outline, properties'], [',', 'theme'], ['F2', 'rename (links follow)'], ['Esc', 'back to reading'], ['?', 'this sheet'],
     ['On a canvas', 'double-click: a card · drag a dot: an arrow · Delete · Ctrl+Z · Ctrl+D · F fits · Ctrl+scroll zooms · Alt+drag: no snapping']];
