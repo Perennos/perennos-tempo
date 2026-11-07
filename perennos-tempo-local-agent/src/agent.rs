@@ -232,8 +232,6 @@ const PLAN_NOTE: &str = "\n[plan mode] Only read and investigate (list, read, gr
 
 const INIT: &str = "Look at the folder {dir}: list it, glob for the build files, and read the README and a few key sources. Then write {dir}/AGENTS.md: what this project is; how to build, test and run it (the exact commands); the layout (main folders and files, one line each); and the conventions to keep (style, naming, the checks to run before finishing). Plain Markdown, under 60 lines, facts only, nothing invented. If an AGENTS.md is already there, read it and improve it with edit_file instead.";
 
-const REVIEW: &str = "Review the changes in {dir}{what}. Run git status and git diff (read-only), read what you need around the changed lines, and report real problems only: bugs, missed cases, security holes, broken behaviour, missing tests. Order them by severity, each with the file and line and a one-line fix. Change nothing. If this is not a git folder, review the files named instead.";
-
 const COMPACT_SYSTEM: &str = "You summarize a conversation between an owner and their local agent so the agent can carry on without the full history. Keep: the goal; decisions made; facts learned (file paths, commands, results, errors); what is done; what is left; the next step. Plain text, under 300 words, no preamble.";
 
 const HELP_TEXT: &str = "Commands:
@@ -247,7 +245,7 @@ const HELP_TEXT: &str = "Commands:
 /compact [focus]   summarize the history to free room
 /clear             start over (the old history is kept as its own conversation)
 /init              write an AGENTS.md for this folder
-/review [what]     review the changes in this folder
+/soundcheck [what] review the changes here: scanners, four listens, a second listen (/review works too)
 /usage             tokens and time used
 /status            folder, mode, model, instructions, background commands
 /stop [bg-N]       end this conversation's background commands (all, or one)
@@ -365,6 +363,52 @@ impl Agent {
             m.insert(0, own.clone());
         }
         m
+    }
+
+    /// `/soundcheck [--staged | --base REF | --patch FILE | --all PATH] [--json] [--sarif FILE] [focus]`:
+    /// a review of the changes in the conversation's folder. It only reads; the one thing it may
+    /// write is a SARIF file, and only inside the write folders.
+    fn soundcheck(&self, conv: &mut Conv, cwd: &Path, args: &str, sink: &mut dyn Sink) -> String {
+        use crate::soundcheck as sc;
+        let words: Vec<String> = args.split_whitespace().map(String::from).collect();
+        let mut cli = match sc::parse_args(&words) {
+            Ok(c) if c.help => return sc::HELP.to_string(),
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        let sarif = match cli.sarif.take() {
+            None => None,
+            Some(p) => match self.env.guard.writable(&cwd.join(&p).to_string_lossy()) {
+                Some(real) => Some(real),
+                None => return format!("The soundcheck only writes SARIF files inside the write folders, and {} is not in one. Pick a path inside them.", p.display()),
+            },
+        };
+        cli.opts.chunk_chars = sc::chunk_chars_for(self.cfg());
+        cli.opts.memory = Some(sc::memory_path(self.cfg()));
+        let mut models = self.heavy_models(conv);
+        if let Some(m) = cli.model.take() {
+            models.retain(|x| *x != m);
+            models.insert(0, m);
+        }
+        let llm = sc::OllamaLlm::new(self.cfg(), models);
+        let mut status = |m: &str| sink.status(&format!("soundcheck: {m}"));
+        let report = match sc::soundcheck(&cli.opts, cwd, Some(&llm), &mut status) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        let used = *llm.usage.borrow();
+        conv.usage.requests += used.requests;
+        conv.usage.prompt_tok += used.prompt_tok;
+        conv.usage.out_tok += used.out_tok;
+        conv.usage.seconds += used.seconds;
+        let mut text = sc::render(&cli, &report);
+        if let Some(path) = sarif {
+            match sc::write_sarif(&path, &report) {
+                Ok(()) => text.push_str(&format!("\nSARIF written to {}\n", path.display())),
+                Err(e) => text.push_str(&format!("\n{e}\n")),
+            }
+        }
+        text
     }
 
     /// Where the conversation works, and the project's instructions.
@@ -841,10 +885,7 @@ impl Agent {
             },
             "clear" => self.clear(conv),
             "init" => return Command::Prompt(INIT.replace("{dir}", &cwd.display().to_string())),
-            "review" => {
-                let what = if args.is_empty() { String::new() } else { format!(" ({args})") };
-                return Command::Prompt(REVIEW.replace("{dir}", &cwd.display().to_string()).replace("{what}", &what));
-            }
+            "soundcheck" | "review" => self.soundcheck(conv, &cwd, args, sink),
             "usage" => {
                 let u = conv.usage;
                 let n = |k: u64, what: &str| format!("{k} {what}{}", if k == 1 { "" } else { "s" });
@@ -1275,6 +1316,88 @@ mod tests {
             .filter(|m| m["role"] == "tool")
             .map(|m| m["content"].as_str().unwrap_or("").to_string())
             .collect()
+    }
+
+    /// A git repository with a committed file and an uncommitted edit that uses eval.
+    fn repo_with_edit() -> PathBuf {
+        let d = tmpdir("agent-soundcheck");
+        let git = |args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .current_dir(&d)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(d.join("a.py"), "x = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(d.join("a.py"), "x = eval(text)\n").unwrap();
+        d
+    }
+
+    #[test]
+    fn soundcheck_and_review_in_the_chat_use_the_engine_and_change_nothing() {
+        let m = Mock::start(|r| {
+            if r.path != "/api/chat" {
+                return (404, "{}".into());
+            }
+            text_resp("{\"findings\":[]}")
+        });
+        let repo = repo_with_edit();
+        let (mut a, mut conv) = agent(&m, |_| {});
+        conv.cwd = Some(repo.clone());
+        let before = std::fs::read_to_string(repo.join("a.py")).unwrap();
+        for cmd in ["/soundcheck", "/review"] {
+            let r = a.turn(&mut conv, cmd, &mut VecSink::default()).unwrap();
+            assert!(r.contains("# Tempo Soundcheck"), "{cmd}: {r}");
+            assert!(
+                r.contains("Feedback in the monitors: fix these first."),
+                "the eval scanner finding decides: {r}"
+            );
+            assert!(r.contains("eval"));
+        }
+        // each run asked the model four times (one per lens), through the usual Ollama mock
+        assert_eq!(m.bodies("/api/chat").len(), 8);
+        assert_eq!(conv.usage.requests, 8, "the work shows in /usage");
+        assert_eq!(std::fs::read_to_string(repo.join("a.py")).unwrap(), before);
+        assert!(
+            conv.messages.iter().all(|x| x["role"] != "tool"),
+            "no tools ran"
+        );
+    }
+
+    #[test]
+    fn soundcheck_writes_sarif_only_inside_the_write_folders() {
+        let m = Mock::start(|_| (404, "{}".into()));
+        let repo = repo_with_edit();
+        let root = repo.to_string_lossy().into_owned();
+        let (mut a, mut conv) = agent(&m, |c| c.write_roots = vec![root]);
+        conv.cwd = Some(repo.clone());
+        let r = a
+            .turn(
+                &mut conv,
+                "/soundcheck --scanners-only --sarif out.sarif",
+                &mut VecSink::default(),
+            )
+            .unwrap();
+        assert!(r.contains("SARIF written"), "{r}");
+        assert!(repo.join("out.sarif").exists());
+        let outside = tmpdir("agent-outside").join("x.sarif");
+        let r = a
+            .turn(
+                &mut conv,
+                &format!("/soundcheck --scanners-only --sarif {}", outside.display()),
+                &mut VecSink::default(),
+            )
+            .unwrap();
+        assert!(
+            r.contains("only writes SARIF files inside the write folders"),
+            "{r}"
+        );
+        assert!(!outside.exists());
     }
 
     #[test]
