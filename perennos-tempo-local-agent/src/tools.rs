@@ -1579,6 +1579,38 @@ impl Env {
         })
     }
 
+    /// This conversation's background commands, one line each (`/status`).
+    pub fn background_list(&self, conv: &Conv) -> Vec<String> {
+        self.bg
+            .borrow_mut()
+            .iter_mut()
+            .filter(|(_, b)| b.conv == conv.id)
+            .map(|(n, b)| {
+                b.refresh();
+                format!("bg-{n} {}: {}", b.status(), head_chars(&b.cmd, 80))
+            })
+            .collect()
+    }
+
+    /// The owner's `/stop`: end this conversation's background commands, all or one (`bg-2`).
+    pub fn background_stop(&self, conv: &Conv, id: &str) -> String {
+        let id = id.trim();
+        let mut ended = vec![];
+        for (n, b) in self.bg.borrow_mut().iter_mut() {
+            let name = format!("bg-{n}");
+            let chosen = id.is_empty() || id == name || id == n.to_string();
+            if b.conv == conv.id && chosen && b.running() {
+                b.stop();
+                ended.push(name);
+            }
+        }
+        match (ended.is_empty(), id.is_empty()) {
+            (false, _) => format!("Stopped {}.", ended.join(", ")),
+            (true, true) => "No background command of this conversation is running.".into(),
+            (true, false) => format!("{id} is not running in this conversation."),
+        }
+    }
+
     /// Run one of the owner's hooks with what happened in `TEMPO_HOOK_EVENT` (JSON), in the
     /// conversation's folder. The same refusals as any command hold (the deny list, deleting).
     fn run_hook(&self, conv: &Conv, h: &crate::config::Hook, event: &str) -> (String, i32) {

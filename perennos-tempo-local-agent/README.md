@@ -62,7 +62,8 @@ The habits that make Claude Code and Codex good to work with, built in and runni
   | `/clear` | A fresh start; the history so far is kept as its own conversation |
   | `/init` | Look at the folder and write an `AGENTS.md` for it |
   | `/review [what]` | Review the changes in the folder (`git diff`), change nothing |
-  | `/usage`, `/status` | Tokens and engine time; folder, mode, model, instructions |
+  | `/usage`, `/status` | Tokens and engine time; folder, mode, model, instructions, background commands |
+  | `/stop [bg-N]` | End this conversation's background commands, all of them or one |
   | `/name args` | Your own: `<project>/.tempo/commands/name.md` or `<Tempo home>/commands/name.md`, with `$ARGUMENTS` and `$1`..`$9` |
   | `!command` | Run a command yourself in the folder (the deny list and the no-delete rule still hold); its output joins the conversation |
 

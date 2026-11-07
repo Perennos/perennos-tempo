@@ -249,7 +249,8 @@ const HELP_TEXT: &str = "Commands:
 /init              write an AGENTS.md for this folder
 /review [what]     review the changes in this folder
 /usage             tokens and time used
-/status            folder, mode, model, instructions
+/status            folder, mode, model, instructions, background commands
+/stop [bg-N]       end this conversation's background commands (all, or one)
 !<command>         run a command yourself; its output joins the conversation
 @file              attach a file to a message
 ";
@@ -854,17 +855,20 @@ impl Agent {
                 let src = project::instruction_files(&cwd, home.as_deref());
                 let m = self.heavy_models(conv);
                 let down = self.env.mcp.borrow().errors();
+                let bg = self.env.background_list(conv);
                 format!(
-                    "folder: {}\nmode: {}\nmodel: {}{}\ninstructions: {}\nconnectors not running: {}\nturns: {}",
+                    "folder: {}\nmode: {}\nmodel: {}{}\ninstructions: {}\nconnectors not running: {}\nbackground: {}\nturns: {}",
                     cwd.display(),
                     conv.permission.name(),
                     m.first().cloned().unwrap_or_default(),
                     if conv.think { " (deep think on)" } else { "" },
                     if src.is_empty() { "none".into() } else { src.iter().map(|s| s.display().to_string()).collect::<Vec<_>>().join(", ") },
                     if down.is_empty() { "none".into() } else { down.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ") },
+                    if bg.is_empty() { "none".into() } else { bg.join("; ") },
                     conv.turns
                 )
             }
+            "stop" => self.env.background_stop(conv, args),
             _ => match project::custom_command(name, args, &cwd, home.as_deref()) {
                 Some(p) => return Command::Prompt(p),
                 None if Path::new(t.split_whitespace().next().unwrap_or("")).exists() => {
@@ -1888,6 +1892,31 @@ mod tests {
 
     fn say(a: &mut Agent, conv: &mut Conv, text: &str) -> String {
         a.turn(conv, text, &mut VecSink::default()).unwrap()
+    }
+
+    #[test]
+    fn the_owner_sees_and_stops_background_commands() {
+        let m = Mock::start(chat_script(vec![]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        // started as the model would start it (sleep reads nothing and writes nothing, so it
+        // runs unasked; in PowerShell it is Start-Sleep)
+        let r = a.env.run_builtin(
+            &conv,
+            "run_command",
+            &json!({"command": "sleep 30", "background": true}),
+        );
+        assert!(r.contains("bg-1"), "{r}");
+        let st = say(&mut a, &mut conv, "/status");
+        assert!(st.contains("background: bg-1 running for"), "{st}");
+        assert_eq!(
+            say(&mut a, &mut conv, "/stop bg-9"),
+            "bg-9 is not running in this conversation."
+        );
+        assert_eq!(say(&mut a, &mut conv, "/stop"), "Stopped bg-1.");
+        let st = say(&mut a, &mut conv, "/status");
+        assert!(st.contains("background: bg-1 stopped after"), "{st}");
+        assert!(say(&mut a, &mut conv, "/stop").starts_with("No background command"));
+        assert!(say(&mut a, &mut conv, "/help").contains("/stop"));
     }
 
     #[test]
