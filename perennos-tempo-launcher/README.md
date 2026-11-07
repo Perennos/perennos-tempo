@@ -31,6 +31,10 @@ tempo-launch conductor new (--template NAME | --describe "TEXT") [--name BAND] [
                              sets a band up: shows it in plain words, asks y/N, saves it, adds the members to Room, schedules the flows
 tempo-launch conductor run BAND [FLOW] [--note TEXT]
                              walks a flow through its members; each step becomes a linked note in the Vault
+tempo-launch conductor sections BAND [FLOW] [--note TEXT] [--takes 1-3] [--resume RUN]
+                             plays a big job as sections (sub-teams) and takes (attempts), under a budget (../docs/SECTIONS.md)
+tempo-launch conductor runs  the newest sectioned runs: budget used, takes, winners
+tempo-launch conductor stop [RUN]  ends a run at its next step; `conductor takes accept|reject TAKE` is your say on a take
 tempo-launch conductor room BAND  adds the band's members to Room as teammates (when Room was not running)
 tempo-launch conductor engines    every engine you have: up or down, its models, a rough class
 tempo-launch conductor page [BAND]

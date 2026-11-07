@@ -245,13 +245,11 @@ pub mod tests {
     }
 
     /// A program that prints `says` when run: a script on Unix; on Windows a stand-in file only.
+    /// It's named the Unix way on every host, because the tests pretend to be a Mac or Linux
+    /// box and the lookup goes by the pretend system, not the computer running the test.
     pub fn fake_bin(dir: &Path, name: &str, says: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join(if cfg!(windows) {
-            format!("{name}.exe")
-        } else {
-            name.into()
-        });
+        let p = dir.join(name);
         std::fs::write(&p, format!("#!/bin/sh\necho '{says}'\n")).unwrap();
         #[cfg(unix)]
         {
