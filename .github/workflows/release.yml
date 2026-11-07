@@ -145,6 +145,16 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: "dist/*"
+      - name: The provenance checks out (gh attestation verify, each file)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          for f in dist/*; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" >/dev/null
+            echo "verified: $(basename "$f")"
+          done
       - name: Draft release (not published)
         if: github.event_name == 'workflow_dispatch'
         env:
