@@ -12,6 +12,8 @@ pub struct ChatInfo {
     pub model: String,
     /// The engine that answered, when it was not `ollama_url`.
     pub engine: Option<String>,
+    /// The engine that answered, always (`engine` leaves out the main one).
+    pub served_by: String,
     /// How the request moved off an engine that could not be reached, when it did.
     pub failover: Option<String>,
     pub first_s: f64,
@@ -127,10 +129,11 @@ fn mark(engine: &str, ok: bool) {
     }
 }
 
-/// The engines to try, in order: the one that served this conversation last (sticky, so the
-/// engine's prompt cache keeps working), then `ollama_url`, then `ollama_fallbacks`. Engines
-/// that failed twice in a row lately go last, not away: with nothing else up they are still tried.
-pub fn engine_order(cfg: &Config, conv: Option<&str>) -> Vec<String> {
+/// The engines to try, in order: the one the conversation is pinned to, if any (and the settings
+/// still list it), then the one that served this conversation last (sticky, so the engine's
+/// prompt cache keeps working), then `ollama_url`, then `ollama_fallbacks`. Engines that failed
+/// twice in a row lately go last, not away: with nothing else up they are still tried.
+pub fn engine_order(cfg: &Config, conv: Option<&str>, pin: Option<&str>) -> Vec<String> {
     let mut v: Vec<String> = vec![cfg.ollama_url.clone()];
     for u in &cfg.ollama_fallbacks {
         if !v.contains(u) {
@@ -141,6 +144,13 @@ pub fn engine_order(cfg: &Config, conv: Option<&str>) -> Vec<String> {
     if let Some(i) = sticky.and_then(|s| v.iter().position(|x| *x == s)) {
         let s = v.remove(i);
         v.insert(0, s);
+    }
+    // a pin wins over affinity: it says where this conversation belongs, and a pinned engine
+    // that is up again takes the conversation back
+    if let Some(p) = pin.and_then(|p| cfg.find_engine(p)) {
+        let same = |x: &String| x.trim_end_matches('/') == p.trim_end_matches('/');
+        v.retain(|x| !same(x));
+        v.insert(0, p);
     }
     let now = Instant::now();
     let resting = |u: &String| {
@@ -181,15 +191,22 @@ pub fn unreachable(e: &str) -> bool {
     .any(|k| e.contains(k))
 }
 
+/// An engine's answer that it does not have the model (Ollama: `model "x" not found, try
+/// pulling it first`, as an in-band error or as the body of an HTTP 404). Another engine may.
+pub fn model_missing(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    !unreachable(&e) && e.contains("model") && e.contains("not found")
+}
+
 /// The plain-words error for a request that failed because no engine could be reached at all
 /// (the one `ollama_url`, or every one of it and `ollama_fallbacks`); `None` for any other
 /// error, such as an engine's own answer. Retrying or trying another model cannot help here:
 /// every model lives on the same engines.
-pub fn nobody_answering(cfg: &Config, err: &str) -> Option<String> {
+pub fn nobody_answering(cfg: &Config, pin: Option<&str>, err: &str) -> Option<String> {
     if !unreachable(err) {
         return None;
     }
-    let order = engine_order(cfg, None);
+    let order = engine_order(cfg, None, pin);
     // with several engines, `chat_pooled` says "(every engine: ..)" only after trying them all
     if order.len() > 1 && !err.contains("(every engine: ") {
         return None;
@@ -201,21 +218,29 @@ pub fn nobody_answering(cfg: &Config, err: &str) -> Option<String> {
     ))
 }
 
-/// `chat_with` on the first engine that can be reached (see `engine_order`). Only "cannot be
-/// reached" moves a request to another engine; an engine's own error (a model it does not have,
-/// a crash) comes back as it is, for the caller to retry and fall back as before. `conv` keeps
-/// the conversation on the engine that answered.
+/// `chat_with` on the first engine that can be reached (see `engine_order`). Two answers move a
+/// request to the next engine: "cannot be reached", and "this engine does not have the model"
+/// (another engine may, which is why a conversation can be pinned to one that does). Any other
+/// error of an engine (a crash, out of memory) comes back as it is, for the caller to retry and
+/// fall back to another model as before: the next engine would only repeat it. `conv` keeps the
+/// conversation on the engine that answered; `pin` is the engine it asked for.
 #[allow(clippy::too_many_arguments)]
 pub fn chat_pooled(
     cfg: &Config,
     conv: Option<&str>,
+    pin: Option<&str>,
     model: &str,
     messages: &[Value],
     tools: &[Value],
     think: bool,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
-    let order = engine_order(cfg, conv);
+    let order = engine_order(cfg, conv, pin);
+    let pinned = pin.and_then(|p| {
+        order
+            .iter()
+            .find(|u| u.trim_end_matches('/') == p.trim_end_matches('/'))
+    });
     let mut moved: Vec<String> = vec![];
     let mut last = String::from("no engine");
     for engine in &order {
@@ -226,6 +251,7 @@ pub fn chat_pooled(
                     a.insert(c.to_string(), engine.clone());
                 }
                 r.info.engine = (*engine != cfg.ollama_url).then(|| engine.clone());
+                r.info.served_by = engine.clone();
                 if !moved.is_empty() {
                     r.info.failover = Some(format!("{}; {engine} answered", moved.join("; ")));
                 }
@@ -233,10 +259,20 @@ pub fn chat_pooled(
             }
             Err(e) if unreachable(&e) && order.len() > 1 => {
                 mark(engine, false);
+                let what = if pinned == Some(engine) {
+                    "pinned engine"
+                } else {
+                    "engine"
+                };
                 moved.push(format!(
-                    "engine {engine} cannot be reached ({})",
+                    "{what} {engine} cannot be reached ({})",
                     util::head_chars(&e, 80)
                 ));
+                last = e;
+            }
+            // the engine is up and answered, so it is not marked: it just lacks this model
+            Err(e) if model_missing(&e) && order.len() > 1 => {
+                moved.push(format!("engine {engine} does not have {model}"));
                 last = e;
             }
             Err(e) => return Err(e),
@@ -323,6 +359,7 @@ fn chat_raw(
     let info = ChatInfo {
         model: model.to_string(),
         engine: None,
+        served_by: engine.to_string(),
         failover: None,
         first_s: r2(first.unwrap_or(total)),
         total_s: r2(total),

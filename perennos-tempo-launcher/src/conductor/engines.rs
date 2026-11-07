@@ -13,10 +13,13 @@
 //! theirs. When the chosen engine is down at run time the next one plays the part, and the run's
 //! index note says so.
 //!
-//! What the agent allows: a conversation can name a model but not an engine. The agent tries
-//! `ollama_url` first, then `ollama_fallbacks` in order, and keeps a conversation on the engine
-//! that answered. So the Conductor's pick is the engine it expects to answer and the model it
-//! passes; the agent's own failover decides where the request really goes.
+//! What the agent allows: a newer agent (its health says `"engines": true`) takes the engine's
+//! address with the conversation, asks it first and moves on to its usual order only when it
+//! cannot be reached or does not have the model. An older one takes a model but not an engine:
+//! it tries `ollama_url` first, then `ollama_fallbacks`, and moves on only when one cannot be
+//! reached. In that case the pick is only the engine the Conductor expects to answer, and the
+//! run's index note says the agent decided. Either way the note names the engine the agent
+//! says answered, when it says.
 
 use super::spec::{Band, Member};
 use crate::setup::json::{parse, J};
@@ -464,6 +467,8 @@ pub struct Cast {
     pub model: String,
     /// The engine expected to answer (empty: the agent's own order).
     pub engine: String,
+    /// Its address, which is what the agent is asked for (empty with `engine`).
+    pub url: String,
     /// What changed from the band's plan, in words (empty when nothing did).
     pub note: String,
 }
@@ -482,6 +487,7 @@ pub fn cast(band: &Band, engines: &[Engine]) -> Vec<Cast> {
                 name: m.name.clone(),
                 model: m.model.clone(),
                 engine: String::new(),
+                url: String::new(),
                 note: String::new(),
             };
             let planned = engines.iter().find(|e| e.id == m.engine);
@@ -506,6 +512,9 @@ pub fn cast(band: &Band, engines: &[Engine]) -> Vec<Cast> {
                         c.engine = first.id.clone();
                     }
                 }
+            }
+            if let Some(e) = engines.iter().find(|e| e.id == c.engine) {
+                c.url = e.url.clone();
             }
             c
         })

@@ -74,6 +74,22 @@ pub trait Chat {
     /// One guest conversation: `model` (empty: the agent's usual one), `role`, one message in,
     /// the answer out.
     fn say(&self, model: &str, role: &str, text: &str) -> Result<String, String>;
+
+    /// `say`, asking for the engine at address `engine` (empty: the agent's own order). The
+    /// answer says which engine played it, when the agent can tell. A stand-in that cannot
+    /// choose an engine keeps this default: it ignores the address and reports none.
+    fn say_on(&self, engine: &str, model: &str, role: &str, text: &str) -> Result<Said, String> {
+        let _ = engine;
+        self.say(model, role, text)
+            .map(|text| Said { text, engine: None })
+    }
+}
+
+/// An answer and, when the agent said so, the address of the engine that gave it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Said {
+    pub text: String,
+    pub engine: Option<String>,
 }
 
 const GUARD: &str = " You work only on this computer: you cannot post, send, buy, book or delete anything, so whatever is meant for the outside world is a draft for the owner to read and use themselves.";
@@ -722,8 +738,8 @@ struct RealChat<'a> {
     ctx: &'a Ctx,
 }
 
-impl Chat for RealChat<'_> {
-    fn say(&self, model: &str, role: &str, text: &str) -> Result<String, String> {
+impl RealChat<'_> {
+    fn agent(&self) -> Result<net::Agent, String> {
         crate::ensure(self.ctx, &crate::launch_for(self.ctx, AGENT), true)
             .map_err(|p| format!("{}: {}", p.title, p.what))?;
         let agent = net::Agent::new(AGENT.port, crate::agent_key(self.ctx));
@@ -733,7 +749,17 @@ impl Chat for RealChat<'_> {
                     .into(),
             );
         }
-        agent.say(model, role, text)
+        Ok(agent)
+    }
+}
+
+impl Chat for RealChat<'_> {
+    fn say(&self, model: &str, role: &str, text: &str) -> Result<String, String> {
+        self.agent()?.say(model, role, text)
+    }
+
+    fn say_on(&self, engine: &str, model: &str, role: &str, text: &str) -> Result<Said, String> {
+        self.agent()?.say_on(engine, model, role, text)
     }
 }
 

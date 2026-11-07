@@ -610,6 +610,7 @@ impl Llm for OllamaLlm<'_> {
                 match ollama::chat_pooled(
                     self.cfg,
                     Some("soundcheck"),
+                    None,
                     model,
                     &messages,
                     &[],
@@ -625,7 +626,7 @@ impl Llm for OllamaLlm<'_> {
                         return Ok(r.message["content"].as_str().unwrap_or("").to_string());
                     }
                     Err(e) => {
-                        if let Some(m) = ollama::nobody_answering(self.cfg, &e) {
+                        if let Some(m) = ollama::nobody_answering(self.cfg, None, &e) {
                             return Err(m);
                         }
                         let missing = e.contains("not found") || e.contains("HTTP 404");

@@ -562,6 +562,7 @@ impl Agent {
             conv.emit("status", f);
             sink.status(f);
         }
+        conv.served_by = Some(r.info.served_by.clone());
         let u = &mut conv.usage;
         u.requests += 1;
         u.prompt_tok += r.info.prompt_tok.unwrap_or(0);
@@ -585,11 +586,14 @@ impl Agent {
         let think = conv.think;
         // the conversation's own key for engine affinity (ids repeat across data folders)
         let key = conv.path.to_string_lossy().into_owned();
+        let pin = conv.engine.clone();
+        let pin = pin.as_deref();
         loop {
             let model = models[*idx].clone();
             let mut last = match ollama::chat_pooled(
                 cfg,
                 Some(&key),
+                pin,
                 &model,
                 messages,
                 tools,
@@ -599,7 +603,7 @@ impl Agent {
                 Ok(r) => return Ok(r),
                 Err(e) => e,
             };
-            if let Some(m) = ollama::nobody_answering(cfg, &last) {
+            if let Some(m) = ollama::nobody_answering(cfg, pin, &last) {
                 return Err(m);
             }
             // a model this engine does not have will not appear on a retry: fall back at once
@@ -616,6 +620,7 @@ impl Agent {
                 match ollama::chat_pooled(
                     cfg,
                     Some(&key),
+                    pin,
                     &model,
                     messages,
                     tools,
@@ -625,7 +630,7 @@ impl Agent {
                     Ok(r) => return Ok(r),
                     Err(e) => last = e,
                 }
-                if let Some(m) = ollama::nobody_answering(cfg, &last) {
+                if let Some(m) = ollama::nobody_answering(cfg, pin, &last) {
                     return Err(m);
                 }
             }
@@ -2502,7 +2507,7 @@ mod tests {
         );
         // the next turn goes straight to the engine that has this conversation's prompt cached
         let key = conv.path.to_string_lossy().into_owned();
-        assert_eq!(ollama::engine_order(&a.env.cfg, Some(&key))[0], m.url);
+        assert_eq!(ollama::engine_order(&a.env.cfg, Some(&key), None)[0], m.url);
         let mut sink = VecSink::default();
         assert_eq!(
             a.turn(&mut conv, "please read it again", &mut sink)
@@ -2515,12 +2520,170 @@ mod tests {
             sink.status
         );
         // a new conversation tries the main engine first again (a single failure is not a rest)
-        assert_eq!(ollama::engine_order(&a.env.cfg, None)[0], dead);
+        assert_eq!(ollama::engine_order(&a.env.cfg, None, None)[0], dead);
         assert!(
             ollama::unreachable("io: Connection refused (os error 111)")
                 && ollama::unreachable("timeout: connect")
         );
         assert!(!ollama::unreachable("HTTP 404: model not found"));
+    }
+
+    fn missing_model(name: &str) -> (u16, String) {
+        (
+            200,
+            ndjson(&[
+                json!({"error": format!("model \"{name}\" not found, try pulling it first")}),
+            ]),
+        )
+    }
+
+    /// Two live engines, `main` (ollama_url) and `other` (a fallback), and a guest conversation.
+    fn two_engines(
+        main: Vec<(u16, String)>,
+        other: Vec<(u16, String)>,
+        tweak: impl FnOnce(&mut Config),
+    ) -> (Mock, Mock, Agent, Conv) {
+        let a = Mock::start(chat_script(main));
+        let b = Mock::start(chat_script(other));
+        let (agent, mut conv) = agent(&a, |c| {
+            c.ollama_fallbacks = vec![b.url.clone()];
+            c.retries = 0;
+            tweak(c);
+        });
+        conv.guest = true;
+        (a, b, agent, conv)
+    }
+
+    #[test]
+    fn a_pinned_engine_is_asked_first() {
+        let (a, b, mut ag, mut conv) = two_engines(vec![], vec![text_resp("from the pin")], |_| {});
+        conv.engine = Some(b.url.clone());
+        let mut sink = VecSink::default();
+        assert_eq!(
+            ag.turn(&mut conv, "hello", &mut sink).unwrap(),
+            "from the pin"
+        );
+        assert!(
+            a.bodies("/api/chat").is_empty(),
+            "the main engine was not asked"
+        );
+        assert_eq!(b.bodies("/api/chat").len(), 1);
+        assert!(
+            sink.status
+                .iter()
+                .any(|s| s.contains(&format!(" on {}", b.url))),
+            "{:?}",
+            sink.status
+        );
+        assert_eq!(conv.served_by.as_deref(), Some(b.url.as_str()));
+    }
+
+    #[test]
+    fn a_pinned_engine_that_is_down_falls_back_and_says_so() {
+        let m = Mock::start(chat_script(vec![text_resp("from the usual one")]));
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let (mut ag, mut conv) = agent(&m, |c| c.ollama_fallbacks = vec![dead.clone()]);
+        conv.guest = true;
+        conv.engine = Some(dead.clone());
+        let mut sink = VecSink::default();
+        assert_eq!(
+            ag.turn(&mut conv, "hello", &mut sink).unwrap(),
+            "from the usual one"
+        );
+        assert!(
+            sink.status.iter().any(|s| s
+                .contains(&format!("pinned engine {dead} cannot be reached"))
+                && s.contains("answered")),
+            "{:?}",
+            sink.status
+        );
+        // the pin is kept: the next turn asks it first again
+        assert_eq!(conv.engine.as_deref(), Some(dead.as_str()));
+    }
+
+    #[test]
+    fn a_pin_the_settings_no_longer_list_is_ignored() {
+        let (a, _b, mut ag, mut conv) =
+            two_engines(vec![text_resp("from the main one")], vec![], |_| {});
+        conv.engine = Some("http://10.9.9.9:11434".into());
+        assert_eq!(say(&mut ag, &mut conv, "hello"), "from the main one");
+        assert_eq!(a.bodies("/api/chat").len(), 1);
+    }
+
+    #[test]
+    fn a_model_one_engine_lacks_is_asked_of_the_next_engine() {
+        let (a, b, mut ag, mut conv) = two_engines(
+            vec![missing_model("only-on-b")],
+            vec![text_resp("found it")],
+            |_| {},
+        );
+        conv.model = Some("only-on-b".into());
+        let mut sink = VecSink::default();
+        assert_eq!(ag.turn(&mut conv, "hello", &mut sink).unwrap(), "found it");
+        let (ba, bb) = (a.bodies("/api/chat"), b.bodies("/api/chat"));
+        assert_eq!((ba.len(), bb.len()), (1, 1));
+        assert_eq!(
+            bb[0]["model"], "only-on-b",
+            "the same model, not the next one"
+        );
+        assert!(
+            sink.status.iter().any(|s| s
+                .contains(&format!("engine {} does not have only-on-b", a.url))
+                && s.contains("answered")),
+            "{:?}",
+            sink.status
+        );
+    }
+
+    #[test]
+    fn a_model_no_engine_has_still_falls_to_the_next_model() {
+        let (a, b, mut ag, mut conv) = two_engines(
+            vec![missing_model("nowhere"), text_resp("second model")],
+            vec![missing_model("nowhere")],
+            |_| {},
+        );
+        conv.model = Some("nowhere".into());
+        assert_eq!(say(&mut ag, &mut conv, "hello"), "second model");
+        assert_eq!(b.bodies("/api/chat").len(), 1);
+        assert_eq!(a.bodies("/api/chat")[1]["model"], "heavy-a");
+    }
+
+    #[test]
+    fn any_other_engine_error_stays_on_that_engine() {
+        let (a, b, mut ag, mut conv) = two_engines(
+            vec![err_resp(), err_resp(), err_resp()],
+            vec![text_resp("must not be asked")],
+            |_| {},
+        );
+        let e = ag.turn(&mut conv, "hello", &mut VecSink::default());
+        assert!(e.is_err(), "{e:?}");
+        assert!(
+            b.bodies("/api/chat").is_empty(),
+            "a crash on one engine is not retried on another"
+        );
+        assert!(!a.bodies("/api/chat").is_empty());
+    }
+
+    #[test]
+    fn what_counts_as_a_missing_model() {
+        for e in [
+            "model \"x\" not found, try pulling it first",
+            "model 'x' not found",
+            "HTTP 404: {\"error\":\"model 'x' not found\"}",
+        ] {
+            assert!(ollama::model_missing(e), "{e}");
+        }
+        for e in [
+            "HTTP 404: page not found",
+            "CUDA error: illegal memory access",
+            "host not found",
+            "Connection refused (os error 111)",
+        ] {
+            assert!(!ollama::model_missing(e), "{e}");
+        }
     }
 
     #[test]

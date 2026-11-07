@@ -75,6 +75,8 @@ struct ConvLog {
     busy: bool,
     /// File names the last turn's memory search used.
     used: Vec<String>,
+    /// The engine that answered the last turn (None until one has, or when it failed).
+    engine: Option<String>,
 }
 
 type Pending = HashMap<String, (String, mpsc::Sender<bool>)>;
@@ -289,6 +291,7 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
             buf: RefCell::new(String::new()),
             last: Cell::new(Instant::now()),
         });
+        let mut served = None;
         match Conv::open(&cfg, Some(&job.conv)) {
             Ok(mut conv) => {
                 if lock(&shared.state)
@@ -304,6 +307,7 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
                 let _ = agent.turn(&mut conv, &job.text, &mut sink); // an error is already an event
                 live.flush();
                 conv.on_event = None;
+                served = conv.served_by.take();
             }
             Err(e) => shared.push(
                 &job.conv,
@@ -316,6 +320,7 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         st.embed_ok = embed;
         if let Some(l) = st.convs.get_mut(&job.conv) {
             l.busy = false;
+            l.engine = served;
         }
         drop(st);
         shared.changed.notify_all();
@@ -680,8 +685,9 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
     match (post, api) {
         (false, "convs") => send_json(&mut s, 200, &json!(convs(&sh.cfg))),
         (true, "new") => {
-            // {"model": "<tag>", "role": "<text>"}, both optional: a Room teammate's model (tried
-            // first; the config's models stay as fallbacks) and the role its owner wrote for it
+            // {"model": "<tag>", "role": "<text>", "engine": "<url>"}, all optional: a Room
+            // teammate's model (tried first; the config's models stay as fallbacks), the role its
+            // owner wrote for it and the engine to ask first (one of the configured ones)
             let model = match body.get("model").and_then(Value::as_str).map(str::trim) {
                 Some(m) if !m.is_empty() && !crate::conv::valid_model(m) => {
                     return refuse(
@@ -698,7 +704,22 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                 }
                 r => r.filter(|r| !r.is_empty()).map(util::redact),
             };
-            new_conv(sh, body["mode"] == "guest", model, role, s)
+            let engine = match body.get("engine") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(e)) if e.trim().is_empty() => None,
+                Some(Value::String(e)) => match sh.cfg.find_engine(e) {
+                    Some(found) => Some(found),
+                    None => {
+                        return refuse(
+                            &mut s,
+                            400,
+                            "engine: not one of this agent's engines (ollama_url, ollama_fallbacks or the urls of a host)",
+                        )
+                    }
+                },
+                Some(_) => return refuse(&mut s, 400, "engine: a URL as text"),
+            };
+            new_conv(sh, body["mode"] == "guest", model, role, engine, s)
         }
 
         (true, "send") => {
@@ -755,7 +776,7 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             let mut st = lock(&sh.state);
             let v = if sh.ensure(&mut st, req.q("conv")) {
                 let log = &st.convs[req.q("conv")];
-                json!({"events": log.events.get(since..).unwrap_or(&[]), "busy": log.busy})
+                json!({"events": log.events.get(since..).unwrap_or(&[]), "busy": log.busy, "engine": log.engine})
             } else {
                 json!({"events": [], "busy": false})
             };
@@ -861,7 +882,7 @@ fn health(sh: &Shared, keyed: bool) -> Value {
     // `auth: "key"`: every other call needs X-Tempo-Key (see `serve`).
     let auth = if sh.opts.key.is_some() { "key" } else { "none" };
     if !keyed {
-        return json!({"ok": true, "stream": true, "guest": true, "roles": true, "auth": auth});
+        return json!({"ok": true, "stream": true, "guest": true, "roles": true, "engines": true, "auth": auth});
     }
     let hosts = {
         let mut seen = lock(&sh.hosts_seen);
@@ -892,16 +913,17 @@ fn health(sh: &Shared, keyed: bool) -> Value {
         }
     };
     let embed = lock(&sh.state).embed_ok;
-    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "roles": true, "auth": auth})
+    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "roles": true, "engines": true, "auth": auth})
 }
 
 /// A new conversation: a guest one for a chat room (no tools, memory or owner context), with the
-/// model and role a Room teammate was given, if any.
+/// model, role and engine a Room teammate was given, if any.
 fn new_conv(
     sh: &Arc<Shared>,
     guest: bool,
     model: Option<String>,
     role: Option<String>,
+    engine: Option<String>,
     mut s: TcpStream,
 ) {
     match Conv::open(&sh.cfg, None) {
@@ -909,7 +931,8 @@ fn new_conv(
             c.guest = guest;
             c.model = model;
             c.role = role;
-            if guest || c.model.is_some() || c.role.is_some() {
+            c.engine = engine;
+            if guest || c.model.is_some() || c.role.is_some() || c.engine.is_some() {
                 c.save();
             }
             lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
@@ -1338,6 +1361,55 @@ mod tests {
             .0,
             400
         );
+    }
+
+    #[test]
+    fn a_conversation_can_be_pinned_to_one_of_the_configured_engines() {
+        let other = Mock::start(chat_script(vec![text_resp(
+            "Answered on the other engine.",
+        )]));
+        let url = other.url.clone();
+        let srv = server(vec![], move |c, _| c.ollama_fallbacks = vec![url]);
+        let (_, h) = get(&srv, "/agent/health");
+        assert_eq!(h["engines"], true, "callers can see that pinning is there");
+        // an engine the agent does not know, a wrong type: refused, and no conversation is made
+        for bad in [json!("http://10.9.9.9:11434"), json!(7), json!({"url": 1})] {
+            let (c, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "engine": bad}));
+            assert_eq!(c, 400, "{bad}");
+            assert!(v["error"].as_str().unwrap().starts_with("engine:"), "{v}");
+        }
+        assert!(convs(&srv.cfg).is_empty());
+        // a configured one is taken, with or without a trailing slash, and saved as written
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "engine": format!("{}/", other.url)}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["engine"], other.url.as_str());
+        let (c, _) = post(&srv, "/agent/send", &json!({"conv": conv, "text": "hello"}));
+        assert_eq!(c, 200);
+        let evs = wait_idle(&srv, &conv);
+        assert_eq!(evs.last().unwrap()["text"], "Answered on the other engine.");
+        assert_eq!(other.bodies("/api/chat").len(), 1);
+        // the engine that answered comes with the events
+        let (_, v) = get(&srv, &format!("/agent/events?conv={conv}&since=0"));
+        assert_eq!(v["engine"], other.url.as_str());
+        // no engine, no pin
+        let (_, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "engine": ""}));
+        let conv = v["conv"].as_str().unwrap();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(saved["engine"].is_null());
     }
 
     #[test]

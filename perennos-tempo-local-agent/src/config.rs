@@ -592,6 +592,21 @@ impl Config {
         h
     }
 
+    /// The configured engine a conversation may be pinned to: `url` (a trailing slash does not
+    /// matter) must be `ollama_url`, one of `ollama_fallbacks` or a URL of a host. Returns the
+    /// address as it is written in the settings.
+    pub fn find_engine(&self, url: &str) -> Option<String> {
+        let want = url.trim().trim_end_matches('/');
+        if want.is_empty() {
+            return None;
+        }
+        std::iter::once(&self.ollama_url)
+            .chain(&self.ollama_fallbacks)
+            .chain(self.hosts.values().flat_map(|h| &h.urls))
+            .find(|u| u.trim_end_matches('/') == want)
+            .cloned()
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
@@ -828,5 +843,39 @@ mod tests {
         assert_eq!(c.ollama_url, "http://127.0.0.1:9");
         assert_eq!(c.data_dir, PathBuf::from("/dd"));
         assert!(Config::load(Some("/no/such/file.json"), None, &env).is_err());
+    }
+
+    #[test]
+    fn only_a_configured_engine_can_be_found() {
+        let mut c = Config::defaults(None);
+        c.ollama_url = "http://127.0.0.1:11434".into();
+        c.ollama_fallbacks = vec!["http://10.0.0.5:11434".into()];
+        c.hosts.insert(
+            "box".into(),
+            HostCfg {
+                urls: vec!["http://192.168.0.20:11434/".into()],
+                models: vec![],
+                trust_reads: false,
+            },
+        );
+        assert_eq!(
+            c.find_engine("http://127.0.0.1:11434/").as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert!(c.find_engine("http://10.0.0.5:11434").is_some());
+        assert_eq!(
+            c.find_engine("http://192.168.0.20:11434").as_deref(),
+            Some("http://192.168.0.20:11434/"),
+            "returned as the settings write it"
+        );
+        for no in [
+            "",
+            "  ",
+            "http://10.0.0.6:11434",
+            "http://10.0.0.5:11434/x",
+            "10.0.0.5:11434",
+        ] {
+            assert!(c.find_engine(no).is_none(), "{no}");
+        }
     }
 }

@@ -107,6 +107,12 @@ pub struct Conv {
     /// A role the owner gave this conversation (a Room teammate: "you are the band's booking
     /// manager"). It goes into the system message, never into what anyone types.
     pub role: Option<String>,
+    /// The engine (one of the configured Ollama URLs) this conversation was pinned to: it is
+    /// tried first, and the usual order follows if it cannot be reached.
+    pub engine: Option<String>,
+    /// The engine that answered the last request. Not saved: it is for whoever is waiting on
+    /// the turn (the Conductor files it in its notes).
+    pub served_by: Option<String>,
 }
 
 /// The longest role a conversation may be given, and whether a model name is one we accept.
@@ -219,6 +225,8 @@ impl Conv {
             think: false,
             model: None,
             role: None,
+            engine: None,
+            served_by: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)
@@ -240,6 +248,10 @@ impl Conv {
             c.role = d["role"]
                 .as_str()
                 .filter(|r| !r.trim().is_empty())
+                .map(str::to_string);
+            c.engine = d["engine"]
+                .as_str()
+                .filter(|e| !e.trim().is_empty())
                 .map(str::to_string);
             let u = &d["usage"];
             c.usage = Usage {
@@ -274,7 +286,7 @@ impl Conv {
         if std::fs::write(
             &tmp,
             json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" },
-                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role,
+                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine,
                 "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
         .is_ok()

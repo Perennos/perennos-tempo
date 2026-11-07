@@ -148,21 +148,32 @@ impl Fake {
     }
 }
 
-/// A fake agent: health with roles, a conversation per `new`, and an answer per `send`.
+/// A fake agent: health with roles and engines, a conversation per `new`, and an answer per `send`.
 pub fn fake_agent(roles: bool) -> Fake {
-    let convs = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    fake_agent_with(roles, true)
+}
+
+/// `fake_agent`, saying whether its health advertises engines. With engines on, a conversation
+/// made with an engine says that engine answered, as the real agent does.
+pub fn fake_agent_with(roles: bool, engines: bool) -> Fake {
+    let convs = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     Fake::start(move |r| {
         let key = r.header("x-tempo-key").unwrap_or("").to_string();
         match (r.method.as_str(), r.path.split('?').next().unwrap_or("")) {
             ("GET", "/agent/health") => (
                 200,
-                format!("{{\"ok\":true,\"guest\":true,\"stream\":true,\"roles\":{roles}}}"),
+                if engines {
+                    format!("{{\"ok\":true,\"guest\":true,\"stream\":true,\"roles\":{roles},\"engines\":true}}")
+                } else {
+                    format!("{{\"ok\":true,\"guest\":true,\"stream\":true,\"roles\":{roles}}}")
+                },
             ),
             _ if key != "test-key" => (401, "{\"error\":\"this needs the agent's key\"}".into()),
             ("POST", "/agent/new") => {
                 let mut c = convs.lock().unwrap();
                 let id = format!("conv-{}", c.len() + 1);
-                c.push((id.clone(), String::new()));
+                let pinned = r.json().str("engine").unwrap_or("").to_string();
+                c.push((id.clone(), String::new(), pinned));
                 (200, format!("{{\"conv\":\"{id}\"}}"))
             }
             ("POST", "/agent/send") => {
@@ -180,13 +191,15 @@ pub fn fake_agent(roles: bool) -> Fake {
                 let c = convs.lock().unwrap();
                 let n = c.len();
                 let said = c.last().map(|c| c.1.clone()).unwrap_or_default();
+                let engine = c.last().map(|c| c.2.clone()).unwrap_or_default();
                 // the answer repeats what it was told, so a test can see what a step was given
                 let text = format!("Answer {n}.\nI was told: {said}");
                 (
                     200,
                     format!(
-                        "{{\"events\":[{{\"type\":\"status\",\"text\":\"memory: off (guest conversation)\"}},{{\"type\":\"assistant\",\"text\":\"{}\"}}],\"busy\":false}}",
-                        crate::json_escape(&text)
+                        "{{\"events\":[{{\"type\":\"status\",\"text\":\"memory: off (guest conversation)\"}},{{\"type\":\"assistant\",\"text\":\"{}\"}}],\"busy\":false,\"engine\":\"{}\"}}",
+                        crate::json_escape(&text),
+                        crate::json_escape(&engine)
                     ),
                 )
             }
@@ -229,6 +242,10 @@ pub fn fake_room(dir: &Path, teammates: &'static str, rooms: &'static str) -> Fa
 pub struct FakeChat {
     pub calls: RefCell<Vec<(String, String, String)>>,
     pub fail_on: Option<usize>,
+    /// The engine asked for in each call, in order (empty: none).
+    pub asked: RefCell<Vec<String>>,
+    /// Report the engine asked for as the one that answered, as an agent that can pin does.
+    pub reports: bool,
 }
 
 impl Default for FakeChat {
@@ -242,6 +259,8 @@ impl FakeChat {
         FakeChat {
             calls: RefCell::new(vec![]),
             fail_on: None,
+            asked: RefCell::new(vec![]),
+            reports: false,
         }
     }
 }
@@ -256,6 +275,13 @@ impl Chat for FakeChat {
             return Err("the model fell over".into());
         }
         Ok(format!("Output of call {n}."))
+    }
+
+    fn say_on(&self, engine: &str, model: &str, role: &str, text: &str) -> Result<Said, String> {
+        self.asked.borrow_mut().push(engine.to_string());
+        let text = self.say(model, role, text)?;
+        let engine = (self.reports && !engine.is_empty()).then(|| engine.to_string());
+        Ok(Said { text, engine })
     }
 }
 
@@ -922,6 +948,79 @@ fn an_agent_without_roles_a_wrong_key_and_an_error_turn_are_each_reported() {
     a.poll = Duration::from_millis(5);
     a.patience = Duration::from_millis(40);
     assert!(a.say("", "r", "t").unwrap_err().contains("too long"));
+}
+
+#[test]
+fn the_engine_is_sent_only_to_an_agent_whose_health_says_it_takes_one() {
+    let engine = "http://10.0.0.5:11434";
+    // a newer agent: the address goes with the new conversation, and the answer names the engine
+    let newer = fake_agent_with(true, true);
+    let mut agent = Agent::new(newer.port, Some("test-key".into()));
+    agent.poll = Duration::from_millis(5);
+    assert!(agent.knows_engines());
+    let said = agent.say_on(engine, "qwen3:8b", "r", "hello").unwrap();
+    assert_eq!(said.engine.as_deref(), Some(engine));
+    assert!(said.text.starts_with("Answer 1."));
+    let reqs = newer.requests();
+    let new = reqs.iter().find(|r| r.path == "/agent/new").unwrap();
+    assert_eq!(new.json().str("engine"), Some(engine));
+    assert_eq!(new.json().str("model"), Some("qwen3:8b"));
+    // no engine to ask for: none is sent
+    agent.say_on("", "qwen3:8b", "r", "hello").unwrap();
+    let reqs = newer.requests();
+    let second = reqs
+        .iter()
+        .filter(|r| r.path == "/agent/new")
+        .nth(1)
+        .unwrap();
+    assert!(second.json().get("engine").is_none());
+
+    // an older agent: today's request, no engine, and nothing reported back
+    let older = fake_agent_with(true, false);
+    let mut agent = Agent::new(older.port, Some("test-key".into()));
+    agent.poll = Duration::from_millis(5);
+    assert!(agent.knows_roles() && !agent.knows_engines());
+    let said = agent.say_on(engine, "qwen3:8b", "r", "hello").unwrap();
+    assert_eq!(said.engine, None);
+    let reqs = older.requests();
+    let new = reqs.iter().find(|r| r.path == "/agent/new").unwrap();
+    assert!(new.json().get("engine").is_none(), "{}", new.body);
+
+    // an agent that does not list the address (its settings changed): the part is still played
+    let strict = Fake::start(|r| match r.path.split('?').next().unwrap() {
+        "/agent/health" => (200, "{\"ok\":true,\"roles\":true,\"engines\":true}".into()),
+        "/agent/new" if r.body.contains("\"engine\"") => (
+            400,
+            "{\"error\":\"engine: not one of this agent's engines\"}".into(),
+        ),
+        "/agent/new" => (200, "{\"conv\":\"c\"}".into()),
+        "/agent/send" => (200, "{\"ok\":true}".into()),
+        _ => (
+            200,
+            "{\"events\":[{\"type\":\"assistant\",\"text\":\"played\"}],\"busy\":false}".into(),
+        ),
+    });
+    let mut agent = Agent::new(strict.port, None);
+    agent.poll = Duration::from_millis(5);
+    let said = agent.say_on(engine, "m", "r", "t").unwrap();
+    assert_eq!((said.text.as_str(), said.engine), ("played", None));
+    assert_eq!(
+        strict
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/agent/new")
+            .count(),
+        2
+    );
+    // any other refusal is still an error
+    let broken = Fake::start(|r| match r.path.split('?').next().unwrap() {
+        "/agent/health" => (200, "{\"ok\":true,\"roles\":true,\"engines\":true}".into()),
+        _ => (400, "{\"error\":\"role: at most 2000 characters\"}".into()),
+    });
+    let e = Agent::new(broken.port, None)
+        .say_on(engine, "m", "r", "t")
+        .unwrap_err();
+    assert!(e.contains("role: at most"), "{e}");
 }
 
 // ---- run
@@ -2100,6 +2199,59 @@ fn a_run_checks_the_engines_again_and_the_index_note_says_who_played() {
         .borrow()
         .iter()
         .all(|(m, _, _)| m == "qwen3:8b" || m == "qwen3:4b"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_run_asks_for_each_members_engine_and_the_index_note_names_who_played() {
+    let root = tmp("engine-pin");
+    let ctx = ctx_in(&root, true);
+    let mut band = templates::find("study").unwrap().band("study", &models());
+    let outside = vec![
+        engine("local", true, 5, &[("qwen3:8b", 8.2), ("qwen3:4b", 4.0)]),
+        engine(
+            "10.0.0.5:11434",
+            true,
+            20,
+            &[("qwen3:8b", 8.2), ("big:70b", 70.0)],
+        ),
+    ];
+    engines::assign(&mut band, &outside);
+    let cast = engines::cast(&band, &outside);
+    let flow = band.flow("weekly-plan").unwrap();
+    let go = |chat: &FakeChat| {
+        let mut out = Vec::new();
+        let done = run::run_flow_cast(&ctx, &band, flow, None, chat, NOW, &cast, &mut out).unwrap();
+        std::fs::read_to_string(done.index).unwrap()
+    };
+    // an agent that pins: each step is asked for its cast engine's address, and the note says
+    // which engine answered
+    let chat = FakeChat {
+        reports: true,
+        ..FakeChat::new()
+    };
+    let text = go(&chat);
+    let asked = chat.asked.borrow().clone();
+    assert_eq!(asked.len(), flow.steps.len());
+    for (handle, url) in flow.steps.iter().zip(&asked) {
+        let c = cast.iter().find(|c| &c.handle == handle).unwrap();
+        assert_eq!((url, url.is_empty()), (&c.url, false), "{handle}");
+    }
+    assert!(
+        text.contains("played on 10.0.0.5:11434, model qwen3:8b"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("The agent decides which engine answers"),
+        "{text}"
+    );
+    // an agent that cannot say: the note keeps today's words
+    let text = go(&FakeChat::new());
+    assert!(
+        text.contains("The agent decides which engine answers"),
+        "{text}"
+    );
+    assert!(!text.contains("played on"), "{text}");
     let _ = std::fs::remove_dir_all(root);
 }
 

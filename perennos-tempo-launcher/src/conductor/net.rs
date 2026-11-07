@@ -5,7 +5,7 @@
 //! computer. No proxy, no redirect is followed.
 
 use super::spec::{Band, Member};
-use super::Chat;
+use super::{Chat, Said};
 use crate::setup::json::{parse, J};
 use crate::{json_escape, parse_response, signed, Ctx, VERSION};
 use std::io::{Read, Write};
@@ -118,8 +118,8 @@ impl Agent {
         parse(&text).map_err(|e| format!("the agent's answer was not JSON ({e})"))
     }
 
-    /// Whether this agent can hold a conversation with its own model and role.
-    pub fn knows_roles(&self) -> bool {
+    /// What the agent's health says it can do: (own model and role, own engine).
+    fn abilities(&self) -> (bool, bool) {
         request(
             self.port,
             "GET",
@@ -128,14 +128,40 @@ impl Agent {
             None,
             Duration::from_secs(5),
         )
-        .is_ok_and(|(c, b)| c == 200 && signed(&b, &["\"roles\":true"]))
+        .ok()
+        .filter(|(c, b)| *c == 200 && signed(b, &["\"ok\":true"]))
+        .map_or((false, false), |(_, b)| {
+            (
+                signed(&b, &["\"roles\":true"]),
+                signed(&b, &["\"engines\":true"]),
+            )
+        })
+    }
+
+    /// Whether this agent can hold a conversation with its own model and role.
+    pub fn knows_roles(&self) -> bool {
+        self.abilities().0
+    }
+
+    /// Whether a conversation can ask for an engine of its own (an older agent only has its own
+    /// order: the main engine, then the fallbacks).
+    pub fn knows_engines(&self) -> bool {
+        self.abilities().1
     }
 
     /// A new guest conversation: no tools, no memory of the owner's files.
     pub fn new_guest(&self, model: &str, role: &str) -> Result<String, String> {
+        self.new_guest_on(model, role, "")
+    }
+
+    /// `new_guest`, asking for `engine` (an address; empty: the agent's own order).
+    pub fn new_guest_on(&self, model: &str, role: &str, engine: &str) -> Result<String, String> {
         let mut body = format!("{{\"mode\":\"guest\",\"role\":\"{}\"", json_escape(role));
         if !model.is_empty() {
             body.push_str(&format!(",\"model\":\"{}\"", json_escape(model)));
+        }
+        if !engine.is_empty() {
+            body.push_str(&format!(",\"engine\":\"{}\"", json_escape(engine)));
         }
         body.push('}');
         let j = self.call("POST", "/agent/new", Some(&body))?;
@@ -146,6 +172,11 @@ impl Agent {
 
     /// Send one message and wait for the turn to end; the answer is the last thing it said.
     pub fn ask(&self, conv: &str, text: &str) -> Result<String, String> {
+        self.ask_on(conv, text).map(|a| a.text)
+    }
+
+    /// `ask`, with the engine the agent says answered (an agent that does not say, gives none).
+    pub fn ask_on(&self, conv: &str, text: &str) -> Result<Said, String> {
         let body = format!(
             "{{\"conv\":\"{}\",\"text\":\"{}\"}}",
             json_escape(conv),
@@ -161,7 +192,8 @@ impl Agent {
                 None,
             )?;
             if j.bool("busy") != Some(true) {
-                return answer_of(&j);
+                let engine = j.str("engine").filter(|e| !e.is_empty()).map(String::from);
+                return answer_of(&j).map(|text| Said { text, engine });
             }
             if Instant::now() > end {
                 return Err("the model took too long to answer".into());
@@ -192,6 +224,20 @@ impl Chat for Agent {
     fn say(&self, model: &str, role: &str, text: &str) -> Result<String, String> {
         let conv = self.new_guest(model, role)?;
         self.ask(&conv, text)
+    }
+
+    /// The engine is only sent when the agent's health says it can take one. An agent that
+    /// refuses the address (its settings do not list it) is asked again without it, so the part
+    /// is still played, on the agent's own order.
+    fn say_on(&self, engine: &str, model: &str, role: &str, text: &str) -> Result<Said, String> {
+        let pin = !engine.is_empty() && self.knows_engines();
+        let conv = match self.new_guest_on(model, role, if pin { engine } else { "" }) {
+            Err(e) if pin && e.starts_with("the agent said: engine:") => {
+                self.new_guest(model, role)?
+            }
+            r => r?,
+        };
+        self.ask_on(&conv, text)
     }
 }
 

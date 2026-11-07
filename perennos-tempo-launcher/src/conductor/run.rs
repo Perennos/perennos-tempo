@@ -150,12 +150,23 @@ struct Step {
     handle: String,
     name: String,
     instrument: String,
+    /// The address of the engine the agent said played this step, when it said.
+    engine: Option<String>,
 }
 
 impl Step {
     fn file(&self) -> String {
         format!("{} {}", self.n, self.handle)
     }
+}
+
+/// A name for the engine at `url`: the id the Conductor knows it by, else its address.
+fn engine_label(url: &str, cast: &[Cast]) -> String {
+    let bare = url.trim_end_matches('/');
+    cast.iter()
+        .find(|c| !c.url.is_empty() && c.url.trim_end_matches('/') == bare)
+        .map(|c| c.engine.clone())
+        .unwrap_or_else(|| bare.split_once("://").map_or(bare, |x| x.1).to_string())
 }
 
 fn link(base: &str, folder: &str, file: &str, label: &str) -> String {
@@ -202,11 +213,26 @@ fn index_note(
         .collect();
     if !used.is_empty() {
         t.push_str("\nEngines, as the Conductor cast them for this run:\n");
+        let (mut told, mut guessed) = (false, false);
         for c in used {
-            let on = if c.engine.is_empty() {
-                "the agent's own order".to_string()
-            } else {
-                c.engine.clone()
+            let played = done
+                .iter()
+                .rev()
+                .find(|s| s.handle == c.handle)
+                .and_then(|s| s.engine.as_deref());
+            let on = match played {
+                Some(url) => {
+                    told = true;
+                    format!("played on {}", engine_label(url, cast))
+                }
+                None => {
+                    guessed = true;
+                    if c.engine.is_empty() {
+                        "the agent's own order".to_string()
+                    } else {
+                        c.engine.clone()
+                    }
+                }
             };
             t.push_str(&format!(
                 "- {} ({}): {on}, model {}",
@@ -217,7 +243,12 @@ fn index_note(
             }
             t.push('\n');
         }
-        t.push_str("The agent decides which engine answers: it tries the first one it knows and moves on only when one cannot be reached.\n");
+        if guessed {
+            t.push_str("The agent decides which engine answers: it tries the first one it knows and moves on only when one cannot be reached.\n");
+        }
+        if told {
+            t.push_str("The agent asks the engine a member was cast on first, and moves on to the next one when it cannot be reached or does not have the model.\n");
+        }
     }
     t.push_str("\nDrafts by AI members on this computer. Nothing here was posted or sent.\n");
     t
@@ -360,8 +391,12 @@ pub fn run_flow_cast(
             .iter()
             .find(|c| &c.handle == handle)
             .map_or(m.model.as_str(), |c| c.model.as_str());
-        let answer = match chat.say(model, &with_guard(&m.role), &ask) {
-            Ok(a) => redact(a.trim()),
+        let url = cast
+            .iter()
+            .find(|c| &c.handle == handle)
+            .map_or("", |c| c.url.as_str());
+        let (answer, engine) = match chat.say_on(url, model, &with_guard(&m.role), &ask) {
+            Ok(a) => (redact(a.text.trim()), a.engine),
             Err(e) => {
                 let why = format!("{} could not answer ({e})", m.name);
                 let _ = write_atomic(
@@ -389,6 +424,7 @@ pub fn run_flow_cast(
             handle: handle.clone(),
             name: m.name.clone(),
             instrument: m.instrument.clone(),
+            engine,
         };
         let file = dir.join(format!("{}.md", step.file()));
         let body = step_note(
