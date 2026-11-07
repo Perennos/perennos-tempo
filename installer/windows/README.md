@@ -135,7 +135,7 @@ Python 3 and Inno Setup 6.4 or later.
    as `tempo.ico`, `tempo-vault.ico` and `tempo-room.ico` (16 to 256 pixels; the same P, each app's dot in its
    own colour from the products' palette) and the small wizard image, and turns `art/wizard-large-<pct>.png`
    into the large wizard images at Inno Setup's seven sizes. Those PNGs are the README's lattice look,
-   rendered from `docs/brand` (`wizard.html` with `field.mjs`, the same picture at every size): to redraw them,
+   rendered from brand art sources that are kept privately (the same picture at every size): to redraw them,
    follow `art/finish_wizard_art.py` (Playwright and Pillow; the build itself needs neither).
 2. Compiles the programs (`--release --locked`), each into a fresh `build/stage/<version>-<time>` folder.
 3. Writes `legal/THIRD-PARTY-NOTICES.txt` (`notices.py`: every crate built into the programs, with the license
@@ -185,6 +185,6 @@ duplicate, choices kept); `tempo-launch` starting the agent, the vault, the room
 connecting Tempo Vault, Tempo Studio and Tempo Room as tools, and `stop` ending all of them; "Open as Tempo
 Vault" on a new folder; uninstalling (everything Setup made removed, the user's PATH restored exactly, the
 vault and Tempo's data kept); both editions built, installed and uninstalled, with their license pages; and
-every wizard page of the full edition, driven and photographed (`screens/`). Not testable under Wine: the
+every wizard page of the full edition, driven and photographed. The old screenshots showed the first installer and were removed; new ones are taken from the v2 installer. Not testable under Wine: the
 hourly task (Wine's `schtasks` has no `/TR`), SmartScreen and signing, and Windows' own look. Those need a run
 on a real Windows 10 or 11 machine.

@@ -2,12 +2,14 @@
 """Makes the rendered large wizard images exact in size. Only needed when the art is redrawn
 (it uses Pillow); the build itself reads the finished PNGs with the standard library.
 
-  1. Serve the repository root: python3 -m http.server 8931 --bind 127.0.0.1
-  2. node docs/brand/shoot-wizard.js http://127.0.0.1:8931 RAW_DIR
+  1. Serve the brand art sources (kept privately, not in this repository):
+     python3 -m http.server 8931 --bind 127.0.0.1
+  2. Render the wizard page from them with the private shoot-wizard.js:
+     node shoot-wizard.js http://127.0.0.1:8931 RAW_DIR
   3. python3 installer/windows/art/finish_wizard_art.py RAW_DIR installer/windows/art
 
 Each render is trimmed to Inno Setup's exact size (evenly from both edges, so nothing is
-stretched) and kept in full colour: 256 colours (as docs/brand/README.md does for the README)
+stretched) and kept in full colour: 256 colours (as the private brand README does for the README)
 flattens the warm glow and the grain behind the lattice.
 """
 import os

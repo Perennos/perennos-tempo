@@ -44,9 +44,9 @@ The screenshots must be of the real apps on Windows, so they are not made here.
 
 | Existing file | Use in the Store? | Why |
 | --- | --- | --- |
-| `installer/windows/screens/*.png` (installer wizard, 895 x 565, from Wine) | No | Too small for the Store (minimum 1366 x 768), they show the old installer and a Linux user name in the paths. They belong in the installer README only. |
-| `docs/gui-reference/current-gui-field-*.png` | No | They show the Field, which is not in the Store edition, and may hold real data. |
-| `docs/brand` pages (hero, flow, privacy diagrams) | Maybe as hero art | Render a 1920 x 1080 hero from `hero.html` if you want one; it carries no personal data. |
+| `installer/windows/screens/*.png` (installer wizard, 895 x 565, from Wine) | No | Too small for the Store (minimum 1366 x 768). The old ones were removed because they showed the first installer; new screenshots are taken from the v2 installer and belong in the installer README only. |
+| Field screenshots from the private brand and GUI sources | No | They show the Field, which is not in the Store edition, and may hold real data. |
+| Brand art pages (hero, flow, privacy diagrams; sources kept privately) | Maybe as hero art | Render a 1920 x 1080 hero from the private `hero.html` if you want one; it carries no personal data. |
 | Any screenshot of the apps made on the owner's own machines | No | Real data. Regenerate every app screen with the generic data above. |
 
 ## How to take them

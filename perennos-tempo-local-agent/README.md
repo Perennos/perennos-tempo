@@ -22,6 +22,21 @@ The Tempo home is found by the one rule every Perennos Tempo product shares (`sr
 
 On Windows, `build.rs` gives `tempo-local-agent.exe` its icon (`assets/tempo-local-agent.ico`) and version details (Perennos Tempo Agent, by Perennos) when a resource compiler (`rc.exe` or `windres`) is there; without one it is built the same, minus those.
 
+Through the repository CLI, `python tempo.py agent "list the files in ~/notes"` (or `tempo.sh` / `tempo.cmd`) runs this binary; it looks in `TEMPO_AGENT_BIN`, then `target/{release,debug}` here, then `PATH`. With no prompt it reads one turn per line from stdin.
+
+## Relation to the Python harness
+
+This crate is the Rust port of `tempo-agent/tempo_agent.py` and `mcphost.py`: the agent loop with its step cap and repeat-call guard, the fast and heavy lanes, engine retry and fallback, MCP hosting, RAG, conversations and the workflow file, and the built-in tools. It adds `edit_file`, `grep`, `glob`, `apply_patch`, prompt reuse (`prefix_stable`), guest conversations for rooms, and automatic product tools. The Python harness stays in `tempo-agent/` and reads its own `agent-config.json` (see `agent-config.example.json` there); the two config files have different keys, and both stay local and uncommitted. An earlier, smaller Rust port in `tempo-agent/src` was retired so there is one port, not two; `git show 30e6d83:tempo-agent/src/agent.rs` shows it.
+
+Still to do:
+
+1. Run `serve` on a machine with the real GUI, real Ollama and real MCP servers, then start the binary instead of `tempo_agent.py` from the launcher scripts.
+2. `claude_code`, the Python tool that hands a task to Claude Code on the local engine, has no Rust equivalent yet.
+3. Measure the prompt-reuse saving on a large model and with real MCP servers; so far only mocks have been used.
+4. CI runs the Rust tests on Linux, macOS and Windows runners for the products; this crate's own tests have only been tried on Linux.
+
+Never commit config files with real paths or hosts, conversations, workflows, logs, `rag-index.json`, memory files or tokens. The CI leak scan rejects token shapes and home-network addresses, so tests build token-shaped strings at run time.
+
 ## Serve the Tempo GUI
 
 ```
