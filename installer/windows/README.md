@@ -47,6 +47,16 @@ a tool and terminals find the same data. Hourly learning is the scheduled task "
 (the same name `tempo-vault schedule` uses, so there is only ever one). Start at sign-in is
 `HKCU\...\Run\Perennos Tempo` running `tempo-launch start`.
 
+Models: Setup downloads nothing large unless "Download models that fit this computer now" is ticked, and it is
+not ticked by default (it says several gigabytes, and needs Ollama). Ticked with Ollama found (for this user, in
+`Program Files\Ollama`, or on PATH), Setup runs `tempo-launch setup --apply --yes` hidden. In every other case it
+runs only `tempo-launch setup --page`, which writes the plan to `<the Tempo home>\setup.html` and downloads
+nothing; Perennos Tempo opens that page at its first start. Setup never installs Ollama: the Finished page says
+where to get it (https://ollama.com/download) when it was not found.
+
+The Tempo Studio shortcut runs `tempo-launch studio`, which opens Tempo, where Studio's tools are used. It carries
+`tempo.ico`: the build makes no separate Studio icon.
+
 Every shortcut runs `tempo-launch.exe`, a program without a console window. It starts an app's server
 hidden if it is not running, waits until it answers, and opens it in the browser. Each server's output goes
 to `<the Tempo home>\logs\<app>.log` (usually `%LOCALAPPDATA%\Perennos Tempo\logs`). If an app cannot start, a page says why, with the last
