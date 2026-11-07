@@ -1403,8 +1403,10 @@ mod tests {
         Rules::load(&ctx, &st)
     }
 
+    // The tests paste real paths into the JSON text. On Windows those carry backslashes, which
+    // JSON reads as escapes, so they're doubled first. No test text uses an escape on purpose.
     fn args(t: &str) -> J {
-        parse(t).unwrap()
+        parse(&t.replace('\\', "\\\\")).unwrap()
     }
 
     fn bins(map: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<PathBuf> {
