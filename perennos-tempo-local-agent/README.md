@@ -213,6 +213,12 @@ A soundcheck runs only read-only git commands (the agent's own read-only list), 
 - TLS uses the built-in list of authorities, or the bundle in `SSL_CERT_FILE` when it names one (as for curl, Python and OpenSSL), so a company's own authority or a TLS-inspecting proxy works.
 - `protect_regex` (optional) refuses stop/kill commands that mention protected services. `delegate` only allows a host's configured house models, and `comfy_image` refuses to run while the GPU lease status says it is held.
 
+## Leaner requests
+
+- **A steady context.** `num_ctx` is sized to the conversation (4096, 8192, 16384, then 32768), never above the config's `num_ctx` for that model or the model's own context length, and it only steps up within a conversation. Ollama reuses the prompt it already read as long as the size stays put, so a change costs a full re-read. With the default `default_num_ctx` of 8192 a chat uses 4096 or 8192; raise it in the settings to let long chats grow.
+- **Structured answers.** Where Tempo needs JSON back (Soundcheck's lens passes and second listen, the Conductor's `--describe` band), the request carries Ollama's `format` with a JSON Schema. An engine or model that refuses it is asked again without, once, and not asked with it again; the old check-and-ask-again stays as the safety net. `POST /agent/new` takes an optional `format` object for a conversation whose every answer should follow a schema.
+- **keep_alive** is the config's value (default `60m`). Tempo's own Ollama also starts with flash attention and a q8 cache; see `docs/TEMPO-SETUP.md`.
+
 ## Config keys
 
 All keys are optional. See `config.example.json` for placeholders.

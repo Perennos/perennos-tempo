@@ -588,9 +588,16 @@ impl Agent {
         let key = conv.path.to_string_lossy().into_owned();
         let pin = conv.engine.clone();
         let pin = pin.as_deref();
+        // a conversation that was opened with a JSON Schema answers in that shape
+        let format = conv.format.clone();
+        let extra = ollama::Extra {
+            format: format.as_ref(),
+            conv: Some(&key),
+            ..Default::default()
+        };
         loop {
             let model = models[*idx].clone();
-            let mut last = match ollama::chat_pooled(
+            let mut last = match ollama::chat_pooled_with(
                 cfg,
                 Some(&key),
                 pin,
@@ -598,6 +605,7 @@ impl Agent {
                 messages,
                 tools,
                 think,
+                &extra,
                 &mut |t| hold.push(t, sink),
             ) {
                 Ok(r) => return Ok(r),
@@ -617,7 +625,7 @@ impl Agent {
                 conv.emit("status", &msg);
                 sink.status(&msg);
                 std::thread::sleep(backoff(cfg.retry_delay_ms, attempt as u32));
-                match ollama::chat_pooled(
+                match ollama::chat_pooled_with(
                     cfg,
                     Some(&key),
                     pin,
@@ -625,6 +633,7 @@ impl Agent {
                     messages,
                     tools,
                     think,
+                    &extra,
                     &mut |t| hold.push(t, sink),
                 ) {
                     Ok(r) => return Ok(r),
@@ -1888,6 +1897,43 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(last["content"], "unknown tool nope_tool");
+    }
+
+    #[test]
+    fn num_ctx_stays_put_across_the_turns_of_a_conversation() {
+        let m = Mock::start(chat_script(vec![
+            text_resp("one"),
+            text_resp("two"),
+            text_resp("three"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| c.default_num_ctx = 32768);
+        for q in ["hello", "and a longer follow-up question", "thanks"] {
+            a.turn(&mut conv, q, &mut VecSink::default()).unwrap();
+        }
+        let ctx: Vec<u64> = m
+            .bodies("/api/chat")
+            .iter()
+            .map(|b| b["options"]["num_ctx"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ctx.len(), 3);
+        assert!(ctx.iter().all(|n| *n == ctx[0]), "{ctx:?}");
+        assert!(m
+            .bodies("/api/chat")
+            .iter()
+            .all(|b| b["keep_alive"] == "60m"));
+    }
+
+    #[test]
+    fn a_conversation_opened_with_a_schema_asks_for_it_every_turn() {
+        let m = Mock::start(chat_script(vec![text_resp("{}"), text_resp("{}")]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        let schema = json!({"type": "object", "required": ["name"]});
+        conv.format = Some(schema.clone());
+        a.turn(&mut conv, "one", &mut VecSink::default()).unwrap();
+        a.turn(&mut conv, "two", &mut VecSink::default()).unwrap();
+        for b in m.bodies("/api/chat") {
+            assert_eq!(b["format"], schema);
+        }
     }
 
     #[test]

@@ -156,12 +156,27 @@ impl Agent {
 
     /// `new_guest`, asking for `engine` (an address; empty: the agent's own order).
     pub fn new_guest_on(&self, model: &str, role: &str, engine: &str) -> Result<String, String> {
+        self.new_guest_with(model, role, engine, "")
+    }
+
+    /// `new_guest_on`, and every answer must follow `schema` (JSON Schema text; empty: none).
+    /// An older agent ignores the field and answers as it always did.
+    pub fn new_guest_with(
+        &self,
+        model: &str,
+        role: &str,
+        engine: &str,
+        schema: &str,
+    ) -> Result<String, String> {
         let mut body = format!("{{\"mode\":\"guest\",\"role\":\"{}\"", json_escape(role));
         if !model.is_empty() {
             body.push_str(&format!(",\"model\":\"{}\"", json_escape(model)));
         }
         if !engine.is_empty() {
             body.push_str(&format!(",\"engine\":\"{}\"", json_escape(engine)));
+        }
+        if !schema.is_empty() {
+            body.push_str(&format!(",\"format\":{schema}"));
         }
         body.push('}');
         let j = self.call("POST", "/agent/new", Some(&body))?;
@@ -223,6 +238,17 @@ fn answer_of(events: &J) -> Result<String, String> {
 impl Chat for Agent {
     fn say(&self, model: &str, role: &str, text: &str) -> Result<String, String> {
         let conv = self.new_guest(model, role)?;
+        self.ask(&conv, text)
+    }
+
+    fn say_json(
+        &self,
+        model: &str,
+        role: &str,
+        text: &str,
+        schema: &str,
+    ) -> Result<String, String> {
+        let conv = self.new_guest_with(model, role, "", schema)?;
         self.ask(&conv, text)
     }
 

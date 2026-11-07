@@ -38,6 +38,61 @@ Answer with the JSON object only.\n\nThe team to adapt:\n{}",
     )
 }
 
+/// The band's shape as a JSON Schema, so an engine that can hold a model to one does. Only what
+/// `from_j` needs; the rest of the checking stays in `spec`.
+fn band_schema() -> String {
+    let text = || J::Obj(vec![("type".into(), J::s("string"))]);
+    let list = |item: J| J::Obj(vec![("type".into(), J::s("array")), ("items".into(), item)]);
+    let object = |required: &[&str], props: Vec<(String, J)>| {
+        J::Obj(vec![
+            ("type".into(), J::s("object")),
+            (
+                "required".into(),
+                J::strings(&required.iter().map(|r| r.to_string()).collect::<Vec<_>>()),
+            ),
+            ("properties".into(), J::Obj(props)),
+        ])
+    };
+    let member = object(
+        &["handle", "name", "instrument", "role", "may"],
+        vec![
+            ("handle".into(), text()),
+            ("name".into(), text()),
+            ("instrument".into(), text()),
+            ("role".into(), text()),
+            (
+                "may".into(),
+                J::Obj(vec![
+                    ("type".into(), J::s("string")),
+                    (
+                        "enum".into(),
+                        J::strings(&["talk".to_string(), "draft".to_string()]),
+                    ),
+                ]),
+            ),
+        ],
+    );
+    let flow = object(
+        &["name", "goal", "steps", "every"],
+        vec![
+            ("name".into(), text()),
+            ("goal".into(), text()),
+            ("steps".into(), list(text())),
+            ("every".into(), text()),
+        ],
+    );
+    object(
+        &["name", "about", "members", "flows"],
+        vec![
+            ("name".into(), text()),
+            ("about".into(), text()),
+            ("members".into(), list(member)),
+            ("flows".into(), list(flow)),
+        ],
+    )
+    .compact()
+}
+
 /// The first `{` to the last `}`: models like to wrap JSON in a sentence or a code fence.
 fn json_in(text: &str) -> Option<&str> {
     let (a, b) = (text.find('{')?, text.rfind('}')?);
@@ -105,10 +160,11 @@ pub fn from_description(
     } else {
         &models.heavy
     };
-    let answer = match chat.say(
+    let answer = match chat.say_json(
         thinker,
         DRAFTER,
         &ask_text(&description, &normalised(plain.to_j(), name).pretty()),
+        &band_schema(),
     ) {
         Ok(a) => a,
         Err(e) => return fallback(e),
@@ -222,6 +278,46 @@ mod tests {
         assert!(from_description(BAKERY, None, &models(), &chat)
             .1
             .contains("1 to 4 flows"));
+    }
+
+    #[test]
+    fn describe_holds_the_model_to_the_bands_json_shape() {
+        struct Spy(RefCell<Vec<String>>);
+        impl Chat for Spy {
+            fn say(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
+                Err("say_json should have been used".into())
+            }
+            fn say_json(&self, _: &str, _: &str, _: &str, schema: &str) -> Result<String, String> {
+                self.0.borrow_mut().push(schema.into());
+                Err("stop here".into())
+            }
+        }
+        let spy = Spy(RefCell::new(vec![]));
+        let (_, how) = from_description(BAKERY, None, &models(), &spy);
+        assert!(how.contains("stop here"), "{how}");
+        let sent = spy.0.borrow();
+        let schema = parse(&sent[0]).expect("the schema is JSON");
+        assert_eq!(schema.str("type"), Some("object"));
+        assert_eq!(
+            schema.strs("required"),
+            ["name", "about", "members", "flows"]
+        );
+        let member = schema
+            .get("properties")
+            .unwrap()
+            .get("members")
+            .unwrap()
+            .get("items")
+            .unwrap();
+        assert_eq!(
+            member
+                .get("properties")
+                .unwrap()
+                .get("may")
+                .unwrap()
+                .strs("enum"),
+            ["talk", "draft"]
+        );
     }
 
     #[test]
