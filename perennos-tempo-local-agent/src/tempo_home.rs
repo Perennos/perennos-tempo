@@ -310,7 +310,10 @@ mod tempo_home_tests {
             (
                 "env beats windows legacy",
                 true,
-                vec![("TEMPO_HOME", "D:/t"), ("TEMPO_LEGACY_HOME", "D:/old-tempo")],
+                vec![
+                    ("TEMPO_HOME", "D:/t"),
+                    ("TEMPO_LEGACY_HOME", "D:/old-tempo"),
+                ],
                 Some("U"),
                 vec!["D:/old-tempo"],
                 "D:/t",

@@ -505,7 +505,10 @@ mod tests {
         let none = |_: &str| None;
         assert_eq!(candidates(true, &none, Some(Path::new("C:/u"))).len(), 1);
         let legacy_env = |k: &str| (k == "TEMPO_LEGACY_HOME").then(|| OsString::from("D:/old"));
-        assert_eq!(candidates(true, &legacy_env, Some(Path::new("C:/u"))).len(), 2);
+        assert_eq!(
+            candidates(true, &legacy_env, Some(Path::new("C:/u"))).len(),
+            2
+        );
     }
 
     #[test]
