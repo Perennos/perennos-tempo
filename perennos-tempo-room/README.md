@@ -2,7 +2,8 @@
 
 A private group chat for Perennos Tempo. People talk; anyone can write `@tempo` and Perennos
 Tempo answers in the thread, the way people use @grok on X. Rooms for the family, the team, a
-book club. Runs on your machine next to the agent; Discord, Telegram and WhatsApp can be
+book club. You can also set up **teammates**: named AI members you talk to like colleagues (see
+"Your team"). Runs on your machine next to the agent; Discord, Telegram and WhatsApp can be
 bridged in, so the same Tempo answers there too.
 
 One binary, `tempo-room`. The HTTP server and the app are std only (no build step). `ureq` (with
@@ -31,8 +32,9 @@ The data folder is `--data DIR`, else `TEMPO_ROOM_DATA`, else `<Tempo home>/room
   signs you in once and trades it for a random session cookie (30 days; Sign out ends it on the
   server); the link itself is never the cookie, and only its hash is kept. The owner makes rooms,
   invites, mutes, removes and sets Tempo's tone.
-- **Invites work once and expire** (48 hours unless `--hours N` or `invite_hours`). The invite
-  sheet in the app and `tempo-room invite ROOM` give a link and a code you can read out loud
+- **Invites work once and expire** (48 hours unless `--hours N` or `invite_hours`). The code is
+  the key to the room: the **Share this room** sheet in the app and `tempo-room invite ROOM` give
+  a link and a code you can read out loud
   (`XXXXX-XXXXX`; O and 0, I and 1 are the same). Codes are kept only as hashes.
 - **Joining** asks for a name and gives the device a session cookie (HttpOnly, SameSite=Strict).
   The same person invited to a second room keeps their name and gets the room added.
@@ -80,6 +82,59 @@ The room only listens on this machine until you say otherwise. Three ways, easie
 Whenever the room listens beyond loopback, `serve` prints a warning: the traffic is plain HTTP
 there, so use it only on Tailscale (encrypted) or a network you trust, never the open internet.
 
+## Your team
+
+Teammates are named AI members you set up and then talk to like colleagues: write `@sage` in a
+message and Sage answers in the thread, under its own name. A teammate has:
+
+- a **handle** (`@sage`: 2 to 24 lowercase letters, digits or hyphens) and a **name** (Sage);
+- a **role**: your instruction for it, in your own words, up to 2,000 characters ("You are a calm
+  cooking coach. Keep answers to one sentence.");
+- a **kind**:
+  - **agent** answers through your Perennos Tempo agent, in guest mode, like `@tempo`, with a
+    conversation of its own in each room. An agent that supports teammate roles uses the role and
+    the model you pick; an older agent uses its own models, and Room puts the role in front of each
+    request instead;
+  - **engine** is a direct chat with one model in Ollama (it needs a model, like `qwen3:4b`). Room
+    sends the role and the room rule as the system message and the same request Tempo would get.
+    Ollama is found at `ollama_url` in `config.json`, else the `OLLAMA_URL` or `TEMPO_OLLAMA`
+    environment variable, else `http://127.0.0.1:11434`. Only this machine, a home or office
+    network, or your tailnet is ever called. When you add an engine teammate and Ollama answers,
+    the model is checked against what is installed; if Ollama is down, the teammate is kept, with a
+    note;
+- optionally a **model** (the app offers the installed ones).
+
+In the app, open **People** in a room (you are the owner): the **Team** section lists your
+teammates, adds or edits one, removes one, and has an **In this room** switch per room. From the
+command line:
+
+```
+tempo-room team list
+tempo-room team add sage --kind engine --model qwen3:4b --role "You are a calm cooking coach." --room family
+tempo-room team add coder --kind agent --name Coder --role "Review code. Be blunt."
+tempo-room team remove coder
+```
+
+How they work in a room:
+
+- **Ask** with `@handle` anywhere in a message (any case). Name several and each answers in turn,
+  in the order you wrote them. Every ask counts against the same limits as `@tempo`.
+- **A one-on-one chat**: a room set to answer every message (`/mode always`) with exactly one
+  teammate in it is a DM. That teammate answers every message instead of Tempo; `@tempo` still asks
+  Tempo.
+- Answers carry the teammate's name and `@handle`, in their own colour; a teammate can never pass
+  as Tempo or as you. "Sage is thinking" names who is working.
+- **Removing** a teammate takes it out of every room; its record moves to `trash/`, nothing is
+  deleted. Its handle and name are free again.
+- **To let someone else in**: the code is the key. **Share this room** makes a one-time code and
+  link; whoever uses it joins the room and shares everything in it, teammates included. Only you
+  (at the machine) can set teammates up; guests only ask them.
+
+Room answers one question at a time (Tempo and the teammates share it), so a slow model delays the answers behind it; a room holds at most five waiting questions.
+
+Teammates never get tools in this version: they cannot run commands, read or change files, or
+search your memory.
+
 ## Tempo in a room
 
 - **Ask** with `@tempo` anywhere in a message (any case). In a room set to `always`, Tempo
@@ -119,6 +174,18 @@ there, so use it only on Tailscale (encrypted) or a network you trust, never the
   keys, passwords in URLs. If someone pastes a key into the family room, it is kept as
   `[REDACTED]`.
 - One agent conversation per room, kept across restarts. If the agent lost it, a new one is made.
+- **Teammates are held to the same rules.** An agent teammate is a guest conversation too (one per
+  room and teammate; the owner's role is the only addition, in the system message of an agent that
+  supports roles, else in front of the request, with the people's messages still marked as data).
+  An engine teammate gets one plain chat call to Ollama with no `tools` field at all, and its
+  answer goes through the same tidy, `<think>` removal, cap and redaction as Tempo's. Approvals are
+  still denied at once. Only the owner (owner session or control key, loopback, no proxy headers)
+  can add, change or remove a teammate, or see the installed models; members see only the name,
+  handle and kind of the teammates in their room, never the role or the model. A teammate's name
+  and handle are held back like Tempo's and the owner's: no look-alikes of Tempo, the owner, a
+  member or another teammate, and nobody can join (or arrive from a bridge) under one. A teammate's
+  reply is stored as `team:<handle>`, labelled as a teammate in later prompts, and cannot ask
+  anyone itself (an `@` in its answer is plain text). Roles are redacted before they are stored.
 
 What happens when things go wrong (each path is tested):
 
@@ -259,6 +326,9 @@ tempo-room owner-link [--port N]
 tempo-room rooms [add NAME]
 tempo-room invite ROOM [--hours 48]
 tempo-room post ROOM TEXT [--as-tempo]
+tempo-room team list
+tempo-room team add HANDLE --kind agent|engine [--name N] [--role TEXT] [--model M] [--room ROOM]...
+tempo-room team remove HANDLE
 tempo-room bridges check [--live]
 tempo-room mcp
 tempo-room version
@@ -283,12 +353,13 @@ and `serve` prints a new owner link.
 | `vault` | The Perennos Tempo Vault folder (`TEMPO_VAULT` when empty) |
 | `public_url` | As `--public-url` |
 | `utc_offset` | `-05:00` and the like, when the machine's clock zone is not yours (`TEMPO_UTC_OFFSET` wins) |
-| `reply_cap`, `answer_secs`, `invite_hours` | Longest reply, longest wait for the agent, invite (and sign-in link) lifetime |
+| `reply_cap`, `answer_secs`, `invite_hours` | Longest reply, longest wait for the agent (and for an engine teammate's model), invite (and sign-in link) lifetime |
+| `ollama_url` | Where engine teammates find Ollama (`OLLAMA_URL` or `TEMPO_OLLAMA` when empty, else `http://127.0.0.1:11434`); only this machine, a private network or a tailnet |
 | `session_days` | Days a member's device can sit unused before it must sign in again (180) |
 | `limits` | `post_per_min`, `ask_per_member` per `ask_member_secs`, `ask_per_room` per `ask_room_secs`, `join_per_ip` |
 | `bridges` | See Bridges |
 
-Environment: `TEMPO_ROOM_DATA`, `TEMPO_VAULT`, `TEMPO_VAULT_BIN`, `TEMPO_UTC_OFFSET`,
+Environment: `OLLAMA_URL`, `TEMPO_OLLAMA`, `TEMPO_ROOM_DATA`, `TEMPO_VAULT`, `TEMPO_VAULT_BIN`, `TEMPO_UTC_OFFSET`,
 `TEMPO_DISCORD_TOKEN`, `TEMPO_DISCORD_CHANNELS` (`id=room,id=room`), `TEMPO_TELEGRAM_TOKEN`,
 `TEMPO_TELEGRAM_CHATS`, `TEMPO_WHATSAPP_TOKEN`, `TEMPO_WHATSAPP_VERIFY_TOKEN`,
 `TEMPO_WHATSAPP_APP_SECRET`, `TEMPO_WHATSAPP_NUMBERS`.
@@ -344,11 +415,11 @@ Environment: `TEMPO_ROOM_DATA`, `TEMPO_VAULT`, `TEMPO_VAULT_BIN`, `TEMPO_UTC_OFF
 ## Files in the data folder
 
 `config.json` (settings, bridges, the hash of the owner link), `rooms.json`, `members.json` (each member's devices, as hashes),
-`invites.json` (room invites and sign-in links, as hashes), `owner-sessions.json` (hashes), `control.key` (this run's CLI and MCP key),
+`invites.json` (room invites and sign-in links, as hashes), `team.json` (your teammates), `team-convs.json` (each teammate's agent conversation per room), `owner-sessions.json` (hashes), `control.key` (this run's CLI and MCP key),
 `messages/<room>.jsonl` (one message per line, redacted), `agent-cursors.json` (where each room's
 agent conversation is), `bridge-<name>.json` (last seen ids), `server.json` (the running
 server's address, for the CLI and MCP), `remembered/` (remember without a vault), `trash/`
-(removed members). Every rewrite is atomic and keeps the previous copy as `<file>.prev`.
+(removed members and teammates). Every rewrite is atomic and keeps the previous copy as `<file>.prev`.
 
 ## Not done (yet)
 

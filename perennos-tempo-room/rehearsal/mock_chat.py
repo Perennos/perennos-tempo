@@ -1,9 +1,11 @@
-"""A mock Ollama for the Room rehearsal: /api/version, /api/tags, /api/ps, /api/show and a
-streaming /api/chat whose answer depends on a keyword in the first line of the last user
-message (the room's "[Perennos Tempo room #id] Speaker: text" line). Every chat body is logged.
+"""A mock Ollama for the Room rehearsal: /api/version, /api/tags, /api/ps, /api/show and
+/api/chat, whose answer depends on a keyword in the first line of the last user message (the
+room's "[Perennos Tempo room #id] Speaker: text" line). With "stream": false (how an engine
+teammate calls it) the answer is one JSON reply; otherwise it streams (how the agent calls it).
+Every chat body is logged.
 
 Usage: python3 -I mock_chat.py PORT LOG_FILE PWNED_FILE (rehearse.py starts it)."""
-import json, sys, threading, time
+import json, re, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT, LOG, PWNED = int(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -11,7 +13,7 @@ lock = threading.Lock()
 FAKE_KEY = "sk-" + "A" * 32  # an API-key-shaped string the room must redact
 
 
-def answer_for(first_line):
+def answer_for(first_line, system=""):
     if "THINKTEST" in first_line:
         return ["<think>hidden reasoning about", " the owner</think>", "Visible answer."], 0, None
     if "LONGTEST" in first_line:
@@ -24,7 +26,10 @@ def answer_for(first_line):
         # a guest question that makes the model try a command: it must never run
         call = {"function": {"name": "run_command", "arguments": {"command": "echo pwned > " + PWNED}}}
         return [], 0, call
-    return ["Mock answer to: ", first_line[-60:]], 0, None
+    # an engine teammate's system message starts "You are <Name>. <role>"
+    m = re.match(r"You are ([A-Za-z0-9-]{1,32})\. ", system)
+    who = m.group(1) if m else ""
+    return [(who + " here. " if who else "") + "Mock answer to: ", first_line[-60:]], 0, None
 
 
 class H(BaseHTTPRequestHandler):
@@ -63,7 +68,16 @@ class H(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not in this mock"})
         users = [m for m in body.get("messages", []) if m.get("role") == "user"]
         first = (users[-1].get("content") or "").split("\n", 1)[0] if users else ""
-        pieces, delay, call = answer_for(first)
+        system = " ".join(m.get("content") or "" for m in body.get("messages", []) if m.get("role") == "system")
+        pieces, delay, call = answer_for(first, system)
+        if body.get("stream") is False:
+            # one JSON reply, the way a direct chat (no streaming) is answered
+            message = {"role": "assistant", "content": "".join(pieces)}
+            if call:
+                message["tool_calls"] = [call]
+            time.sleep(delay * len(pieces))
+            return self._json(200, {"model": body.get("model"), "message": message, "done": True, "done_reason": "stop",
+                                    "prompt_eval_count": 12, "eval_count": 7})
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Transfer-Encoding", "chunked")

@@ -3,6 +3,7 @@
 //! `messages/`. Every rewrite is atomic and keeps the previous copy; removed members go to
 //! `trash/`. Message text is redacted before it is stored. Session tokens and invite codes are
 //! kept only as SHA-256 hashes.
+use crate::team::{valid_handle, valid_model, valid_role, TeamKind, Teammate};
 use crate::util::{
     ct_eq, expand_home, has_hidden, name_key, new_invite_code, new_token, normalize_code,
     random_bytes, read_json, register_secret, sha256_hex, slug, to_trash, unix_now, valid_room_id,
@@ -104,6 +105,8 @@ pub enum Kind {
     Tempo,
     /// A note from the room itself (someone joined, the mode changed).
     System,
+    /// A teammate the owner set up (`from` is `team:<handle>`).
+    Teammate,
 }
 
 impl Kind {
@@ -112,12 +115,14 @@ impl Kind {
             Kind::User => "user",
             Kind::Tempo => "tempo",
             Kind::System => "system",
+            Kind::Teammate => "teammate",
         }
     }
     fn parse(s: &str) -> Kind {
         match s {
             "tempo" => Kind::Tempo,
             "system" => Kind::System,
+            "teammate" => Kind::Teammate,
             _ => Kind::User,
         }
     }
@@ -201,6 +206,8 @@ pub struct Room {
     pub created: f64,
     /// The Perennos Tempo agent conversation this room talks in (one per room).
     pub conv: Option<String>,
+    /// Handles of the teammates present in this room (Tempo is always there).
+    pub team: Vec<String>,
     /// The id the next message gets.
     pub next: u64,
     pub tail: VecDeque<Msg>,
@@ -208,7 +215,7 @@ pub struct Room {
 
 impl Room {
     fn to_json(&self) -> Value {
-        json!({"id": self.id, "name": self.name, "mode": self.mode.as_str(), "personality": self.personality.as_str(), "created": self.created, "conv": self.conv})
+        json!({"id": self.id, "name": self.name, "mode": self.mode.as_str(), "personality": self.personality.as_str(), "created": self.created, "conv": self.conv, "team": self.team})
     }
 }
 
@@ -364,6 +371,8 @@ pub struct Config {
     pub reply_cap: usize,
     /// How long Tempo waits for the agent's answer.
     pub answer_secs: u64,
+    /// Where engine teammates find Ollama (`OLLAMA_URL` or `TEMPO_OLLAMA` when empty).
+    pub ollama_url: Option<String>,
     pub invite_hours: f64,
     /// A member's session unused for this many days stops working.
     pub session_days: f64,
@@ -402,6 +411,7 @@ impl Config {
             utc_offset: Some(s("utc_offset")).filter(|x| !x.is_empty()),
             reply_cap: v["reply_cap"].as_u64().unwrap_or(1200).clamp(200, 4000) as usize,
             answer_secs: v["answer_secs"].as_u64().unwrap_or(300).clamp(5, 3600),
+            ollama_url: Some(s("ollama_url")).filter(|x| !x.is_empty()),
             invite_hours: v["invite_hours"]
                 .as_f64()
                 .unwrap_or(48.0)
@@ -432,6 +442,8 @@ pub struct Store {
     pub cfg: Config,
     pub rooms: Vec<Room>,
     pub members: Vec<Member>,
+    /// The owner's teammates (`team.json`).
+    pub team: Vec<Teammate>,
     pub invites: Vec<Invite>,
     /// Owner sessions, by hash: the browser cookie is never the owner link.
     pub owner_sessions: Vec<OwnerSession>,
@@ -505,6 +517,32 @@ fn load_tail(path: &Path, max: usize) -> (VecDeque<Msg>, u64) {
     (out, last)
 }
 
+/// Why a teammate change failed: `status` is the HTTP code to answer with (400 for a bad record,
+/// 404 for a missing one, 500 when the disk refused).
+#[derive(Debug, PartialEq)]
+pub struct TeamError {
+    pub status: u16,
+    pub msg: String,
+}
+
+impl TeamError {
+    fn bad(msg: impl Into<String>) -> TeamError {
+        TeamError {
+            status: 400,
+            msg: msg.into(),
+        }
+    }
+    fn disk(msg: String) -> TeamError {
+        TeamError { status: 500, msg }
+    }
+}
+
+impl From<TeamError> for String {
+    fn from(e: TeamError) -> String {
+        e.msg
+    }
+}
+
 pub fn valid_name(name: &str) -> Result<String, String> {
     let n: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
     let count = n.chars().count();
@@ -562,6 +600,7 @@ impl Store {
             cfg,
             rooms: vec![],
             members: vec![],
+            team: vec![],
             invites: vec![],
             owner_sessions: vec![],
         };
@@ -580,6 +619,12 @@ impl Store {
                 })
             })
             .collect();
+        s.team = read_json(&dir.join("team.json"))
+            .and_then(|v| v["team"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Teammate::from_json)
+            .collect();
         for r in read_json(&dir.join("rooms.json"))
             .and_then(|v| v["rooms"].as_array().cloned())
             .unwrap_or_default()
@@ -596,6 +641,15 @@ impl Store {
                     .unwrap_or(Personality::Warm),
                 created: r["created"].as_f64().unwrap_or(0.0),
                 conv: r["conv"].as_str().map(str::to_string),
+                // only teammates that still exist (an older folder has no `team` at all)
+                team: r["team"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| h.as_str())
+                    .filter(|h| s.team.iter().any(|t| t.handle == *h))
+                    .map(str::to_string)
+                    .collect(),
                 next: last + 1,
                 tail,
             });
@@ -748,6 +802,11 @@ impl Store {
         write_atomic(&self.dir.join("rooms.json"), v.to_string().as_bytes())
     }
 
+    pub fn save_team(&self) -> Result<(), String> {
+        let v = json!({"team": self.team.iter().map(Teammate::to_json).collect::<Vec<_>>()});
+        write_atomic(&self.dir.join("team.json"), v.to_string().as_bytes())
+    }
+
     pub fn save_members(&self) -> Result<(), String> {
         let v = json!({"members": self.members.iter().map(Member::to_json).collect::<Vec<_>>()});
         write_atomic(&self.dir.join("members.json"), v.to_string().as_bytes())
@@ -799,6 +858,7 @@ impl Store {
             personality,
             created: unix_now(),
             conv: None,
+            team: vec![],
             next: 1,
             tail: VecDeque::new(),
         });
@@ -1091,11 +1151,29 @@ impl Store {
     }
 
     /// Names that would pass for Tempo, the room itself or the owner (look-alikes included).
-    pub fn reserved_name(&self, name: &str) -> bool {
+    pub fn reserved_base(&self, name: &str) -> bool {
         let n = name_key(name);
         n.is_empty()
             || ["tempo", "perennostempo", "system", "owner", "room"].contains(&n.as_str())
             || name_key(&self.cfg.owner_name) == n
+    }
+
+    /// `reserved_base`, and the handle or display name of a teammate (so nobody, on a bridge or
+    /// by joining, can pass for one).
+    pub fn reserved_name(&self, name: &str) -> bool {
+        self.reserved_base(name) || self.teammate_key_taken(name_key(name), None)
+    }
+
+    /// Would this name pass for a teammate (its handle or display name, look-alikes included)?
+    pub fn teammate_named_like(&self, name: &str) -> bool {
+        self.teammate_key_taken(name_key(name), None)
+    }
+
+    fn teammate_key_taken(&self, key: String, except: Option<&str>) -> bool {
+        self.team.iter().any(|t| {
+            Some(t.handle.as_str()) != except
+                && (name_key(&t.handle) == key || name_key(&t.name) == key)
+        })
     }
 
     /// Use the invite at `idx`: an existing member gains the room; otherwise a new member is made.
@@ -1207,6 +1285,216 @@ impl Store {
         self.members
             .iter()
             .find(|m| m.rooms.iter().any(|r| r == room) && m.name.to_lowercase() == n)
+    }
+
+    // ---- teammates
+
+    pub fn teammate(&self, handle: &str) -> Option<&Teammate> {
+        self.team.iter().find(|t| t.handle == handle)
+    }
+
+    /// The teammates present in `room`, in the order they were put there.
+    pub fn teammates_in(&self, room: &str) -> Vec<Teammate> {
+        let Some(r) = self.room(room) else {
+            return vec![];
+        };
+        r.team
+            .iter()
+            .filter_map(|h| self.teammate(h).cloned())
+            .collect()
+    }
+
+    /// All the rules for a teammate's record. `editing`: this handle may already exist (it is the
+    /// record being changed). The handle and the display name must not pass for Tempo, the room,
+    /// the owner, a member (in any room) or another teammate, look-alikes included.
+    pub fn vet_teammate(
+        &self,
+        handle: &str,
+        name: &str,
+        role: &str,
+        kind: &str,
+        model: Option<&str>,
+        editing: bool,
+    ) -> Result<Teammate, String> {
+        let handle = valid_handle(handle.trim())?;
+        let name = valid_name(name)?;
+        let role = valid_role(role)?;
+        let kind = TeamKind::parse(kind).ok_or("A teammate's kind is agent or engine.")?;
+        let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => Some(valid_model(m)?),
+            None => None,
+        };
+        if kind == TeamKind::Engine && model.is_none() {
+            return Err("An engine teammate needs a model (like qwen3:4b).".into());
+        }
+        let exists = self.teammate(&handle).is_some();
+        if exists && !editing {
+            return Err(format!("There is already a teammate called @{handle}."));
+        }
+        if !exists && editing {
+            return Err(format!("There is no teammate called @{handle}."));
+        }
+        let keys = [name_key(&handle), name_key(&name)];
+        for what in [&handle, &name] {
+            if self.reserved_base(what) {
+                return Err(format!(
+                    "{what} would pass for Tempo, the room or the owner. Pick another."
+                ));
+            }
+        }
+        for k in &keys {
+            if let Some(m) = self.members.iter().find(|m| name_key(&m.name) == *k) {
+                return Err(format!(
+                    "{} is a member already; a teammate cannot share or imitate a member's name.",
+                    m.name
+                ));
+            }
+            if self.teammate_key_taken(k.clone(), Some(&handle)) {
+                return Err("Another teammate already has that name or handle.".into());
+            }
+        }
+        let created = self.teammate(&handle).map_or_else(unix_now, |t| t.created);
+        Ok(Teammate {
+            handle,
+            name,
+            role,
+            kind,
+            model,
+            created,
+        })
+    }
+
+    /// Add (or, with `replace`, change) a teammate and put it in `rooms` (room ids that exist).
+    /// The change reaches memory only when the disk has it: a failed save leaves both as they were.
+    pub fn insert_teammate(
+        &mut self,
+        t: Teammate,
+        rooms: &[String],
+        replace: bool,
+    ) -> Result<(), TeamError> {
+        // vet again: the lock was let go between the check and now
+        let t = self
+            .vet_teammate(
+                &t.handle,
+                &t.name,
+                &t.role,
+                t.kind.as_str(),
+                t.model.as_deref(),
+                replace,
+            )
+            .map_err(TeamError::bad)?;
+        for r in rooms {
+            if self.room(r).is_none() {
+                return Err(TeamError::bad(format!("no room {r}")));
+            }
+        }
+        let old_team = self.team.clone();
+        let old_rooms: Vec<Vec<String>> = self.rooms.iter().map(|r| r.team.clone()).collect();
+        match self.team.iter_mut().find(|x| x.handle == t.handle) {
+            Some(x) => *x = t.clone(),
+            None => self.team.push(t.clone()),
+        }
+        for r in rooms {
+            if let Some(room) = self.room_mut(r) {
+                if !room.team.contains(&t.handle) {
+                    room.team.push(t.handle.clone());
+                }
+            }
+        }
+        let saved = self.save_team().and_then(|_| {
+            if rooms.is_empty() {
+                Ok(())
+            } else {
+                self.save_rooms()
+            }
+        });
+        if let Err(e) = saved {
+            self.restore_team(old_team, old_rooms);
+            return Err(TeamError::disk(e));
+        }
+        Ok(())
+    }
+
+    /// Put memory back as it was after a failed save (and the file too, best effort, when one of
+    /// two files was already written).
+    fn restore_team(&mut self, team: Vec<Teammate>, rooms: Vec<Vec<String>>) {
+        self.team = team;
+        for (r, t) in self.rooms.iter_mut().zip(rooms) {
+            r.team = t;
+        }
+        let _ = self.save_team();
+    }
+
+    /// Put a teammate in or out of one room. False when nothing changed.
+    pub fn set_teammate_room(
+        &mut self,
+        room: &str,
+        handle: &str,
+        on: bool,
+    ) -> Result<bool, TeamError> {
+        if self.teammate(handle).is_none() {
+            return Err(TeamError {
+                status: 404,
+                msg: format!("There is no teammate called @{handle}."),
+            });
+        }
+        let r = self.room_mut(room).ok_or_else(|| TeamError {
+            status: 404,
+            msg: format!("no room {room}"),
+        })?;
+        let there = r.team.iter().any(|h| h == handle);
+        if on == there {
+            return Ok(false);
+        }
+        let before = r.team.clone();
+        r.team.retain(|h| h != handle);
+        if on {
+            r.team.push(handle.to_string());
+        }
+        if let Err(e) = self.save_rooms() {
+            if let Some(r) = self.room_mut(room) {
+                r.team = before;
+            }
+            return Err(TeamError::disk(e));
+        }
+        Ok(true)
+    }
+
+    /// Take a teammate out of every room; its record goes to `trash/`. Returns the record, the
+    /// rooms it was in, and the trash file. A failed save leaves memory as it was.
+    pub fn remove_teammate(
+        &mut self,
+        handle: &str,
+    ) -> Result<(Teammate, Vec<String>, PathBuf), TeamError> {
+        let i = self
+            .team
+            .iter()
+            .position(|t| t.handle == handle)
+            .ok_or_else(|| TeamError {
+                status: 404,
+                msg: format!("There is no teammate called @{handle}."),
+            })?;
+        let rooms: Vec<String> = self
+            .rooms
+            .iter()
+            .filter(|r| r.team.iter().any(|h| h == handle))
+            .map(|r| r.id.clone())
+            .collect();
+        let mut rec = self.team[i].to_json();
+        rec["rooms"] = json!(rooms);
+        let to = to_trash(&self.dir, &format!("teammate-{handle}"), &rec.to_string())
+            .map_err(TeamError::disk)?;
+        let old_team = self.team.clone();
+        let old_rooms: Vec<Vec<String>> = self.rooms.iter().map(|r| r.team.clone()).collect();
+        let t = self.team.remove(i);
+        for r in &mut self.rooms {
+            r.team.retain(|h| h != handle);
+        }
+        if let Err(e) = self.save_team().and_then(|_| self.save_rooms()) {
+            self.restore_team(old_team, old_rooms);
+            return Err(TeamError::disk(e));
+        }
+        Ok((t, rooms, to))
     }
 
     pub fn set_conv(&mut self, room: &str, conv: Option<String>) -> Result<(), String> {
@@ -1827,5 +2115,299 @@ pub mod tests {
         }
         assert!(!s.name_taken("family", "Mia", None));
         assert!(!s.name_taken("family", "Rileys", None));
+    }
+}
+
+#[cfg(test)]
+mod team_tests {
+    use super::*;
+    use crate::util::testdir::tmpdir;
+
+    fn store_with_room(tag: &str) -> (Store, PathBuf) {
+        let d = tmpdir(tag);
+        std::fs::write(d.join("config.json"), r#"{"owner_name": "Riley"}"#).unwrap();
+        let mut s = Store::open(&d).unwrap();
+        s.create_room("Family", Mode::Mention, Personality::Warm)
+            .unwrap();
+        (s, d)
+    }
+
+    fn add(s: &mut Store, handle: &str, name: &str) -> Result<Teammate, String> {
+        let t = s.vet_teammate(handle, name, "Help out.", "agent", None, false)?;
+        s.insert_teammate(t.clone(), &[], false)?;
+        Ok(t)
+    }
+
+    #[test]
+    fn handles_cannot_pass_for_tempo_the_owner_a_member_or_each_other() {
+        let (mut s, _) = store_with_room("handles");
+        let (code, _) = s.new_invite("family", None).unwrap();
+        let idx = s.check_invite(&code, unix_now()).unwrap();
+        s.redeem(idx, "Mia", None).unwrap();
+        // the rules for the handle itself
+        for bad in ["a", "Sage", "sa ge", "-sage", &"x".repeat(25)] {
+            assert!(add(&mut s, bad, "Sage").is_err(), "{bad}");
+        }
+        // reserved names and look-alikes of them, as handle or as display name
+        for bad in [
+            "tempo",
+            "temp0",
+            "te-mpo",
+            "perennos-tempo",
+            "system",
+            "room",
+            "owner",
+            "riley",
+            "r1ley",
+            "mia",
+            "m1a",
+        ] {
+            let e = add(&mut s, bad, "Helper").unwrap_err();
+            assert!(e.contains("pass for") || e.contains("member"), "{bad}: {e}");
+        }
+        for bad in [
+            "Tempo",
+            "T3mpo",
+            "Тemрo",
+            "Riley",
+            "RILEY",
+            "Mia",
+            "M1a",
+            "Perennos Tempo",
+        ] {
+            let r = add(&mut s, "helper", bad);
+            // `T3mpo` is not a look-alike by the crate's folding (3 is not e); the rest are
+            if bad == "T3mpo" {
+                assert!(r.is_ok());
+                s.remove_teammate("helper").unwrap();
+            } else {
+                assert!(r.is_err(), "{bad}");
+            }
+        }
+        // a good one, then no second with the same or a look-alike handle or name
+        add(&mut s, "sage", "Sage").unwrap();
+        assert!(add(&mut s, "sage", "Other")
+            .unwrap_err()
+            .contains("already"));
+        assert!(add(&mut s, "sage-2", "Sage")
+            .unwrap_err()
+            .contains("Another teammate"));
+        assert!(
+            add(&mut s, "s4ge", "Wise").is_ok(),
+            "4 is not a folded digit"
+        );
+        assert!(
+            add(&mut s, "coder", "S@ge").is_err(),
+            "@ is not allowed in a name"
+        );
+        // and nobody can join, or come over a bridge, as a teammate afterwards
+        assert!(s.reserved_name("Sage") && s.reserved_name("sage") && s.reserved_name("S4ge"));
+        assert!(s.name_taken("family", "SAGE", None));
+        let (code, _) = s.new_invite("family", None).unwrap();
+        let idx = s.check_invite(&code, unix_now()).unwrap();
+        assert!(s.redeem(idx, "Sage", None).is_err());
+        // a member's name cannot be taken by a teammate through an edit either
+        let t = s
+            .vet_teammate("sage", "Mia", "", "agent", None, true)
+            .unwrap_err();
+        assert!(t.contains("member"), "{t}");
+    }
+
+    #[test]
+    fn kinds_models_and_roles_are_checked() {
+        let (s, _) = store_with_room("kinds");
+        assert!(s
+            .vet_teammate("sage", "Sage", "", "engine", None, false)
+            .unwrap_err()
+            .contains("needs a model"));
+        assert!(s
+            .vet_teammate("sage", "Sage", "", "robot", None, false)
+            .is_err());
+        assert!(s
+            .vet_teammate("sage", "Sage", "", "engine", Some("bad model"), false)
+            .is_err());
+        assert!(s
+            .vet_teammate("sage", "Sage", &"r".repeat(2001), "agent", None, false)
+            .is_err());
+        let t = s
+            .vet_teammate(
+                "sage",
+                "Sage",
+                " Be brief. ",
+                "engine",
+                Some(" mock:4b "),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            (t.role.as_str(), t.model.as_deref()),
+            ("Be brief.", Some("mock:4b"))
+        );
+        let a = s
+            .vet_teammate("coder", "Coder", "", "agent", Some(""), false)
+            .unwrap();
+        assert_eq!(a.model, None);
+        assert!(s
+            .vet_teammate("ghost", "Ghost", "", "agent", None, true)
+            .is_err());
+    }
+
+    #[test]
+    fn teammates_are_kept_edited_put_in_rooms_and_removed_to_trash() {
+        let (mut s, d) = store_with_room("keep");
+        s.create_room("Book club", Mode::Mention, Personality::Plain)
+            .unwrap();
+        let t = s
+            .vet_teammate("sage", "Sage", "Be calm.", "engine", Some("mock:4b"), false)
+            .unwrap();
+        s.insert_teammate(t, &["family".into()], false).unwrap();
+        assert!(s
+            .insert_teammate(s.team[0].clone(), &["nowhere".into()], true)
+            .is_err());
+        assert!(s.set_teammate_room("book-club", "sage", true).unwrap());
+        assert!(
+            !s.set_teammate_room("book-club", "sage", true).unwrap(),
+            "no change"
+        );
+        assert!(s.set_teammate_room("book-club", "ghost", true).is_err());
+        assert!(s.set_teammate_room("nowhere", "sage", true).is_err());
+        // edit: role, model and name change; the handle and the creation time stay
+        let created = s.team[0].created;
+        let e = s
+            .vet_teammate(
+                "sage",
+                "Sage the Wise",
+                "Be bold.",
+                "engine",
+                Some("mock:8b"),
+                true,
+            )
+            .unwrap();
+        s.insert_teammate(e, &[], true).unwrap();
+        // a restart keeps all of it
+        let mut s2 = Store::open(&d).unwrap();
+        assert_eq!(s2.team.len(), 1);
+        let t = s2.teammate("sage").unwrap();
+        assert_eq!(
+            (
+                t.name.as_str(),
+                t.role.as_str(),
+                t.model.as_deref(),
+                t.created
+            ),
+            ("Sage the Wise", "Be bold.", Some("mock:8b"), created)
+        );
+        assert_eq!(s2.room("family").unwrap().team, ["sage"]);
+        assert_eq!(s2.teammates_in("book-club").len(), 1);
+        // remove: the record goes to trash/, nothing is deleted, it leaves every room
+        let (gone, rooms, to) = s2.remove_teammate("sage").unwrap();
+        assert_eq!((gone.handle.as_str(), rooms.len()), ("sage", 2));
+        assert!(to.starts_with(d.join("trash")));
+        let rec: Value = serde_json::from_str(&std::fs::read_to_string(&to).unwrap()).unwrap();
+        assert_eq!(rec["role"], "Be bold.");
+        assert_eq!(rec["rooms"].as_array().unwrap().len(), 2);
+        assert!(
+            d.join("team.json.prev").exists(),
+            "the previous copy is kept"
+        );
+        let s3 = Store::open(&d).unwrap();
+        assert!(s3.team.is_empty() && s3.room("family").unwrap().team.is_empty());
+    }
+
+    #[test]
+    fn a_folder_from_before_teammates_loads_and_a_stale_room_entry_is_dropped() {
+        let d = tmpdir("older");
+        std::fs::write(
+            d.join("rooms.json"),
+            r#"{"rooms":[{"id":"family","name":"Family","mode":"mention","personality":"warm","created":1.0,"conv":null}]}"#,
+        )
+        .unwrap();
+        let s = Store::open(&d).unwrap();
+        assert!(s.team.is_empty() && s.room("family").unwrap().team.is_empty());
+        std::fs::write(
+            d.join("rooms.json"),
+            r#"{"rooms":[{"id":"family","name":"Family","mode":"mention","personality":"warm","created":1.0,"conv":null,"team":["ghost"]}]}"#,
+        )
+        .unwrap();
+        assert!(Store::open(&d)
+            .unwrap()
+            .room("family")
+            .unwrap()
+            .team
+            .is_empty());
+    }
+
+    #[test]
+    fn the_secrets_in_a_role_never_reach_the_disk() {
+        let (mut s, d) = store_with_room("rolesecret");
+        let key = format!("ghp_{}", "abcdefghijKLMNOPQRSTuvwxyz0123456789");
+        let t = s
+            .vet_teammate(
+                "sage",
+                "Sage",
+                &format!("Log in with {key}"),
+                "agent",
+                None,
+                false,
+            )
+            .unwrap();
+        s.insert_teammate(t, &[], false).unwrap();
+        assert!(!crate::testutil::all_text(&d).contains(&key));
+    }
+    #[test]
+    fn width_and_accent_look_alikes_cannot_pass_for_a_teammate_tempo_or_the_owner() {
+        let (mut s, _) = store_with_room("widthfold");
+        add(&mut s, "sage", "Sage").unwrap();
+        for bad in [
+            "Ｓａｇｅ",
+            "Sagé",
+            "SÀGE",
+            "Ŝage",
+            "Ｔｅｍｐｏ",
+            "Tèmpo",
+            "Ｒｉｌｅｙ",
+            "Rïley",
+        ] {
+            assert!(s.reserved_name(bad), "{bad}");
+        }
+        for bad in ["Ｓａｇｅ", "Sagé"] {
+            let (code, _) = s.new_invite("family", None).unwrap();
+            let idx = s.check_invite(&code, unix_now()).unwrap();
+            assert!(s.redeem(idx, bad, None).is_err(), "{bad}");
+        }
+        assert!(
+            add(&mut s, "wise", "Sagé").is_err(),
+            "a second teammate cannot imitate the first"
+        );
+        assert!(
+            s.vet_teammate("ｗise", "Wise", "", "agent", None, false)
+                .is_err(),
+            "fullwidth is not a handle character"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_leaves_memory_as_it_was_and_answers_500() {
+        let (mut s, d) = store_with_room("savefail");
+        add(&mut s, "sage", "Sage").unwrap();
+        s.set_teammate_room("family", "sage", true).unwrap();
+        // the disk refuses: team.json and rooms.json are folders now
+        for f in ["team.json", "rooms.json"] {
+            std::fs::remove_file(d.join(f)).unwrap();
+            std::fs::create_dir(d.join(f)).unwrap();
+        }
+        let t = s
+            .vet_teammate("coder", "Coder", "", "agent", None, false)
+            .unwrap();
+        let e = s.insert_teammate(t, &["family".into()], false).unwrap_err();
+        assert_eq!(e.status, 500);
+        assert!(s.teammate("coder").is_none() && s.room("family").unwrap().team == ["sage"]);
+        let e = s.remove_teammate("sage").unwrap_err();
+        assert_eq!(e.status, 500);
+        assert!(s.teammate("sage").is_some() && s.room("family").unwrap().team == ["sage"]);
+        let e = s.set_teammate_room("family", "sage", false).unwrap_err();
+        assert_eq!(e.status, 500);
+        assert_eq!(s.room("family").unwrap().team, ["sage"]);
+        assert_eq!(s.remove_teammate("ghost").unwrap_err().status, 404);
     }
 }

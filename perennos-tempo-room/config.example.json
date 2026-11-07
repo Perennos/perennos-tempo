@@ -3,6 +3,7 @@
   "birthday": "",
   "agent": "http://127.0.0.1:8765",
   "vault": "",
+  "ollama_url": "",
   "public_url": "",
   "utc_offset": "",
   "reply_cap": 1200,

@@ -128,6 +128,7 @@ fn line(m: &Msg, off: i64) -> String {
         Kind::Tempo => "Tempo".to_string(),
         Kind::System => "(room)".to_string(),
         Kind::User => m.name.clone(),
+        Kind::Teammate => format!("{} (teammate)", m.name),
     };
     let reply = m
         .reply_name

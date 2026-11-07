@@ -185,6 +185,12 @@ struct AgentState {
     confirm_answer: HashMap<String, String>,
     /// Behave like an older agent without guest conversations.
     no_guest: bool,
+    /// Take a model and a role in `/agent/new` and say so in the health (`"roles": true`).
+    roles: bool,
+    /// Polls before an answer arrives (0: the usual two); more makes a turn last longer.
+    answer_polls: u32,
+    /// The `roles` answer of the next health calls, one each, before `roles` applies again.
+    health_roles: VecDeque<bool>,
     /// When set, every request but the health check must carry this `X-Tempo-Key` (else 401).
     key: Option<String>,
 }
@@ -213,6 +219,21 @@ impl FakeAgent {
         self.state.lock().unwrap().no_guest = true;
     }
 
+    /// From now on behave like an agent that takes a teammate's model and role.
+    pub fn with_roles(&self) {
+        self.state.lock().unwrap().roles = true;
+    }
+
+    /// From now on an answer takes this many polls to arrive (a turn that stays in flight).
+    pub fn slow_answers(&self, polls: u32) {
+        self.state.lock().unwrap().answer_polls = polls;
+    }
+
+    /// The next health calls answer `roles` as given, one each (the flag changes between calls).
+    pub fn roles_script(&self, answers: &[bool]) {
+        self.state.lock().unwrap().health_roles = answers.iter().copied().collect();
+    }
+
     /// From now on require this key (a restarted agent has a new one).
     pub fn require_key(&self, key: &str) {
         self.state.lock().unwrap().key = Some(key.to_string());
@@ -239,9 +260,35 @@ impl FakeAgent {
                     ok(json!({"net": true, "models": ["fake"], "stream": true}))
                 }
                 ("GET", "/agent/health") => {
-                    ok(json!({"net": true, "models": ["fake"], "stream": true, "guest": true}))
+                    let mut h =
+                        json!({"net": true, "models": ["fake"], "stream": true, "guest": true});
+                    let roles = s.health_roles.pop_front().unwrap_or(s.roles);
+                    if roles {
+                        h["roles"] = json!(true);
+                    }
+                    ok(h)
                 }
                 ("POST", "/agent/new") => {
+                    // the real agent's rules: a model is letters, digits and : . - _ / (100 at
+                    // most), a role 2,000 characters at most; otherwise 400
+                    if s.roles {
+                        let model_ok = body["model"].as_str().is_none_or(|m| {
+                            !m.is_empty()
+                                && m.len() <= 100
+                                && m.chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || ":.-_/".contains(c))
+                        });
+                        let role_ok = body["role"]
+                            .as_str()
+                            .is_none_or(|r| r.chars().count() <= 2000);
+                        if !model_ok || !role_ok {
+                            return (
+                                400,
+                                vec![],
+                                json!({"error": "bad model or role"}).to_string(),
+                            );
+                        }
+                    }
                     s.next += 1;
                     let id = format!("conv-{}", s.next);
                     s.convs.insert(id.clone(), vec![]);
@@ -291,13 +338,12 @@ impl FakeAgent {
                                 ("delta".to_string(), json!({"text": "partial"})),
                                 ("assistant".to_string(), json!({"text": a})),
                             ];
-                            s.turns.insert(
-                                conv.clone(),
-                                Turn {
-                                    later,
-                                    polls_left: 2,
-                                },
-                            );
+                            let polls_left = if s.answer_polls > 0 {
+                                s.answer_polls
+                            } else {
+                                2
+                            };
+                            s.turns.insert(conv.clone(), Turn { later, polls_left });
                         }
                         Script::Confirm(a) => {
                             push(
@@ -383,6 +429,16 @@ impl FakeAgent {
         self.state.lock().unwrap().script.push_back(s);
     }
 
+    /// The bodies of every `/agent/new`, in order.
+    pub fn new_bodies(&self) -> Vec<Value> {
+        self.http
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/agent/new")
+            .map(|r| r.json())
+            .collect()
+    }
+
     /// The texts sent to the agent, in order.
     pub fn prompts(&self) -> Vec<String> {
         self.http
@@ -392,6 +448,38 @@ impl FakeAgent {
             .map(|r| r.json()["text"].as_str().unwrap_or("").to_string())
             .collect()
     }
+}
+
+/// A mock Ollama: `GET /api/tags` lists `models`; `POST /api/chat` answers with
+/// `{"message": {"role": "assistant", "content": answer(body)}}` (stream false, one JSON reply).
+/// A model that is not in `models` gets Ollama's 404.
+pub fn fake_ollama(
+    models: &[&str],
+    answer: impl Fn(&Value) -> String + Send + Sync + 'static,
+) -> FakeHttp {
+    let models: Vec<String> = models.iter().map(|m| m.to_string()).collect();
+    FakeHttp::start(move |r| {
+        match (r.method.as_str(), r.path.as_str()) {
+        ("GET", "/api/tags") => (
+            200,
+            vec![],
+            json!({"models": models.iter().map(|m| json!({"name": m, "model": m, "size": 2_500_000_000u64})).collect::<Vec<_>>()}).to_string(),
+        ),
+        ("POST", "/api/chat") => {
+            let b = r.json();
+            let known = b["model"].as_str().is_some_and(|m| models.iter().any(|x| x == m));
+            if !known {
+                return (404, vec![], json!({"error": "model not found"}).to_string());
+            }
+            (
+                200,
+                vec![],
+                json!({"model": b["model"], "message": {"role": "assistant", "content": answer(&b)}, "done": true}).to_string(),
+            )
+        }
+        _ => (404, vec![], json!({"error": "not found"}).to_string()),
+    }
+    })
 }
 
 /// Every file under `dir`, as text (for leak checks).

@@ -24,6 +24,7 @@ const S = {
   replyTo: null,
   unread: new Map(),
   thinking: new Map(),
+  thinkers: new Map(),
   sugg: { items: [], i: 0, at: -1 },
   notes: 0,
 };
@@ -244,6 +245,7 @@ async function loadRooms() {
   if (!S.seq) S.seq = j.seq || 0;
   for (const r of S.rooms) {
     if (r.thinking && !S.thinking.has(r.id)) S.thinking.set(r.id, Date.now());
+    if (r.thinking) S.thinkers.set(r.id, r.thinking_who || []);
   }
   renderRooms();
   if (S.room) {
@@ -298,11 +300,22 @@ function renderRooms() {
   }
 }
 
+// The teammates in a room: name and kind when the people list is loaded, else just the handle.
+function teamHere(r) {
+  const known = (S.people.get(r.id) || {}).team || [];
+  return (r.team || []).map((h) => known.find((t) => t.handle === h) || { handle: h, name: h, kind: 'agent' });
+}
+
 function roomHeader(r) {
   $('chat-name').textContent = r.name;
   const people = r.members + 1;
-  const how = r.mode === 'always' ? (wide() ? 'Tempo answers every message' : 'answers all') : (wide() ? 'Mention @tempo to ask' : '@tempo to ask');
-  $('chat-meta').textContent = how + ' · ' + r.personality + ' · ' + people + (people === 1 ? ' person' : ' people');
+  const team = teamHere(r);
+  const dm = r.mode === 'always' && team.length === 1;
+  const how = dm
+    ? 'Chat with ' + team[0].name
+    : r.mode === 'always' ? (wide() ? 'Tempo answers every message' : 'answers all') : (wide() ? 'Mention @tempo to ask' : '@tempo to ask');
+  const tail = !dm && team.length ? ' · with ' + team.map((t) => t.name).join(', ') : '';
+  $('chat-meta').textContent = how + ' · ' + (dm ? '' : r.personality + ' · ') + people + (people === 1 ? ' person' : ' people') + tail;
   $('room-title').textContent = '#' + r.id;
   $('room-sep').hidden = false;
   $('room-crumb').hidden = false;
@@ -328,7 +341,10 @@ async function openRoom(id, push) {
   autosize();
   const j = await api('messages?room=' + enc(id) + '&limit=60');
   S.msgs.set(id, j.messages);
-  if (j.thinking) { if (!S.thinking.has(id)) S.thinking.set(id, Date.now()); } else S.thinking.delete(id);
+  if (j.thinking) {
+    if (!S.thinking.has(id)) S.thinking.set(id, Date.now());
+    S.thinkers.set(id, j.thinking_who || []);
+  } else { S.thinking.delete(id); S.thinkers.delete(id); }
   renderMsgs(true);
   renderThinking();
   renderRooms();
@@ -354,6 +370,8 @@ async function loadPeople(id) {
   try {
     const j = await api('members?room=' + enc(id));
     S.people.set(id, j);
+    const r = roomOf(id);
+    if (r && S.room === id) roomHeader(r);
   } catch { /* the list is a convenience */ }
 }
 
@@ -390,6 +408,7 @@ function fillText(node, text) {
 function msgNode(m, prev) {
   const cls = ['msg'];
   if (m.kind === 'tempo') cls.push('tempo');
+  if (m.kind === 'teammate') cls.push('team');
   if (m.kind === 'system') cls.push('system');
   if (isMine(m)) cls.push('mine');
   if (m.local) cls.push('local');
@@ -403,7 +422,10 @@ function msgNode(m, prev) {
   }
   const hd = el('div', 'hd');
   if (m.kind === 'tempo') hd.append(el('span', 'mark', 'tempo'));
-  else hd.append(el('span', 'who', m.name));
+  else if (m.kind === 'teammate') {
+    // a teammate is marked with its own name and handle, never with Tempo's mark
+    hd.append(el('span', 'who team', m.name), el('span', 'via', '@' + String(m.from).replace(/^team:/, '')));
+  } else hd.append(el('span', 'who', m.name));
   if (m.via === 'discord' || m.via === 'telegram' || m.via === 'whatsapp') hd.append(el('span', 'via', m.via));
   if (m.via === 'mcp' && m.kind === 'tempo') hd.append(el('span', 'via', 'via agent'));
   if (m.local) hd.append(el('span', 'via', 'only you'));
@@ -549,7 +571,16 @@ function connect() {
   es.addEventListener('typing', (e) => {
     S.seq = Math.max(S.seq, Number(e.lastEventId) || 0);
     const d = JSON.parse(e.data);
-    if (d.on) S.thinking.set(d.room, Date.now()); else S.thinking.delete(d.room);
+    const who = S.thinkers.get(d.room) || [];
+    if (d.on) {
+      if (!S.thinking.has(d.room)) S.thinking.set(d.room, Date.now());
+      if (d.who && !who.includes(d.who)) who.push(d.who);
+      S.thinkers.set(d.room, who);
+    } else {
+      const left = who.filter((n) => n !== d.who);
+      S.thinkers.set(d.room, left);
+      if (!left.length) { S.thinking.delete(d.room); S.thinkers.delete(d.room); }
+    }
     renderThinking();
     renderRoomsSoon();
   });
@@ -588,7 +619,12 @@ function renderThinking() {
   $('thinking').hidden = !since;
   if (since) {
     const s = Math.floor((Date.now() - since) / 1000);
-    $('thinking-text').textContent = s >= 10 ? 'is thinking · ' + s + ' s' : 'is thinking';
+    const names = S.thinkers.get(S.room) || [];
+    // Tempo keeps its mark; teammates are named
+    const only = names.length === 0 || (names.length === 1 && names[0] === 'Tempo');
+    $('thinking-mark').textContent = only ? 'tempo' : names.map((n) => (n === 'Tempo' ? 'tempo' : n)).join(', ');
+    const verb = names.length > 1 ? 'are thinking' : 'is thinking';
+    $('thinking-text').textContent = s >= 10 ? verb + ' · ' + s + ' s' : verb;
   }
 }
 
@@ -657,6 +693,7 @@ function suggestions(q) {
   const p = S.people.get(S.room);
   const names = ['tempo'];
   if (p) {
+    for (const t of p.team || []) names.push(t.handle);
     if (p.owner_name) names.push(p.owner_name);
     for (const m of p.members) names.push(m.name);
   }
@@ -689,7 +726,9 @@ function renderSuggest() {
     if (n === 'tempo') {
       b.append(el('span', 'mark', 'tempo'), el('i', null, 'ask Perennos Tempo'));
     } else {
+      const t = ((S.people.get(S.room) || {}).team || []).find((x) => x.handle === n);
       b.append(el('span', null, '@' + n));
+      if (t) b.append(el('i', null, t.name + ' · teammate'));
     }
     b.addEventListener('mousedown', (e) => { e.preventDefault(); pick(i); });
     box.append(b);
@@ -762,11 +801,15 @@ function closeButton() {
 async function openPeople() {
   const r = roomOf(S.room);
   await loadPeople(S.room);
-  const p = S.people.get(S.room) || { members: [], owner_name: '' };
+  const p = S.people.get(S.room) || { members: [], owner_name: '', team: [] };
   const owner = S.me.role === 'owner';
+  let team = [];
+  if (owner) {
+    try { team = (await api('team')).team; } catch (e) { toast(e.message); }
+  }
   sheet((box) => {
     box.append(el('h2', null, 'People in #' + r.id));
-    box.append(el('p', 'sub', p.members.length ? 'Everyone here can read the room and ask @tempo.' : 'Just you and Tempo so far.'));
+    box.append(el('p', 'sub', p.members.length ? 'Everyone here can read the room and ask @tempo' + ((p.team || []).length ? ' or a teammate.' : '.') : 'Just you and Tempo so far.'));
     const list = el('div');
     const row = (name, tag) => {
       const d = el('div', 'person');
@@ -778,6 +821,12 @@ async function openPeople() {
     t.firstChild.replaceWith(el('span', 'mark', 'tempo'));
     t.firstChild.classList.add('grow');
     list.append(t);
+    if (!owner) {
+      for (const t of p.team || []) {
+        const d = row(t.name, '@' + t.handle + ' · teammate');
+        list.append(d);
+      }
+    }
     for (const m of p.members) {
       const d = row(m.name, m.muted ? 'muted' : 'member');
       if (owner) {
@@ -802,6 +851,7 @@ async function openPeople() {
     }
     box.append(list);
     if (owner) {
+      teamSection(box, r, team);
       box.append(el('p', 'lbl sec', "Tempo's tone here"));
       const tone = el('div', 'seg-row');
       for (const v of ['plain', 'warm', 'playful']) {
@@ -842,15 +892,156 @@ async function openPeople() {
   });
 }
 
+// ---- Team: named AI members the owner sets up (owner only)
+
+function teamSection(box, r, team) {
+  box.append(el('p', 'lbl sec', 'Team'));
+  box.append(el('p', 'sub', 'Teammates are named AI members you talk to like colleagues. Write @handle in a message to ask one. They never get tools: they cannot run commands or change files.'));
+  const list = el('div');
+  if (!team.length) list.append(el('p', 'hint', 'No teammates yet.'));
+  for (const t of team) {
+    const here = (t.rooms || []).includes(r.id);
+    const d = el('div', 'person');
+    d.append(el('b', null, t.name), el('span', 'lbl', '@' + t.handle + ' · ' + t.kind + (t.model ? ' · ' + t.model : '')));
+    const tog = el('button', 'btn sm', here ? 'In this room' : 'Not in this room');
+    tog.type = 'button';
+    tog.setAttribute('aria-pressed', String(here));
+    tog.title = here ? 'Take ' + t.name + ' out of #' + r.id : 'Put ' + t.name + ' in #' + r.id;
+    tog.addEventListener('click', async () => {
+      try { await api('team/room', { room: r.id, handle: t.handle, on: !here }); await loadRooms(); openPeople(); } catch (e) { toast(e.message); }
+    });
+    const edit = el('button', 'btn sm', 'Edit');
+    edit.type = 'button';
+    edit.addEventListener('click', () => openTeamForm(t));
+    const rm = el('button', 'btn sm danger', 'Remove');
+    rm.type = 'button';
+    rm.addEventListener('click', async () => {
+      if (!confirm('Remove ' + t.name + ' (@' + t.handle + ')? It leaves every room; its record is kept in trash.')) return;
+      try { await api('team/remove', { handle: t.handle }); await loadRooms(); openPeople(); } catch (e) { toast(e.message); }
+    });
+    d.append(tog, edit, rm);
+    list.append(d);
+  }
+  box.append(list);
+  const add = el('button', 'btn sm', 'Add a teammate');
+  add.type = 'button';
+  add.addEventListener('click', () => openTeamForm(null));
+  const row = el('div', 'row');
+  row.append(add);
+  box.append(row);
+}
+
+async function openTeamForm(t) {
+  let models = [];
+  let note = '';
+  try {
+    const j = await api('team/models');
+    models = (j.models || []).map((m) => m.name);
+    if (j.ollama !== 'up') note = j.note || 'Ollama is not answering right now.';
+  } catch (e) { note = e.message; }
+  const editing = !!t;
+  sheet((box) => {
+    box.append(el('h2', null, editing ? 'Edit ' + t.name : 'Add a teammate'));
+    box.append(el('p', 'sub', 'A teammate has a name, a role (your instruction) and a kind. Write @handle in a room to ask it.'));
+    const form = el('form', 'team-form');
+    const field = (label, node, hint) => {
+      const l = el('label', 'lbl', label);
+      l.append(node);
+      form.append(l);
+      if (hint) form.append(el('p', 'hint small', hint));
+      return node;
+    };
+    const handle = el('input', 'field');
+    handle.maxLength = 24;
+    handle.placeholder = 'sage';
+    handle.autocomplete = 'off';
+    handle.spellcheck = false;
+    if (editing) { handle.value = t.handle; handle.disabled = true; }
+    field('Handle (lowercase letters, digits, hyphens)', handle, editing ? 'The handle cannot change. Remove the teammate and add it again for a new one.' : '');
+    const name = el('input', 'field');
+    name.maxLength = 32;
+    name.placeholder = 'Sage';
+    name.value = editing ? t.name : '';
+    field('Name', name);
+    const kind = el('select', 'field');
+    for (const [v, label] of [['agent', 'Agent (through your Perennos Tempo agent)'], ['engine', 'Engine (one model in Ollama)']]) {
+      const o = el('option', null, label);
+      o.value = v;
+      kind.append(o);
+    }
+    kind.value = editing ? t.kind : 'agent';
+    field('Kind', kind);
+    const kindHint = el('p', 'hint small', '');
+    form.append(kindHint);
+    let model;
+    if (models.length) {
+      model = el('select', 'field');
+      const none = el('option', null, "(none: the agent's own choice)");
+      none.value = '';
+      model.append(none);
+      const names = [...models];
+      if (editing && t.model && !names.includes(t.model)) names.push(t.model);
+      for (const n of names) { const o = el('option', null, n); o.value = n; model.append(o); }
+      model.value = editing && t.model ? t.model : '';
+    } else {
+      model = el('input', 'field');
+      model.placeholder = 'qwen3:4b';
+      model.maxLength = 100;
+      model.value = editing && t.model ? t.model : '';
+    }
+    field('Model (from the models installed in Ollama)', model, note ? note + ' Type the model name instead.' : '');
+    const role = el('textarea', 'field');
+    role.rows = 5;
+    role.maxLength = 2000;
+    role.placeholder = 'You are a calm cooking coach. Keep answers short.';
+    role.value = editing ? t.role : '';
+    field('Role (your instruction for this teammate, 2,000 characters at most)', role);
+    const sync = () => {
+      kindHint.textContent = kind.value === 'engine'
+        ? 'An engine chats directly with the one model above in Ollama. It needs a model, and has no tools at all.'
+        : "An agent answers through your Perennos Tempo agent in guest mode, like @tempo, with no tools. An older agent uses the agent's own models and ignores the model above.";
+    };
+    kind.addEventListener('change', sync);
+    sync();
+    const err = el('p', 'err');
+    err.setAttribute('role', 'alert');
+    const row = el('div', 'row');
+    const save = el('button', 'btn go', editing ? 'Save' : 'Add');
+    save.type = 'submit';
+    const cancel = el('button', 'btn sm', 'Back');
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => { closeSheet(); openPeople(); });
+    row.append(save, cancel);
+    form.append(err, row);
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      const body = { handle: handle.value.trim().toLowerCase().replace(/^@/, ''), name: name.value, kind: kind.value, model: model.value.trim(), role: role.value };
+      if (!editing && S.room) body.rooms = [S.room];
+      save.disabled = true;
+      try {
+        const j = await api(editing ? 'team/edit' : 'team/add', body);
+        if (j.note) toast(j.note, 9000);
+        else toast(editing ? 'Saved.' : name.value.trim() + ' is in #' + S.room + '. Write @' + body.handle + ' to ask.');
+        await loadRooms();
+        closeSheet();
+        openPeople();
+      } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
+    });
+    box.append(form);
+  });
+}
+
 async function openInvite() {
   const r = roomOf(S.room);
   let j;
   try { j = await api('invite', { room: S.room }); } catch (e) { toast(e.message); return; }
   linkSheet(j, {
-    title: 'Invite someone to #' + r.id,
-    what: 'This invite works once',
-    label: 'Invite link',
+    title: 'Share this room: #' + r.id,
+    what: 'The code is the key to this room. It works once',
+    label: 'Link to share',
     share: 'Join #' + r.id + ' on Perennos Tempo Room (code ' + j.code + ')',
+    note: 'Anyone you give this code or link to can join #' + r.id + ' once and share the room, including its teammates. Share it only with people you trust.',
   });
 }
 

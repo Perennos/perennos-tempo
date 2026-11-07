@@ -8,7 +8,7 @@
 //! loopback connection carrying the owner cookie), members hold a session cookie from a one-time
 //! invite (HttpOnly, SameSite=Strict), and everyone else sees only the join page.
 use crate::bridges::whatsapp;
-use crate::hub::{Hub, PostReq, Posted, Refusal, Speaker};
+use crate::hub::{Hub, PostReq, Posted, Refusal, Speaker, TeamInput, TeamPatch};
 use crate::store::{InviteError, Mode, Personality};
 use crate::util::{local_offset_minutes, log, unix_now};
 use serde_json::{json, Value};
@@ -734,7 +734,9 @@ fn room_json(sh: &Shared, r: &crate::store::Room, members: usize) -> Value {
             .or(r.tail.back())
             .map(|m| m.to_json()),
         "members": members,
+        "team": r.team,
         "thinking": sh.hub.thinking(&r.id),
+        "thinking_who": sh.hub.thinking_who(&r.id),
     })
 }
 
@@ -833,6 +835,7 @@ fn route(
                 "room": room,
                 "messages": msgs.iter().map(|m| m.to_json()).collect::<Vec<_>>(),
                 "thinking": hub.thinking(room),
+                "thinking_who": hub.thinking_who(room),
                 "seq": hub.seq(),
             }))
         }
@@ -855,7 +858,13 @@ fn route(
                     }
                 })
                 .collect();
-            Ok(json!({"members": list, "owner_name": st.cfg.owner_name}))
+            // the teammates present: who they are, never their role or model
+            let team: Vec<Value> = st
+                .teammates_in(room)
+                .iter()
+                .map(|t| t.public_json())
+                .collect();
+            Ok(json!({"members": list, "owner_name": st.cfg.owner_name, "team": team}))
         }
         (true, "owner") => {
             if !req.at_machine() {
@@ -1152,11 +1161,88 @@ fn route(
             let mut st = hub.lock();
             if let Some(n) = b["owner_name"].as_str() {
                 let n = crate::store::valid_name(n).map_err(|e| fail(400, e))?;
+                if st.teammate_named_like(&n) {
+                    return Err(fail(400, "A teammate already has that name."));
+                }
                 st.cfg.owner_name = n.clone();
                 st.cfg.raw["owner_name"] = json!(n);
             }
             st.save_config().map_err(|e| fail(500, e))?;
             Ok(json!({"ok": true, "owner_name": st.cfg.owner_name}))
+        }
+        // ---- the owner's team (owner only: owner session or control key, loopback, no proxy)
+        (false, "team") => {
+            need_owner(v)?;
+            let st = hub.lock();
+            let list: Vec<Value> = st
+                .team
+                .iter()
+                .map(|t| {
+                    let mut j = t.to_json();
+                    j["rooms"] = json!(st
+                        .rooms
+                        .iter()
+                        .filter(|r| r.team.contains(&t.handle))
+                        .map(|r| r.id.clone())
+                        .collect::<Vec<_>>());
+                    j
+                })
+                .collect();
+            Ok(json!({"team": list}))
+        }
+        (false, "team/models") => {
+            need_owner(v)?;
+            Ok(match hub.ollama_models() {
+                Ok(list) => json!({
+                    "ollama": "up",
+                    "models": list.iter().map(|m| json!({"name": m.name, "size": m.size})).collect::<Vec<_>>(),
+                }),
+                Err(note) => json!({"ollama": "down", "models": [], "note": note}),
+            })
+        }
+        (true, "team/add") => {
+            need_owner(v)?;
+            let rooms: Vec<String> = b["rooms"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect();
+            let input = TeamInput {
+                handle: body_str(b, "handle").trim().to_string(),
+                name: body_str(b, "name").to_string(),
+                role: body_str(b, "role").to_string(),
+                kind: body_str(b, "kind").to_string(),
+                model: b["model"].as_str().map(str::to_string),
+            };
+            let (t, note) = hub.team_add(&input, &rooms).map_err(from_refusal)?;
+            Ok(json!({"ok": true, "teammate": t.to_json(), "note": note}))
+        }
+        (true, "team/edit") => {
+            need_owner(v)?;
+            let patch = TeamPatch {
+                name: b["name"].as_str().map(str::to_string),
+                role: b["role"].as_str().map(str::to_string),
+                kind: b["kind"].as_str().map(str::to_string),
+                model: b["model"].as_str().map(str::to_string),
+            };
+            let (t, note) = hub
+                .team_edit(body_str(b, "handle"), &patch)
+                .map_err(from_refusal)?;
+            Ok(json!({"ok": true, "teammate": t.to_json(), "note": note}))
+        }
+        (true, "team/remove") => {
+            need_owner(v)?;
+            hub.team_remove(body_str(b, "handle"))
+                .map_err(from_refusal)?;
+            Ok(json!({"ok": true}))
+        }
+        (true, "team/room") => {
+            need_owner(v)?;
+            let on = b["on"].as_bool().unwrap_or(true);
+            hub.team_room(body_str(b, "room"), body_str(b, "handle"), on)
+                .map_err(from_refusal)?;
+            Ok(json!({"ok": true}))
         }
         (false, "whatsapp") | (true, "whatsapp") => {
             Err(fail(404, "the WhatsApp webhook has its own port"))
@@ -2620,5 +2706,276 @@ mod tests {
             assert!(!APP_JS.to_lowercase().contains(bad), "{bad}");
             assert!(!INDEX_HTML.to_lowercase().contains(bad), "{bad}");
         }
+    }
+    // ---- teammates
+
+    const OLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+    #[test]
+    fn the_owner_manages_the_team_over_http_and_members_see_only_who_is_here() {
+        let ollama =
+            crate::testutil::fake_ollama(&["mock:4b", "qwen3:4b"], |_| "Basil, of course.".into());
+        let agent = FakeAgent::start(vec![]);
+        let (hub, d) = hub_at(
+            &agent.url(),
+            "srv-team",
+            json!({"owner_name": "Riley", "ollama_url": ollama.url}),
+        );
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        let (mia, _) = join_as(&hub, a, &owner, "family", "Mia");
+        assert_eq!(get(a, "/room/team", &owner).1["team"], json!([]));
+        let (c, _, j) = post(
+            a,
+            "/room/team/add",
+            &owner,
+            &json!({"handle": "sage", "name": "Sage", "kind": "engine", "model": "mock:4b", "role": "Cooking coach, very kind.", "rooms": ["family"]}),
+        );
+        assert_eq!(c, 200, "{j}");
+        assert_eq!(j["teammate"]["role"], "Cooking coach, very kind.");
+        assert!(j["note"].is_null());
+        // bad ones are refused with a reason
+        for bad in [
+            json!({"handle": "Tempo", "name": "Tempo", "kind": "agent"}),
+            json!({"handle": "mia", "name": "Helper", "kind": "agent"}),
+            json!({"handle": "helper", "name": "Helper", "kind": "engine"}),
+            json!({"handle": "helper", "name": "Helper", "kind": "engine", "model": "absent:1b"}),
+            json!({"handle": "sage", "name": "Again", "kind": "agent"}),
+            json!({"handle": "helper", "name": "Helper", "kind": "agent", "rooms": ["nowhere"]}),
+        ] {
+            let (c, _, j) = post(a, "/room/team/add", &owner, &bad);
+            assert!(c == 400 || c == 404, "{bad}: {c} {j}");
+            assert!(j["error"].as_str().is_some_and(|e| !e.is_empty()));
+        }
+        let l = get(a, "/room/team", &owner).1;
+        assert_eq!(l["team"].as_array().unwrap().len(), 1);
+        assert_eq!(l["team"][0]["rooms"], json!(["family"]));
+        let m = get(a, "/room/team/models", &owner).1;
+        assert_eq!(m["ollama"], "up");
+        assert_eq!(m["models"][0]["name"], "mock:4b");
+        // a member sees who is in the room, never the role or the model
+        let (c, mem) = get(a, "/room/members?room=family", &mia);
+        assert_eq!(c, 200);
+        assert_eq!(
+            mem["team"],
+            json!([{"handle": "sage", "name": "Sage", "kind": "engine"}])
+        );
+        assert!(!mem.to_string().contains("Cooking coach") && !mem.to_string().contains("mock:4b"));
+        let rooms = get(a, "/room/rooms", &mia).1;
+        assert_eq!(rooms["rooms"][0]["team"], json!(["sage"]));
+        // Mia asks @sage and the answer is a teammate message
+        let (c, _, j) = post(
+            a,
+            "/room/post",
+            &mia,
+            &json!({"room": "family", "text": "@sage a spice?"}),
+        );
+        assert_eq!(c, 200);
+        let qid = j["msg"]["id"].as_u64().unwrap();
+        let t0 = Instant::now();
+        let ans = loop {
+            let msgs = get(a, "/room/messages?room=family", &mia).1;
+            if let Some(m) = msgs["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["kind"] == "teammate")
+            {
+                break m.clone();
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "no answer");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            (ans["name"].as_str(), ans["from"].as_str()),
+            (Some("Sage"), Some("team:sage"))
+        );
+        assert_eq!(ans["reply_to"].as_u64(), Some(qid));
+        // edit, out of the room and back in, remove
+        let (c, _, j) = post(
+            a,
+            "/room/team/edit",
+            &owner,
+            &json!({"handle": "sage", "role": "Terse.", "name": "Sage the Wise"}),
+        );
+        assert_eq!(c, 200, "{j}");
+        assert_eq!(
+            (
+                j["teammate"]["role"].as_str(),
+                j["teammate"]["model"].as_str()
+            ),
+            (Some("Terse."), Some("mock:4b"))
+        );
+        assert_eq!(
+            post(
+                a,
+                "/room/team/edit",
+                &owner,
+                &json!({"handle": "ghost", "role": "x"})
+            )
+            .0,
+            404
+        );
+        assert_eq!(
+            post(
+                a,
+                "/room/team/room",
+                &owner,
+                &json!({"room": "family", "handle": "sage", "on": false})
+            )
+            .0,
+            200
+        );
+        assert_eq!(
+            get(a, "/room/members?room=family", &mia).1["team"],
+            json!([])
+        );
+        assert_eq!(
+            post(
+                a,
+                "/room/team/room",
+                &owner,
+                &json!({"room": "family", "handle": "sage", "on": true})
+            )
+            .0,
+            200
+        );
+        assert_eq!(
+            get(a, "/room/members?room=family", &mia).1["team"][0]["name"],
+            "Sage the Wise"
+        );
+        assert_eq!(
+            post(
+                a,
+                "/room/team/room",
+                &owner,
+                &json!({"room": "family", "handle": "ghost", "on": true})
+            )
+            .0,
+            404
+        );
+        assert_eq!(
+            post(a, "/room/team/remove", &owner, &json!({"handle": "sage"})).0,
+            200
+        );
+        assert_eq!(get(a, "/room/team", &owner).1["team"], json!([]));
+        assert!(std::fs::read_dir(d.join("trash"))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains("teammate-sage")));
+        // the owner cannot be renamed into a teammate's name
+        post(
+            a,
+            "/room/team/add",
+            &owner,
+            &json!({"handle": "coder", "name": "Coder", "kind": "agent"}),
+        );
+        let (c, _, _) = post(a, "/room/settings", &owner, &json!({"owner_name": "Coder"}));
+        assert_eq!(c, 400);
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn only_the_owner_can_manage_the_team_or_see_the_models() {
+        let ollama = crate::testutil::fake_ollama(&["mock:4b"], |_| "x".into());
+        let agent = FakeAgent::start(vec![]);
+        let (hub, _) = hub_at(
+            &agent.url(),
+            "srv-team-403",
+            json!({"ollama_url": ollama.url}),
+        );
+        let key = "k".repeat(40);
+        hub.set_control_key(&key);
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        let (mia, _) = join_as(&hub, a, &owner, "family", "Mia");
+        post(
+            a,
+            "/room/team/add",
+            &owner,
+            &json!({"handle": "coder", "name": "Coder", "kind": "agent", "rooms": ["family"]}),
+        );
+        let before = hub.lock().team.clone();
+        let add = json!({"handle": "sage", "name": "Sage", "kind": "agent"});
+        let routes: Vec<(&str, &str, Value)> = vec![
+            ("GET", "/room/team", Value::Null),
+            ("GET", "/room/team/models", Value::Null),
+            ("POST", "/room/team/add", add),
+            (
+                "POST",
+                "/room/team/edit",
+                json!({"handle": "coder", "role": "mine now"}),
+            ),
+            (
+                "POST",
+                "/room/team/room",
+                json!({"room": "family", "handle": "coder", "on": false}),
+            ),
+            ("POST", "/room/team/remove", json!({"handle": "coder"})),
+        ];
+        let proxy = format!("Cookie: {owner}\r\nX-Forwarded-For: 203.0.113.9\r\n");
+        let proxy_key = format!("X-Tempo-Control: {key}\r\nX-Real-Ip: 203.0.113.9\r\n");
+        for (method, path, body) in &routes {
+            let body = if body.is_null() {
+                String::new()
+            } else {
+                body.to_string()
+            };
+            for (who, extra) in [
+                ("a member", format!("Cookie: {mia}\r\n")),
+                ("nobody", String::new()),
+                ("a guess", "Cookie: tr_owner=guess\r\n".to_string()),
+                ("the owner behind a proxy", proxy.clone()),
+                ("the control key behind a proxy", proxy_key.clone()),
+            ] {
+                let (c, _, out) = with_headers(a, method, path, &extra, &body);
+                assert_eq!(c, 403, "{who} {method} {path}: {out}");
+            }
+        }
+        assert_eq!(hub.lock().team, before, "nothing changed");
+        assert!(
+            ollama.requests().is_empty(),
+            "the models list was never fetched for them"
+        );
+        // the owner at the machine, by cookie or by the control key, can
+        assert_eq!(get(a, "/room/team", &owner).0, 200);
+        let (c, _, out) = with_headers(
+            a,
+            "GET",
+            "/room/team/models",
+            &format!("X-Tempo-Control: {key}\r\n"),
+            "",
+        );
+        assert_eq!(c, 200, "{out}");
+        assert!(!ollama.requests().is_empty());
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn the_csp_is_unchanged_and_the_app_speaks_of_teams_and_sharing() {
+        assert_eq!(APP_CSP, OLD_CSP);
+        let (hub, _) = hub_at(&dead_url(), "srv-csp", json!({}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let (c, head, _) = with_headers(r.addr, "GET", "/", "", "");
+        assert_eq!(c, 200);
+        assert!(
+            head.contains(&format!("Content-Security-Policy: {OLD_CSP}")),
+            "{head}"
+        );
+        for must in ["Team", "Share this room", "in this room", "installed"] {
+            assert!(APP_JS.contains(must), "{must}");
+        }
+        assert!(INDEX_HTML.contains("Share"));
+        let all = format!("{APP_JS}\n{INDEX_HTML}\n{APP_CSS}").to_lowercase();
+        for bad in ["ledger", "claim"] {
+            assert!(!all.contains(bad), "{bad}");
+        }
+        assert!(!all.contains("perennos tempo room tempo room"));
+        r.stop();
+        hub.shutdown();
     }
 }

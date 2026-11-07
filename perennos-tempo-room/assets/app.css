@@ -115,6 +115,8 @@ body.in-room .stage,body.guest .stage{display:block}
 .msg.mine{align-self:flex-end;border-left:0;border-right:2px solid var(--warm)}
 .msg.mine .who{color:var(--warm2)}
 .msg.tempo{border-left-color:var(--live);background:color-mix(in srgb,var(--live) 7%,transparent)}
+.msg.team{border-left-color:var(--warm2);background:color-mix(in srgb,var(--warm) 6%,transparent)}
+.msg .who.team{color:var(--warm2)}
 .msg.local{border-left-style:dashed}
 .mark{font:italic 500 15px/1 var(--serif);color:var(--ink);letter-spacing:.01em}
 .mark::before{content:"";display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;background:var(--live);vertical-align:2px}
@@ -159,6 +161,10 @@ body.in-room .stage,body.guest .stage{display:block}
 .person b{flex:1;min-width:5em;font-weight:500;overflow:hidden;text-overflow:ellipsis}
 .person .lbl{flex:none}
 .person .grow{flex:1}
+.team-form{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.team-form label.lbl{display:flex;flex-direction:column;gap:5px;margin-top:6px}
+textarea.field{min-height:110px;resize:vertical;font:400 14px/1.45 var(--sans)}
+select.field{appearance:auto;background:var(--bg2);font-size:14px}
 .copybox{display:flex;gap:8px;align-items:stretch;margin-top:8px}
 .copybox .field{font-size:14px;min-width:0}
 .code-big{font:500 26px/1.2 var(--mono);letter-spacing:.16em;color:var(--ink);margin:8px 0}

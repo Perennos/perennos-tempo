@@ -536,8 +536,10 @@ pub fn clean_name(s: &str) -> String {
 /// and `tempo!` all read as `tempo`.
 pub fn name_key(s: &str) -> String {
     s.chars()
-        .filter(|c| c.is_alphanumeric() && !hidden(*c))
         .flat_map(char::to_lowercase)
+        // after lowercasing, so a mark that lowercasing makes (İ becomes i and a dot) goes too
+        .filter(|c| c.is_alphanumeric() && !hidden(*c))
+        .map(fold_width_and_accents)
         .map(|c| match c {
             'а' => 'a',
             'в' => 'b',
@@ -562,6 +564,41 @@ pub fn name_key(s: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+/// Fullwidth ASCII (U+FF01..U+FF5E) becomes plain ASCII, and the lowercase accented letters of
+/// Latin-1 Supplement and Latin Extended-A become their base letter (combining marks are not
+/// letters and never reach here).
+fn fold_width_and_accents(c: char) -> char {
+    let n = c as u32;
+    if (0xFF01..=0xFF5E).contains(&n) {
+        return char::from_u32(n - 0xFEE0).unwrap_or(c);
+    }
+    const TABLE: &[(&str, char)] = &[
+        ("àáâãäåāăą", 'a'),
+        ("çćĉċč", 'c'),
+        ("ðďđ", 'd'),
+        ("èéêëēĕėęě", 'e'),
+        ("ĝğġģ", 'g'),
+        ("ĥħ", 'h'),
+        ("ìíîïĩīĭįı", 'i'),
+        ("ĵ", 'j'),
+        ("ķĸ", 'k'),
+        ("ĺļľŀł", 'l'),
+        ("ñńņňŋ", 'n'),
+        ("òóôõöøōŏő", 'o'),
+        ("ŕŗř", 'r'),
+        ("śŝşš", 's'),
+        ("ţťŧ", 't'),
+        ("ùúûüũūŭůűų", 'u'),
+        ("ŵ", 'w'),
+        ("ýÿŷ", 'y'),
+        ("źżž", 'z'),
+    ];
+    TABLE
+        .iter()
+        .find(|(set, _)| set.contains(c))
+        .map_or(c, |(_, base)| *base)
 }
 
 // ---- random, hashing, comparison
@@ -1072,5 +1109,16 @@ mod tests {
         assert_eq!(clean_name("\u{200b}\n"), "someone");
         assert_eq!(clean_name(&"x".repeat(100)).chars().count(), 40);
         assert_eq!(name_key("Tеmp0!"), "tempo");
+        // fullwidth forms and accents fold to the plain letters
+        assert_eq!(name_key("Ｓａｇｅ"), name_key("Sage"));
+        assert_eq!(name_key("Ｔｅｍｐｏ"), "tempo");
+        assert_eq!(name_key("Sagé"), name_key("Sage"));
+        assert_eq!(name_key("Ṡage"), name_key("Ṡage"));
+        assert_eq!(name_key("Tèmpõ"), "tempo");
+        assert_eq!(name_key("ŞĀĞĒ"), name_key("sage"));
+        assert_eq!(name_key("Ｒｉｌｅｙ １２"), name_key("Riley 12"));
+        assert_eq!(name_key("Sage\u{301}"), name_key("Sage"));
+        assert_eq!(name_key("\u{130}vy"), name_key("ivy"), "a dotted I is an I");
+        assert_ne!(name_key("Sagé"), name_key("Sago"));
     }
 }

@@ -112,6 +112,11 @@ pub fn run_append(
 pub fn line_for(m: &Msg) -> String {
     let who = if m.kind == Kind::Tempo {
         "Tempo".to_string()
+    } else if m.kind == Kind::Teammate {
+        format!(
+            "{} (teammate)",
+            crate::util::clean_name(&m.name).replace('*', "")
+        )
     } else {
         crate::util::clean_name(&m.name).replace('*', "")
     };

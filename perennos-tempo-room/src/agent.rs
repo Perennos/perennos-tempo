@@ -194,10 +194,31 @@ impl AgentClient {
             .is_ok_and(|r| r.status().as_u16() == 200)
     }
 
+    /// Does the agent take a model and a role when a guest conversation is made? Its health says
+    /// `"roles": true` (with or without the key). An older agent, or one that is down: false.
+    pub fn roles_supported(&self) -> bool {
+        matches!(self.call("/agent/health", None), Ok((200, h)) if h["roles"] == true)
+    }
+
     /// A guest conversation: the agent offers it no tools, no memory and no owner context.
     pub fn new_conv(&self) -> Result<String, AgentError> {
-        match self.call("/agent/health", None)? {
-            (200, h) if h["guest"] == true => {}
+        self.new_conv_with(None, None).map(|(c, _)| c)
+    }
+
+    /// A guest conversation for a teammate: with its `model` and `role` when the agent supports
+    /// them (`"roles": true` in its health); an older agent gets the plain guest conversation
+    /// (the caller then puts the role in front of the request instead). It stays a guest
+    /// conversation either way.
+    ///
+    /// Returns the conversation and whether the agent took roles for it (the health this very
+    /// call read said `"roles": true`), so the caller records how the conversation was made.
+    pub fn new_conv_with(
+        &self,
+        model: Option<&str>,
+        role: Option<&str>,
+    ) -> Result<(String, bool), AgentError> {
+        let roles = match self.call("/agent/health", None)? {
+            (200, h) if h["guest"] == true => h["roles"] == true,
             (200, _) => return Err(AgentError::NoGuestMode),
             (401, _) => return Err(AgentError::Unauthorized),
             (c, v) => {
@@ -206,12 +227,21 @@ impl AgentClient {
                     v["error"].as_str().unwrap_or("").into(),
                 ))
             }
+        };
+        let mut body = json!({"mode": "guest"});
+        if roles {
+            if let Some(m) = model {
+                body["model"] = json!(m);
+            }
+            if let Some(r) = role {
+                body["role"] = json!(r);
+            }
         }
-        match self.call("/agent/new", Some(&json!({"mode": "guest"})))? {
+        match self.call("/agent/new", Some(&body))? {
             (200, v) => v["conv"]
                 .as_str()
                 .filter(|c| !c.is_empty())
-                .map(str::to_string)
+                .map(|c| (c.to_string(), roles))
                 .ok_or_else(|| AgentError::Bad("no conversation id".into())),
             (401, _) => Err(AgentError::Unauthorized),
             (c, v) => Err(AgentError::Http(
@@ -420,5 +450,49 @@ mod tests {
             crate::util::scrub("a env-secret-0123456789"),
             "a [REDACTED]"
         );
+    }
+    #[test]
+    fn a_teammates_model_and_role_go_only_to_an_agent_that_takes_them() {
+        let old = FakeAgent::start(vec![]);
+        let c = AgentClient::with_key(&old.url(), None, None);
+        assert!(!c.roles_supported());
+        c.new_conv_with(Some("qwen3:4b"), Some("You are Sage."))
+            .unwrap();
+        assert_eq!(old.new_bodies(), [json!({"mode": "guest"})]);
+        let new = FakeAgent::start(vec![]);
+        new.with_roles();
+        let c = AgentClient::with_key(&new.url(), None, None);
+        assert!(c.roles_supported());
+        c.new_conv_with(Some("qwen3:4b"), Some("You are Sage."))
+            .unwrap();
+        c.new_conv_with(None, None).unwrap();
+        c.new_conv_with(Some("qwen3:4b"), None).unwrap();
+        assert_eq!(
+            new.new_bodies(),
+            [
+                json!({"mode": "guest", "model": "qwen3:4b", "role": "You are Sage."}),
+                json!({"mode": "guest"}),
+                json!({"mode": "guest", "model": "qwen3:4b"}),
+            ]
+        );
+        // what the agent would refuse comes back as an error, not a conversation
+        assert!(matches!(
+            c.new_conv_with(Some("bad model"), None),
+            Err(AgentError::Http(400, _))
+        ));
+        // an agent without guest mode is never used, roles or not
+        let nog = FakeAgent::start(vec![]);
+        nog.without_guest_mode();
+        assert_eq!(
+            AgentClient::with_key(&nog.url(), None, None).new_conv_with(None, Some("x")),
+            Err(AgentError::NoGuestMode)
+        );
+        // the key still goes along; health needs none
+        let keyed = FakeAgent::start(vec![]);
+        keyed.with_roles();
+        keyed.require_key(OLD);
+        let c = AgentClient::with_key(&keyed.url(), Some(OLD.into()), None);
+        assert!(c.roles_supported(), "health answers without the key");
+        c.new_conv_with(Some("m"), Some("r")).unwrap();
     }
 }
