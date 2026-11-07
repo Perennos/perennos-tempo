@@ -98,6 +98,9 @@ pub struct Config {
     /// The settings files this agent was started with (its config, its MCP file): never written
     /// by its own tools, wherever they are. Set by whoever loads them, never from JSON.
     pub own_files: Vec<PathBuf>,
+    /// Commands run around tool calls and at the end of a turn (`hooks`, `hook_timeout_s`). Set
+    /// in this file only: nothing a conversation or a tool does can change them.
+    pub hooks: crate::hooks::Hooks,
 }
 
 /// The agent's data folder when nothing names one: `TEMPO_AGENT_DATA`, else `<Tempo home>/agent`,
@@ -208,6 +211,7 @@ impl Config {
             vault_write: true,
             studio_roots: vec![],
             own_files: vec![],
+            hooks: crate::hooks::Hooks::default(),
             mcp_skip: vec![],
             mcp_blocked: BTreeMap::new(),
             mcp_confirm: vec![],
@@ -319,6 +323,7 @@ impl Config {
         if let Some(x) = strs(v, "command_deny") {
             c.command_deny = x;
         }
+        c.hooks = crate::hooks::Hooks::from_json(v)?;
         if let Some(p) = string(v, "permission").and_then(|p| crate::conv::Permission::parse(&p)) {
             c.permission = p;
         }

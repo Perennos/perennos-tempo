@@ -217,6 +217,7 @@ fn real_main() -> Result<(), String> {
         repl(&mut agent, &mut conv, &mut sink)
     };
     agent.env.mcp.borrow_mut().stop_all();
+    agent.env.stop_background();
     result.map(|_| ())
 }
 

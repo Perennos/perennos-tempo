@@ -23,6 +23,8 @@
   "protect_regex": "my-protected-service|another-protected-service",
   "command_cwd": "./tempo-agent-data",
   "command_timeout_s": 60,
+  "hooks": {"before_tool": [], "after_tool": [], "after_turn": []},
+  "hook_timeout_s": 30,
   "offline_probe": "1.1.1.1:443",
 
   "hosts": {

@@ -591,6 +591,38 @@ impl Agent {
         }
     }
 
+    /// Show hook status lines the way every other status line is shown.
+    fn say(conv: &mut Conv, sink: &mut dyn Sink, notes: &[String]) {
+        for n in notes {
+            conv.emit("status", n);
+            sink.status(n);
+        }
+    }
+
+    /// `run_tool` between the owner's hooks: a before_tool hook may block the call (its result is
+    /// then "blocked by hook: ..."), an after_tool hook may add a line to the result. Hooks never
+    /// run in guest conversations (see `hooks`).
+    fn run_tool_hooked(
+        &self,
+        conv: &mut Conv,
+        route: &HashMap<String, (String, String)>,
+        name: &str,
+        args: &Value,
+        sink: &mut dyn Sink,
+    ) -> String {
+        let before = self.env.hooks_before(conv, name, args);
+        Self::say(conv, sink, &before.notes);
+        if let Some(blocked) = before.blocked {
+            return blocked;
+        }
+        let mut r = self.run_tool(conv, route, name, args);
+        let after = self.env.hooks_after(conv, name, args, &r);
+        Self::say(conv, sink, &after.notes);
+        // added after the cap: what a hook says is never cut off by a long result
+        r.push_str(&after.append);
+        r
+    }
+
     fn run_tool(
         &self,
         conv: &Conv,
@@ -665,6 +697,8 @@ impl Agent {
         if let Err(e) = &r {
             conv.emit("error", e);
         }
+        let notes = self.env.hooks_turn_end(conv);
+        Self::say(conv, sink, &notes);
         let changed = self.env.checkpoints.summary(&conv.id, conv.turns);
         if !changed.is_empty() {
             let m = format!(
@@ -1163,7 +1197,7 @@ impl Agent {
                         .push(json!({"role": "tool", "tool_name": name, "content": r}));
                     continue;
                 }
-                let r = self.run_tool(conv, &route, &name, &args);
+                let r = self.run_tool_hooked(conv, &route, &name, &args, sink);
                 // after a call that may change things, earlier reads are stale: let them run again
                 if CHANGES.contains(&name.as_str())
                     || name == "run_command"
@@ -1171,7 +1205,10 @@ impl Agent {
                 {
                     conv.seen_calls.clear();
                 }
-                conv.seen_calls.insert(key, (r.clone(), 1));
+                // a background command's output changes while it runs: asking again is not a repeat
+                if name != "command_output" {
+                    conv.seen_calls.insert(key, (r.clone(), 1));
+                }
                 conv.emit("tool_result", &format!("{name}: {}", head_chars(&r, 1500)));
                 conv.messages
                     .push(json!({"role": "tool", "tool_name": name, "content": r}));
@@ -2108,6 +2145,163 @@ mod tests {
             b[1]["tools"].as_array().is_none_or(|t| t.is_empty()),
             "still no tools"
         );
+    }
+
+    #[cfg(unix)]
+    /// A turn in which the model calls `run_command` once with `cmd`, then answers; returns the
+    /// tool result the model was given, the status lines, and the conversation's folder.
+    fn hooked_turn(
+        hooks: Value,
+        cmd: &str,
+        tweak: impl FnOnce(&mut Conv),
+    ) -> (String, Vec<String>, PathBuf) {
+        let m = Mock::start(chat_script(vec![
+            call_resp("run_command", json!({"command": cmd})),
+            text_resp("done"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.command_allow = vec!["touch".into()];
+            c.hooks = crate::hooks::Hooks::from_json(&hooks).unwrap();
+        });
+        tweak(&mut conv);
+        let mut sink = VecSink::default();
+        a.turn(&mut conv, "please run the command", &mut sink)
+            .unwrap();
+        let tool = conv
+            .messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .unwrap_or_default();
+        (tool, sink.status, a.env.cwd(&conv))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_before_hook_with_exit_2_blocks_the_tool_call() {
+        let (tool, status, cwd) = hooked_turn(
+            json!({"hooks": {"before_tool": [{"match": "^run_command$", "command": "echo 'not in this folder' >&2; exit 2"}]}}),
+            "touch tool-ran",
+            |_| {},
+        );
+        assert_eq!(tool, "blocked by hook: not in this folder");
+        assert!(!cwd.join("tool-ran").exists(), "the tool ran anyway");
+        assert!(
+            status
+                .iter()
+                .any(|s| s.contains("hook blocked run_command")),
+            "{status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_after_hook_adds_its_output_to_the_result() {
+        let (tool, ..) = hooked_turn(
+            json!({"hooks": {"after_tool": [{"command": "echo checked"}]}}),
+            "echo hi",
+            |_| {},
+        );
+        assert_eq!(tool, "[exit 0]\nhi\n[hook] checked");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_that_times_out_does_not_stop_the_tool() {
+        let t = std::time::Instant::now();
+        let (tool, status, cwd) = hooked_turn(
+            json!({"hook_timeout_s": 1, "hooks": {"before_tool": [{"command": "exec sleep 20"}]}}),
+            "touch tool-ran",
+            |_| {},
+        );
+        assert!(t.elapsed() < std::time::Duration::from_secs(10));
+        assert!(tool.starts_with("[exit 0]"), "{tool}");
+        assert!(cwd.join("tool-ran").exists());
+        assert!(
+            status
+                .iter()
+                .any(|s| s.contains("timeout") && s.contains("tool still runs")),
+            "{status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_after_turn_hook_runs_once_and_shows_only_a_status_line() {
+        let (tool, status, cwd) = hooked_turn(
+            json!({"hooks": {"after_turn": [{"command": "echo tidy >> turns; echo all tidy"}]}}),
+            "echo hi",
+            |_| {},
+        );
+        assert_eq!(tool, "[exit 0]\nhi");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("turns")).unwrap(),
+            "tidy\n"
+        );
+        assert!(
+            status.iter().any(|s| s == "after_turn hook: all tidy"),
+            "{status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_plan_mode_a_turn_runs_before_hooks_only() {
+        let (tool, _, cwd) = hooked_turn(
+            json!({"hooks": {"before_tool": [{"command": "touch before"}],
+                             "after_tool": [{"command": "touch after; echo more"}],
+                             "after_turn": [{"command": "touch turn"}]}}),
+            "echo hi",
+            |c| c.permission = Permission::Plan,
+        );
+        assert_eq!(tool, "[exit 0]\nhi");
+        assert!(cwd.join("before").exists());
+        assert!(!cwd.join("after").exists() && !cwd.join("turn").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_guest_turn_runs_no_hook_and_no_tool() {
+        let (tool, status, cwd) = hooked_turn(
+            json!({"hooks": {"before_tool": [{"command": "touch before"}],
+                             "after_tool": [{"command": "touch after"}],
+                             "after_turn": [{"command": "touch turn"}]}}),
+            "touch tool-ran",
+            |c| c.guest = true,
+        );
+        assert_eq!(tool, "tools are off in this conversation (a guest room)");
+        for f in ["before", "after", "turn", "tool-ran"] {
+            assert!(!cwd.join(f).exists(), "{f}");
+        }
+        assert!(!status.iter().any(|s| s.contains("hook")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_can_poll_a_background_command_with_the_same_call() {
+        let m = Mock::start(chat_script(vec![
+            call_resp(
+                "run_command",
+                json!({"command": "echo up; sleep 30", "background": true}),
+            ),
+            call_resp("command_output", json!({"id": "bg-1"})),
+            call_resp("command_output", json!({"id": "bg-1"})),
+            call_resp("command_stop", json!({"id": "bg-1"})),
+            text_resp("done"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        say(&mut a, &mut conv, "please start the server");
+        let tools: Vec<String> = conv
+            .messages
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(tools.len(), 4, "{tools:?}");
+        assert_eq!(tools[0], r#"{"id":"bg-1"}"#);
+        // the second identical call is run again, not skipped as a repeat
+        assert!(!tools[2].starts_with("You already ran"), "{}", tools[2]);
+        assert!(tools[3].contains("\"stopped\""), "{}", tools[3]);
     }
 
     #[test]

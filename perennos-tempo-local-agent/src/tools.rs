@@ -1,5 +1,6 @@
 //! Builtin tools (OpenAI-style function schemas) and their guarded implementations.
 //! Safety: write roots, secret-path refusal, delete refusal, confirmation, trash is MOVE ONLY.
+use crate::background::Background;
 use crate::checkpoint::Checkpoints;
 use crate::config::Config;
 use crate::conv::{Confirm, Conv, Permission};
@@ -31,6 +32,8 @@ pub struct Env {
     fetch_ok: RefCell<HashMap<String, HashSet<String>>>,
     /// What files held before a turn changed them (`/undo`, `/diff`).
     pub checkpoints: Checkpoints,
+    /// Commands started with `run_command` `background: true`; all ended when the agent exits.
+    background: RefCell<Background>,
 }
 
 /// The host of an http(s) address, lower case, without the port.
@@ -69,7 +72,9 @@ pub fn builtin_schemas() -> Vec<Value> {
         func("read_file", "Read a text file (first 6000 chars unless offset given).", json!({"path": s("file path"), "offset": int}), &["path"]),
         func("write_file", "Write a text file inside the allowed write folders. Overwrites need approval.", json!({"path": s("file path"), "content": s("text")}), &["path", "content"]),
         func("trash", "Move a file or folder into the trash folder (the only way to remove anything; nothing is ever deleted). Needs approval.", json!({"path": s("path")}), &["path"]),
-        func("run_command", "Run a shell command (PowerShell on Windows, sh elsewhere) in the conversation's folder. Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash).", json!({"command": s("shell command"), "cwd": s("optional folder to run in (relative to the conversation's folder)")}), &["command"]),
+        func("run_command", "Run a shell command (PowerShell on Windows, sh elsewhere) in the conversation's folder. Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash). With background true it starts the command and returns at once with its id (for a server or a long job); read it with command_output and end it with command_stop. At most 4 run at a time.", json!({"command": s("shell command"), "cwd": s("optional folder to run in (relative to the conversation's folder)"), "background": boolean}), &["command"]),
+        func("command_output", "Read a background command: its status (running, exited or stopped), its exit code (null while it runs) and the last 6000 characters it printed.", json!({"id": s("the id run_command gave, such as bg-1")}), &["id"]),
+        func("command_stop", "End a background command that run_command started. Needs no approval. Ending one that already ended is fine. Returns its status.", json!({"id": s("the id run_command gave, such as bg-1")}), &["id"]),
         func("fetch_url", "Fetch a web page as text. Works only when the internet is up; fails cleanly offline.", json!({"url": s("http(s) URL")}), &["url"]),
         func("search_memory", "Search the user's memory and notes (configured markdown files). Returns cited excerpts.", json!({"query": s("what to look for")}), &["query"]),
         func("workflow_update", "Update this conversation's persistent task list and notes. Call it when you plan work and after each step.",
@@ -117,50 +122,101 @@ fn barg(a: &Value, k: &str) -> bool {
     }
 }
 
-/// Run a shell command; output is stdout+stderr. Kills the exact child on timeout.
-pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
+/// The shell command line for `cmd`: PowerShell on Windows, `sh -c` elsewhere.
+pub fn shell_command(cmd: &str) -> Command {
     #[cfg(windows)]
-    let mut c = {
+    {
         use std::os::windows::process::CommandExt;
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", cmd])
             .creation_flags(0x0800_0000);
         c
-    };
+    }
     #[cfg(not(windows))]
-    let mut c = {
+    {
         let mut c = Command::new("sh");
         c.args(["-c", cmd]);
         c
-    };
+    }
+}
+
+/// What a shell command did, with its output streams kept apart.
+pub struct Ran {
+    pub stdout: String,
+    pub stderr: String,
+    /// stdout and stderr as they arrived.
+    pub combined: String,
+    /// The exit code; -1 when it was killed, ended by a signal or never started.
+    pub code: i32,
+    pub timed_out: bool,
+    /// Why the shell could not be started, when it could not.
+    pub spawn_error: Option<String>,
+}
+
+/// Run a shell command; output is stdout+stderr. Kills the exact child on timeout.
+pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
+    let r = shell_env(cmd, cwd, timeout, &[]);
+    if let Some(e) = r.spawn_error {
+        return (format!("cannot start shell: {e}"), -1);
+    }
+    let mut text = r.combined.trim().to_string();
+    if r.timed_out {
+        text.push_str(&format!(
+            "\n[timed out after {:.0}s and was killed]",
+            timeout.as_secs_f64()
+        ));
+    }
+    (text, r.code)
+}
+
+/// `shell` with extra environment variables, and stdout and stderr kept apart (hooks need both).
+pub fn shell_env(cmd: &str, cwd: &Path, timeout: Duration, env: &[(&str, &str)]) -> Ran {
+    let mut c = shell_command(cmd);
     let _ = std::fs::create_dir_all(cwd);
     c.current_dir(cwd)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = match c.spawn() {
         Ok(ch) => ch,
-        Err(e) => return (format!("cannot start shell: {e}"), -1),
+        Err(e) => {
+            return Ran {
+                stdout: String::new(),
+                stderr: String::new(),
+                combined: String::new(),
+                code: -1,
+                timed_out: false,
+                spawn_error: Some(e.to_string()),
+            }
+        }
     };
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    for mut pipe in [
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    // (is stderr, bytes)
+    let (tx, rx) = mpsc::channel::<(bool, Vec<u8>)>();
+    for (is_err, mut pipe) in [
+        (
+            false,
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        ),
+        (
+            true,
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        ),
     ]
     .into_iter()
-    .flatten()
+    .filter_map(|(e, p)| p.map(|p| (e, p)))
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while let Ok(n) = pipe.read(&mut buf) {
-                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                if n == 0 || tx.send((is_err, buf[..n].to_vec())).is_err() {
                     break;
                 }
             }
@@ -168,11 +224,15 @@ pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
     }
     drop(tx);
     let start = Instant::now();
-    let mut out = Vec::new();
+    let (mut out, mut err, mut all) = (Vec::new(), Vec::new(), Vec::new());
+    let mut take = |(is_err, b): (bool, Vec<u8>)| {
+        all.extend(&b);
+        if is_err { &mut err } else { &mut out }.extend(b);
+    };
     let (mut code, mut timed_out) = (-1, false);
     loop {
         while let Ok(b) = rx.try_recv() {
-            out.extend(b);
+            take(b);
         }
         match child.try_wait() {
             Ok(Some(st)) => {
@@ -193,19 +253,20 @@ pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
     let grace = Instant::now();
     while grace.elapsed() < Duration::from_millis(300) {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(b) => out.extend(b),
+            Ok(b) => take(b),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(_) => {}
         }
     }
-    let mut text = String::from_utf8_lossy(&out).trim().to_string();
-    if timed_out {
-        text.push_str(&format!(
-            "\n[timed out after {:.0}s and was killed]",
-            timeout.as_secs_f64()
-        ));
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    Ran {
+        stdout: text(&out),
+        stderr: text(&err),
+        combined: text(&all),
+        code,
+        timed_out,
+        spawn_error: None,
     }
-    (text, code)
 }
 
 static NET_CACHE: Mutex<Vec<(String, Instant, bool)>> = Mutex::new(Vec::new());
@@ -735,7 +796,13 @@ impl Env {
             protect,
             fetch_ok: RefCell::new(HashMap::new()),
             checkpoints,
+            background: RefCell::new(Background::default()),
         }
+    }
+
+    /// End every background command still running (the agent is exiting; dropping does it too).
+    pub fn stop_background(&self) {
+        self.background.borrow_mut().stop_all();
     }
 
     /// Keep what a file holds before this turn changes it (for `/undo` and `/diff`).
@@ -1013,6 +1080,8 @@ impl Env {
             "write_file" => self.write_file(conv, a),
             "trash" => self.trash(a),
             "run_command" => self.run_command(conv, a),
+            "command_output" => self.command_output(conv, a),
+            "command_stop" => self.command_stop(conv, a),
             "apply_patch" => self.apply_patch(conv, a),
             "fetch_url" => self.fetch_url(conv, a),
             "search_memory" => self.search_memory(a),
@@ -1176,7 +1245,7 @@ impl Env {
 
     /// Why a command may not run at all, whoever asks for it: the owner's deny list, deleting,
     /// ComfyUI outside its tool, a protected service.
-    fn refusal(&self, cmd: &str) -> Option<String> {
+    pub(crate) fn refusal(&self, cmd: &str) -> Option<String> {
         if let Some(d) = denied_by(cmd, &self.cfg.command_deny) {
             return Some(format!(
                 "refused: the owner does not allow \"{d}\" (command_deny)"
@@ -1213,13 +1282,22 @@ impl Env {
         format!("[exit {rc}]\n{out}")
     }
 
-    fn run_command(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+    /// A command from the model: every check and every question, the same for a command that
+    /// runs now and one that runs in the background. Gives the command and the folder to run it
+    /// in, or the text to answer with instead (refused, or the owner said no). `what` names the
+    /// request in the approval.
+    fn vetted_command<'a>(
+        &self,
+        conv: &Conv,
+        a: &'a Value,
+        what: &str,
+    ) -> Result<(&'a str, PathBuf), String> {
         let cmd = sarg(a, "command")?;
         if let Some(no) = self.refusal(cmd) {
-            return Ok(no);
+            return Err(no);
         }
         if conv.permission == Permission::Plan && !is_read_only(cmd) {
-            return Ok(
+            return Err(
                 "refused: plan mode only reads; put this command in the plan instead".into(),
             );
         }
@@ -1236,7 +1314,7 @@ impl Env {
                 cwd.join(d)
             };
             if !p.is_dir() {
-                return Ok(format!("error: no such folder {}", p.display()));
+                return Err(format!("error: no such folder {}", p.display()));
             }
             cwd = p;
         }
@@ -1264,16 +1342,53 @@ impl Env {
         let unasked = !reaches_state
             && (is_read_only(cmd) || (!changed && allowed_unasked(cmd, &self.cfg.command_allow)));
         if !unasked {
-            if let Err(no) = self.ask("run command", cmd) {
-                return Ok(no);
-            }
+            self.ask(what, cmd)?;
         }
+        Ok((cmd, cwd))
+    }
+
+    fn run_command(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        if barg(a, "background") {
+            return self.start_background(conv, a);
+        }
+        let (cmd, cwd) = self.vetted_command(conv, a, "run command")?;
         let (out, rc) = shell(
             cmd,
             &cwd,
             Duration::from_secs_f64(self.cfg.command_timeout_s),
         );
         Ok(format!("[exit {rc}]\n{out}"))
+    }
+
+    /// `run_command` with `background: true`: the same checks and questions, then the command
+    /// starts and its id comes back at once. A fifth one alive is refused before anyone is asked.
+    fn start_background(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        if self.background.borrow_mut().full(&conv.id) {
+            return Err(format!(
+                "refused: {} background commands are already running in this conversation; stop one with command_stop first",
+                crate::background::MAX_ALIVE
+            ));
+        }
+        let (cmd, cwd) = self.vetted_command(conv, a, "run command in the background")?;
+        let id = self.background.borrow_mut().start(&conv.id, cmd, &cwd)?;
+        Ok(json!({"id": id}).to_string())
+    }
+
+    /// Status, exit code and the end of the output of a background command.
+    fn command_output(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        let id = sarg(a, "id")?;
+        Ok(self
+            .background
+            .borrow_mut()
+            .output(&conv.id, id)?
+            .to_string())
+    }
+
+    /// End a background command (our own child, by its handle). No question: it can only end
+    /// what this agent started.
+    fn command_stop(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        let id = sarg(a, "id")?;
+        Ok(self.background.borrow_mut().stop(&conv.id, id)?.to_string())
     }
 
     /// The first read of a host in a conversation asks the owner; yes covers that host for the
@@ -1975,12 +2090,12 @@ mod tests {
     }
 
     #[test]
-    fn all_fourteen_builtins_have_schemas() {
+    fn all_sixteen_builtins_have_schemas() {
         let names: Vec<String> = builtin_schemas()
             .iter()
             .map(|f| f["function"]["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 16);
         for n in [
             "list_dir",
             "read_file",
@@ -1996,6 +2111,8 @@ mod tests {
             "grep",
             "glob",
             "apply_patch",
+            "command_output",
+            "command_stop",
         ] {
             assert!(names.iter().any(|x| x == n), "{n}");
             assert!(Env::is_builtin(n));
@@ -3244,6 +3361,182 @@ mod tests {
         )
         .contains("a.txt"));
         assert!(run(&e, &c, "bogus_tool", json!({})).contains("unknown tool"));
+    }
+
+    /// Wait up to five seconds for `f` to hold.
+    #[cfg(unix)]
+    fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(5) {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn bg(e: &Env, c: &Conv, cmd: &str) -> String {
+        run(
+            e,
+            c,
+            "run_command",
+            json!({"command": cmd, "background": true}),
+        )
+    }
+
+    #[cfg(unix)]
+    fn bg_state(e: &Env, c: &Conv, tool: &str, id: &str) -> Value {
+        let r = run(e, c, tool, json!({"id": id}));
+        serde_json::from_str(&r).unwrap_or_else(|_| panic!("not JSON: {r}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_command_runs_is_read_and_is_stopped() {
+        let (e, c, _d) = env_with(Box::new(DenyAll), |_| {});
+        let started: Value =
+            serde_json::from_str(&bg(&e, &c, "echo one; echo two; sleep 30")).unwrap();
+        assert_eq!(started, json!({"id": "bg-1"}));
+        assert!(wait_for(|| {
+            bg_state(&e, &c, "command_output", "bg-1")["output"]
+                .as_str()
+                .is_some_and(|o| o.contains("two"))
+        }));
+        let s = bg_state(&e, &c, "command_output", "bg-1");
+        assert_eq!(s["status"], "running");
+        assert!(s["exit_code"].is_null());
+        assert!(s["output"].as_str().unwrap().starts_with("one\ntwo"));
+        let stopped = bg_state(&e, &c, "command_stop", "bg-1");
+        assert_eq!(stopped["status"], "stopped");
+        assert_eq!(
+            bg_state(&e, &c, "command_output", "bg-1")["status"],
+            "stopped"
+        );
+        // ending one that already ended is fine
+        assert_eq!(
+            bg_state(&e, &c, "command_stop", "bg-1")["status"],
+            "stopped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_command_that_finishes_keeps_its_exit_code() {
+        let (e, c, _d) = env_with(Box::new(DenyAll), |_| {});
+        assert_eq!(
+            bg(&e, &c, "echo done; exit 3"),
+            json!({"id": "bg-1"}).to_string()
+        );
+        assert!(wait_for(|| bg_state(&e, &c, "command_output", "bg-1")
+            ["status"]
+            == "exited"));
+        let s = bg_state(&e, &c, "command_output", "bg-1");
+        assert_eq!(s["exit_code"], 3);
+        assert!(s["output"].as_str().unwrap().contains("done"));
+        // stopping one that finished leaves it "exited"
+        assert_eq!(bg_state(&e, &c, "command_stop", "bg-1")["status"], "exited");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifth_background_command_is_refused_until_one_ends() {
+        let (e, c, _d) = env_with(Box::new(DenyAll), |_| {});
+        for n in 1..=4 {
+            assert_eq!(
+                bg(&e, &c, "sleep 30"),
+                json!({"id": format!("bg-{n}")}).to_string()
+            );
+        }
+        let r = bg(&e, &c, "sleep 30");
+        assert!(r.starts_with("refused: 4 background commands"), "{r}");
+        bg_state(&e, &c, "command_stop", "bg-2");
+        // numbers are not reused
+        assert_eq!(bg(&e, &c, "sleep 30"), json!({"id": "bg-5"}).to_string());
+        // another conversation has its own four
+        let other = Conv::open(&e.cfg, Some("other")).unwrap();
+        assert_eq!(
+            bg(&e, &other, "sleep 30"),
+            json!({"id": "bg-1"}).to_string()
+        );
+        assert!(run(&e, &other, "command_output", json!({"id": "bg-2"}))
+            .starts_with("error: no background command"));
+    }
+
+    #[test]
+    fn an_unknown_background_id_says_so() {
+        let (e, c, _d) = env_with(Box::new(DenyAll), |_| {});
+        for tool in ["command_output", "command_stop"] {
+            let r = run(&e, &c, tool, json!({"id": "bg-9"}));
+            assert!(r.starts_with("error: no background command bg-9"), "{r}");
+        }
+        assert!(run(&e, &c, "command_output", json!({}))
+            .contains("missing or non-string argument 'id'"));
+    }
+
+    #[test]
+    fn a_background_command_asks_and_is_refused_like_run_command() {
+        let (e, c, _d) = env_with(Box::new(DenyAll), |c| {
+            c.protect_regex = Some("house-svc".into())
+        });
+        assert_eq!(bg(&e, &c, "echo a > f.txt"), "denied by user");
+        assert!(bg(&e, &c, "rm -rf x").starts_with("refused: deleting"));
+        assert!(bg(&e, &c, "systemctl stop house-svc").starts_with("refused: protected"));
+        // nothing was started
+        assert!(run(&e, &c, "command_output", json!({"id": "bg-1"}))
+            .starts_with("error: no background"));
+        // a yes starts it, and the question names the background
+        let log = std::sync::Arc::new(Mutex::new(vec![]));
+        let (e, c, d) = env_with(Box::new(Asked(log.clone())), |_| {});
+        assert_eq!(
+            bg(&e, &c, "echo a > f.txt"),
+            json!({"id": "bg-1"}).to_string()
+        );
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            ["run command in the background"]
+        );
+        #[cfg(unix)]
+        assert!(wait_for(|| d.join("f.txt").exists()));
+        #[cfg(not(unix))]
+        let _ = d;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_mode_starts_only_what_run_command_would_run() {
+        let (e, mut c, _d) = env_with(Box::new(Yes), |_| {});
+        c.permission = Permission::Plan;
+        let r = bg(&e, &c, "echo a > f.txt");
+        assert!(r.starts_with("refused: plan mode only reads"), "{r}");
+        assert_eq!(bg(&e, &c, "sleep 30"), json!({"id": "bg-1"}).to_string());
+        assert_eq!(
+            bg_state(&e, &c, "command_stop", "bg-1")["status"],
+            "stopped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_gives_at_most_the_last_6000_characters() {
+        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
+        let r = bg(
+            &e,
+            &c,
+            "echo start; head -c 20000 /dev/zero | tr '\\0' a; echo end",
+        );
+        assert_eq!(r, json!({"id": "bg-1"}).to_string());
+        assert!(wait_for(|| bg_state(&e, &c, "command_output", "bg-1")
+            ["status"]
+            == "exited"));
+        assert!(wait_for(|| bg_state(&e, &c, "command_output", "bg-1")
+            ["output"]
+            .as_str()
+            .is_some_and(|o| o.ends_with("end\n"))));
+        let out = bg_state(&e, &c, "command_output", "bg-1");
+        let o = out["output"].as_str().unwrap();
+        assert_eq!(o.chars().count(), 6000);
+        assert!(!o.contains("start"));
     }
 }
 

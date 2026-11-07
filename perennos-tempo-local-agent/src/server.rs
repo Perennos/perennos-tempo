@@ -321,6 +321,7 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         shared.changed.notify_all();
     }
     agent.env.mcp.borrow_mut().stop_all();
+    agent.env.stop_background();
 }
 
 /// A running server (tests use the address; `serve` blocks on it).
