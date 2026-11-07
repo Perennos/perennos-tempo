@@ -47,12 +47,17 @@ a tool and terminals find the same data. Hourly learning is the scheduled task "
 (the same name `tempo-vault schedule` uses, so there is only ever one). Start at sign-in is
 `HKCU\...\Run\Perennos Tempo` running `tempo-launch start`.
 
-Models: Setup downloads nothing large unless "Download models that fit this computer now" is ticked, and it is
-not ticked by default (it says several gigabytes, and needs Ollama). Ticked with Ollama found (for this user, in
-`Program Files\Ollama`, or on PATH), Setup runs `tempo-launch setup --apply --yes` hidden. In every other case it
+Ollama: the "Download Ollama" box (about 1.4 GB) is ticked by default only when no Ollama is found (for this
+user, in `Program Files\Ollama`, or on PATH); ticking it is the consent. Setup then runs
+`tempo-launch setup --ollama --yes` hidden, which fetches only Ollama, checks it against its pinned SHA-256
+before unpacking it, and starts it once. It never fetches a model. Silent installs tick nothing unless
+`/TASKS="getollama"` is given.
+
+Models: Setup downloads no model unless "Download models that fit this computer now" is ticked, and it is
+not ticked by default (it says several gigabytes). Ticked with an Ollama there (found, or just set up by the
+Ollama box), Setup runs `tempo-launch setup --apply --yes` hidden. In every other case it
 runs only `tempo-launch setup --page`, which writes the plan to `<the Tempo home>\setup.html` and downloads
-nothing; Perennos Tempo opens that page at its first start. Setup never installs Ollama: the Finished page says
-where to get it (https://ollama.com/download) when it was not found.
+nothing; Perennos Tempo opens that page at its first start.
 
 The Tempo Studio shortcut runs `tempo-launch studio`, which opens Tempo, where Studio's tools are used. It carries
 `tempo.ico`: the build makes no separate Studio icon.
