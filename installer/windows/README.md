@@ -27,16 +27,16 @@ one AppId, so installing the full edition over the source-available one adds the
 | Destination | the folder (first install only; updates go where it already is) |
 | Components | Everything, the agent and Tempo Vault, or a choice |
 | Your vault | the notes folder: a new one, or an Obsidian vault you already have (left as it is) |
-| Additional tasks | desktop shortcut, "Open as Tempo Vault" in File Explorer, PATH, hourly learning, start at sign-in |
+| Additional tasks | desktop shortcut, "Open as Tempo Vault" in File Explorer, PATH, hourly learning, downloading models now (off unless ticked: several gigabytes, needs Ollama), start at sign-in |
 | Ready | a summary that includes the vault and where Tempo keeps its memory |
-| Finished | where the vault is, and "Open Perennos Tempo" |
+| Finished | "Perennos Tempo is installed", where the vault is, whether Ollama was found (if not, https://ollama.com/download), and "Open Perennos Tempo" |
 
 ## What goes where
 
 | | For me only | For all users |
 | --- | --- | --- |
 | Programs | `%LOCALAPPDATA%\Programs\Perennos Tempo\bin` | `C:\Program Files\Perennos Tempo\bin` |
-| Start menu | `Perennos Tempo` folder: Perennos Tempo, Tempo Vault, Tempo Room | the same, for everyone |
+| Start menu | `Perennos Tempo` folder: Perennos Tempo, Tempo Vault, Tempo Studio, Tempo Room | the same, for everyone |
 | PATH (if ticked) | the user's | the machine's |
 | "Open as Tempo Vault" (if ticked) | `HKCU\Software\Classes\Directory` | `HKLM\Software\Classes\Directory` |
 | Uninstall entry | Settings, Apps: Perennos Tempo (the source-available build says so), by Perennos, with its icon and size | the same |
@@ -135,7 +135,7 @@ Python 3 and Inno Setup 6.4 or later.
 For IT tools and scripts (Inno Setup's standard switches, plus `/VAULT`):
 
 ```bat
-PerennosTempo-Setup-2.0.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /VAULT="D:\Notes" /LOG="%TEMP%\perennos-tempo-setup.log"
+PerennosTempo-Setup-2.0.1-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /VAULT="D:\Notes" /LOG="%TEMP%\perennos-tempo-setup.log"
 ```
 
 | Switch | |
@@ -143,7 +143,7 @@ PerennosTempo-Setup-2.0.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURR
 | `/CURRENTUSER` or `/ALLUSERS` | who it is for (default: the current user) |
 | `/DIR="..."` | the program folder |
 | `/COMPONENTS="agent,vault,studio,room,field,cli"` | what to install (the agent is always installed) |
-| `/TASKS="openvault,addtopath,learn"` | exactly these tasks; `/MERGETASKS="desktopicon,startup"` adds to the defaults |
+| `/TASKS="openvault,addtopath,learn"` | exactly these tasks; `/MERGETASKS="desktopicon,startup"` adds to the defaults. `setupmodels` (download models now) is not a default: name it, as in `/MERGETASKS="setupmodels"`, to opt in |
 | `/VAULT="D:\Notes"` | the vault folder (default: the last one, else `TEMPO_VAULT`, else `Documents\Tempo Vault`) |
 | `/LOG="file"` | Setup's log |
 

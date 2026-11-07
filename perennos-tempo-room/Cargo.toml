@@ -1,6 +1,6 @@
 [package]
 name = "perennos-tempo-room"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 authors = ["Perennos"]
 description = "Perennos Tempo Room: a private group chat where people mention @tempo and Perennos Tempo answers in the thread, with optional Discord, Telegram and WhatsApp bridges, MCP tools and vault transcripts."
