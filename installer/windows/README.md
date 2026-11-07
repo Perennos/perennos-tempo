@@ -135,7 +135,7 @@ Python 3 and Inno Setup 6.4 or later.
 For IT tools and scripts (Inno Setup's standard switches, plus `/VAULT`):
 
 ```bat
-PerennosTempo-Setup-0.1.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /VAULT="D:\Notes" /LOG="%TEMP%\perennos-tempo-setup.log"
+PerennosTempo-Setup-2.0.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /VAULT="D:\Notes" /LOG="%TEMP%\perennos-tempo-setup.log"
 ```
 
 | Switch | |

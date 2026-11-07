@@ -1,0 +1,171 @@
+name: release
+# Builds the source-available downloads on Linux, macOS and Windows and writes SHA256SUMS.txt.
+# Run by hand with a tag (Actions, release, Run workflow), it also makes a DRAFT release with
+# those files and .github/release-notes/<tag>.md. Nothing is published: a person publishes it.
+# On a pull request that changes this file or the installers it builds and checks only.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v2.0.0 (every app's version must match it)"
+        required: true
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/release-notes/**"
+      - "installer/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  versions:
+    name: Every app has the same version (and the tag's)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - id: v
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' perennos-tempo-launcher/Cargo.toml | head -n 1)
+          for c in perennos-tempo-local-agent perennos-tempo-vault perennos-tempo-studio perennos-tempo-room; do
+            w=$(sed -n 's/^version = "\(.*\)"/\1/p' "$c/Cargo.toml" | head -n 1)
+            [ "$w" = "$v" ] || { echo "$c is $w, tempo-launch is $v"; exit 1; }
+          done
+          if [ -n "${TAG:-}" ]; then
+            [ "$TAG" = "v$v" ] || { echo "the tag is $TAG but the apps are $v"; exit 1; }
+            [ -f ".github/release-notes/$TAG.md" ] || { echo "no .github/release-notes/$TAG.md"; exit 1; }
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "every app is $v"
+
+  unix:
+    name: Release files (${{ matrix.os }})
+    needs: versions
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Release tarball (source-available edition)
+        run: bash installer/unix/build-release.sh --edition source-available --out dist
+      - name: Debian package
+        if: runner.os == 'Linux'
+        run: |
+          t=$(ls "$PWD"/dist/perennos-tempo-source-available-*.tar.gz)
+          bash installer/unix/build-deb.sh --edition source-available --tarball "$t" --out dist
+      - name: The tarball installs and the programs start
+        run: |
+          set -eu
+          t=$(ls dist/perennos-tempo-source-available-*.tar.gz)
+          mkdir -p "$RUNNER_TEMP/try" && tar xzf "$t" -C "$RUNNER_TEMP/try"
+          d=$(ls -d "$RUNNER_TEMP"/try/perennos-tempo-source-available-*/)
+          for p in tempo-launch tempo-local-agent tempo-vault tempo-studio tempo-room; do
+            test -x "$d/bin/$p" || { echo "$p is missing"; exit 1; }
+          done
+          "$d/bin/tempo-launch" --help >/dev/null
+          echo "five programs in $(basename "$t")"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/
+          if-no-files-found: error
+
+  windows:
+    name: Release files (windows-latest)
+    needs: versions
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Inno Setup
+        run: choco install innosetup --version 6.7.1 --allow-downgrade --no-progress -y
+      - name: Build the source-available installer
+        shell: pwsh
+        run: ./installer/windows/build.ps1 -Apps vault,studio,room
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item installer/windows/build/out/PerennosTempo-Setup-*.exe dist/
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dist-windows-latest
+          path: dist/
+          if-no-files-found: error
+
+  draft:
+    name: SHA256SUMS.txt and the draft release
+    needs: [versions, unix, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Gather the files from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir got
+          mkdir -p dist
+          find got -type f ! -name '*.sha256' -exec mv {} dist/ \;
+          ls -la dist
+      - name: SHA256SUMS.txt
+        run: |
+          set -eu
+          cd dist
+          sha256sum -- * | sort -k 2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          n=$(wc -l < SHA256SUMS.txt)
+          [ "$n" -ge 4 ] || { echo "expected at least 4 files (Linux tarball and .deb, macOS tarball, Windows installer), got $n"; exit 1; }
+      - name: Build provenance (a download can be checked against this workflow)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "dist/*"
+      - name: The provenance checks out (gh attestation verify, each file)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          for f in dist/*; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" >/dev/null
+            echo "verified: $(basename "$f")"
+          done
+      - name: Draft release (not published)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+          VERSION: ${{ needs.versions.outputs.version }}
+        run: |
+          set -eu
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "a release named $TAG already exists; nothing was changed"; exit 1
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "Perennos Tempo $VERSION" --notes-file ".github/release-notes/$TAG.md" dist/*
+          echo "draft release $TAG made; publish it by hand after checking"
