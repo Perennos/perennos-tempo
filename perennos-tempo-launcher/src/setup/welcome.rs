@@ -105,9 +105,9 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
         })
         .collect();
     format!(
-        r#"{top}<p class="tt-kicker">First run</p>
-<h1>Welcome to <em>Perennos Tempo</em></h1>
-<p class="lede">Tempo has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
+        r#"{top}<p class="tt-kicker">01 — First run</p>
+<h1>What's your <em>tempo</em>?</h1>
+<p class="lede">Welcome to Perennos Tempo. It has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
 
 <h2>What this computer can run</h2>
 <p class="verdict">{verdict}</p>
