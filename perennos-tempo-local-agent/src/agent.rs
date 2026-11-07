@@ -514,6 +514,9 @@ impl Agent {
         let mut host = self.env.mcp.borrow_mut();
         host.retry_failed();
         let mut sel: Vec<Offered> = host.select(text, builtins.len(), cfg.tool_cap);
+        // GUARD: a tool whose definition changed since it was pinned, or reads like instructions
+        // to the model, is offered only after the owner approves it (see mcp.rs)
+        sel = host.vet(sel, &|what, detail| self.env.ask(what, detail).is_ok());
         if cfg.prefix_stable {
             // Sticky and sorted: tools offered earlier in this conversation stay offered (the tool
             // block sits before the history in the prompt, so any change would void the cache);
@@ -686,11 +689,15 @@ impl Agent {
             if let Err(no) = asked {
                 no
             } else {
-                self.env
+                let r = self
+                    .env
                     .mcp
                     .borrow_mut()
                     .call(srv, tn, args)
-                    .unwrap_or_else(|e| format!("ERROR: {e}"))
+                    .unwrap_or_else(|e| format!("ERROR: {e}"));
+                // GUARD: what an unmarked server says is untrusted text (see tools.rs)
+                self.env.note_mcp_result(conv, srv);
+                r
             }
         } else {
             format!("unknown tool {name}")
@@ -1114,6 +1121,12 @@ impl Agent {
         let (mut tools, mut route, mut n_mcp) = (vec![], HashMap::new(), 0);
         if lane == Lane::Heavy && !conv.guest {
             (tools, route, n_mcp) = self.tools_for(text, conv);
+            // GUARD: a second server that took another's tool name was refused; say so
+            let refused = self.env.mcp.borrow_mut().take_refusals();
+            for m in refused {
+                conv.emit("status", &m);
+                sink.status(&m);
+            }
         }
         let mut models: Vec<String> = if lane == Lane::Heavy || self.cfg().fast_models.is_empty() {
             self.heavy_models(conv)
@@ -1248,6 +1261,11 @@ impl Agent {
                     continue;
                 }
                 let r = self.run_tool(conv, &route, &name, &args);
+                // GUARD: the first time this turn takes in something untrusted, say so once
+                if let Some(m) = self.env.take_taint_notice(conv) {
+                    conv.emit("status", m);
+                    sink.status(m);
+                }
                 // after a call that may change things, earlier reads are stale: let them run again
                 if CHANGES.contains(&name.as_str())
                     || name == "run_command"
