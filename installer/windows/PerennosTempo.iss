@@ -589,7 +589,8 @@ var
 begin
   { the Ollama box starts ticked only when no Ollama is on this computer; chosen once, so the
     person's own change survives going back and forward }
-  if (CurPageID = wpSelectTasks) and not OllamaTaskDecided then
+  { a silent install does exactly what /TASKS says: nothing is ticked for it }
+  if (CurPageID = wpSelectTasks) and not OllamaTaskDecided and not WizardSilent then
   begin
     OllamaTaskDecided := True;
     if not OllamaPresent then
