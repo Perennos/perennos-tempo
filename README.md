@@ -73,24 +73,18 @@ A profile never declassifies a request, and a public label does not anonymize co
 
 ## What's in the box
 
-| Part | What it gives you | Start it |
-|---|---|---|
-| **Desktop chat** | A local chat window on top of the gateway. | `python tempo.py gui --home "<data-folder>" --port 8765` |
-| **Headless API** | `GET /health`, plus authenticated `GET /v1/models` and `POST /v1/chat/completions`, on `127.0.0.1`. | `python tempo.py headless --home "<data-folder>" --host 127.0.0.1 --port 8765 --device cpu` |
-| **MCP bridge** | `ask`, `listmodels` and `status` for editors and MCP clients, over stdio. The token never goes into client config. | `python tempo.py mcp-config --home "<data-folder>" --port 8765` |
-| **Profiles** | Five generic built-ins with a validator and a privacy boundary. No customer prompts. | [PROFILES-README.md](PROFILES-README.md) |
-| **Receipts** | Append-only, hash-chained route and outcome metadata. | Written by every route. |
-| **Admission and leases** | Resource admission and a lease gate for GPU work. | Applied by the gateway. |
-
-### The apps
-
-| App | What it gives you | Start it |
+| Product | What it gives you | Start it |
 |---|---|---|
 | **Tempo Agent** | A local AI agent for your own computer: it reads and edits files, runs commands and reads web pages, asking before anything that matters; `/undo` puts its last changes back. Projects can give it standing instructions (`AGENTS.md`, `CLAUDE.md`). | `tempo-local-agent`, or `tempo-launch open agent` |
 | **Tempo Vault** | Your notes as plain Markdown files, Obsidian-compatible. The agent reads and links them; Tempo learns from them on your computer. | `tempo-launch open vault` |
 | **Tempo Studio** | Mixing and mastering: loudness, analysis and REAPER sessions, through the agent or its own commands. | `tempo-studio` |
 | **Tempo Room** | A private group chat on your computer. Invite family or a team with a one-time link; anyone in the room can ask `@tempo`. Guests never get tools, files or your memory. | `tempo-launch open room` |
 | **tempo-launch** | Starts and stops everything without a console window, and sets Tempo up for this computer: it checks the memory, graphics card and disk, recommends models that fit, and fetches them (and Ollama itself, checked against a pinned SHA-256) only after you say yes. | `tempo-launch setup` |
+| **Desktop chat** | A local chat window on top of the gateway. | `python tempo.py gui --home "<data-folder>" --port 8765` |
+| **Headless API** | `GET /health`, plus authenticated `GET /v1/models` and `POST /v1/chat/completions`, on `127.0.0.1`. | `python tempo.py headless --home "<data-folder>" --host 127.0.0.1 --port 8765 --device cpu` |
+| **MCP bridge** | `ask`, `listmodels` and `status` for editors and MCP clients, over stdio. The token never goes into client config. | `python tempo.py mcp-config --home "<data-folder>" --port 8765` |
+
+The gateway behind the last three applies five generic **profiles** with a validator and a privacy boundary, and no customer prompts ([PROFILES-README.md](PROFILES-README.md)). It writes append-only, hash-chained **receipts** for every route and outcome, and gives GPU work **admission** and a lease gate.
 
 Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.md](docs/TEMPO-HOME.md)); setup is described in [docs/TEMPO-SETUP.md](docs/TEMPO-SETUP.md).
 
