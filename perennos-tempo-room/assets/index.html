@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en" data-theme="charcoal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#1b1a1b">
+<title>Perennos Tempo Room</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.mjs"></script>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <div class="l">
+      <button class="back" id="back" type="button" aria-label="Back to rooms" hidden>‹</button>
+      <span class="brand">tempo</span>
+      <span class="seg auto"><b>ROOM</b></span>
+      <span class="sep" id="room-sep" hidden>·</span>
+      <span class="seg" id="room-crumb" hidden><b id="room-title"></b></span>
+    </div>
+    <div class="r">
+      <button class="seg ghost" id="theme" type="button" title="Theme: charcoal, ink or paper"><i>theme</i></button>
+      <span class="seg live off" id="livebox" title="Live updates"><i class="dot" id="dot"></i><b id="livestate">OFF</b></span>
+    </div>
+  </header>
+
+  <aside class="side" id="side" aria-label="Rooms">
+    <div class="hello">
+      <p class="lbl" id="today"></p>
+      <h1 id="greeting">Hello.</h1>
+      <p class="sub" id="greeting-sub"></p>
+    </div>
+    <div class="side-hd">
+      <span class="lbl">Rooms</span>
+      <button class="btn sm" id="new-room" type="button" hidden>New room</button>
+    </div>
+    <form class="new-room" id="new-room-form" hidden>
+      <input id="new-room-name" class="field" type="text" maxlength="60" placeholder="Family, Team, Book club" autocomplete="off" aria-label="Room name">
+      <button class="btn go" type="submit">Make it</button>
+    </form>
+    <div class="rooms" id="rooms" role="list"></div>
+    <div class="side-ft">
+      <span class="lbl" id="who"></span>
+      <button class="btn sm ghost" id="logout" type="button" hidden>Sign out</button>
+    </div>
+  </aside>
+
+  <main class="stage" id="stage">
+    <section class="join" id="join" hidden>
+      <div class="join-box">
+        <p class="lbl">Perennos Tempo Room</p>
+        <h1>Come on in.</h1>
+        <p class="sub">A private room where people talk, and Perennos Tempo answers when you write <b>@tempo</b>. Ask whoever runs it for an invite: codes work once and expire. Already in a room and on a new device? Ask for a sign-in code instead; it needs no name.</p>
+        <form id="join-form" class="join-form">
+          <label class="lbl" for="join-code">Invite or sign-in code</label>
+          <input id="join-code" class="field mono" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX" maxlength="20">
+          <label class="lbl" for="join-name">Your name in the room (not for a sign-in code)</label>
+          <input id="join-name" class="field" type="text" autocomplete="nickname" maxlength="32" placeholder="Mia">
+          <button class="btn go wide" type="submit">Join the room</button>
+          <p class="err" id="join-err" role="alert"></p>
+        </form>
+        <p class="hint" id="owner-hint" hidden>Is this your machine? Run <code>tempo-room owner-link</code> and open the link it prints.</p>
+      </div>
+    </section>
+
+    <section class="chat" id="chat" hidden>
+      <div class="chat-hd">
+        <div class="chat-title">
+          <h2 id="chat-name"></h2>
+          <p class="lbl" id="chat-meta"></p>
+        </div>
+        <div class="chat-tools">
+          <button class="btn sm" id="people" type="button" title="People in this room">People</button>
+          <button class="btn sm" id="invite" type="button" hidden>Invite</button>
+        </div>
+      </div>
+      <div class="msgs" id="msgs" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <button class="jump" id="jump" type="button" hidden>New messages ↓</button>
+      <div class="thinking" id="thinking" hidden aria-live="polite">
+        <span class="mark">tempo</span>
+        <span class="beat" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="lbl" id="thinking-text">is thinking</span>
+      </div>
+      <div class="composer" id="composer">
+        <div class="replying" id="replying" hidden>
+          <span class="lbl">Replying to</span>
+          <span id="replying-text"></span>
+          <button class="x" id="replying-x" type="button" aria-label="Cancel the reply">×</button>
+        </div>
+        <div class="row">
+          <textarea id="text" rows="1" maxlength="4000" placeholder="Message" aria-label="Message" spellcheck="true"></textarea>
+          <button class="send" id="send" type="button" aria-label="Send">SEND</button>
+        </div>
+        <p class="hint small" id="composer-hint"></p>
+      </div>
+      <div class="suggest" id="suggest" role="listbox" hidden></div>
+    </section>
+
+    <section class="empty-stage" id="empty-stage">
+      <div>
+        <p class="lbl">Perennos Tempo Room</p>
+        <h1 id="empty-title">Pick a room.</h1>
+        <p class="sub" id="empty-sub">Mention <b>@tempo</b> in any message and Perennos Tempo answers in the thread.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="status">
+    <span><i class="dot" id="agent-dot"></i><b id="agent-state">agent</b></span>
+    <span id="st-mid"></span>
+    <span id="st-right">private · on your machine</span>
+  </footer>
+</div>
+
+<div class="sheet" id="sheet" hidden><div class="sheet-box" id="sheet-box" role="dialog" aria-modal="true"></div></div>
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>
