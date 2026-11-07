@@ -392,8 +392,14 @@ impl Agent {
     }
 
     fn system_message(&mut self, conv: &Conv, mem: &str, fast: bool, instr: &str) -> Value {
+        // a role the owner gave this conversation (a Room teammate), after the rules it never overrides
+        let role = conv
+            .role
+            .as_deref()
+            .map(|r| format!("\nYOUR ROLE (set by the owner; the rules above still hold):\n{r}\n"))
+            .unwrap_or_default();
         if conv.guest {
-            return json!({"role": "system", "content": SYSTEM_GUEST.replace("{today}", &util::today_long())});
+            return json!({"role": "system", "content": format!("{}{role}", SYSTEM_GUEST.replace("{today}", &util::today_long()))});
         }
         let cfg = self.cfg();
         let owner = if cfg.owner_context.is_empty() {
@@ -410,6 +416,7 @@ impl Agent {
                 c.push_str(&format!("\nCORE (pinned, always true):\n{core}\n"));
             }
             c.push_str(&self.place(conv, instr));
+            c.push_str(&role);
             return json!({"role": "system", "content": c});
         }
         let mut c = SYSTEM
@@ -421,6 +428,7 @@ impl Agent {
             c.push_str(&format!("\nCORE (pinned, always true):\n{core}\n"));
         }
         c.push_str(&self.place(conv, instr));
+        c.push_str(&role);
         c.push_str(&format!("\nMEMORY EXCERPTS:\n{mem}"));
         if fast {
             c.push_str(FAST_NOTE);
@@ -546,7 +554,9 @@ impl Agent {
                 Ok(r) => return Ok(r),
                 Err(e) => e,
             };
-            for attempt in 1..=cfg.retries {
+            // a model this engine does not have will not appear on a retry: fall back at once
+            let missing = last.contains("not found") || last.contains("HTTP 404");
+            for attempt in 1..=(if missing { 0 } else { cfg.retries }) {
                 let msg = format!(
                     "engine {model} error: {}; retry {attempt}/{}",
                     head_chars(&last, 160),
@@ -2065,6 +2075,38 @@ mod tests {
             m.bodies("/api/chat").len(),
             2,
             "one refusal, then the turn ends"
+        );
+    }
+
+    #[test]
+    fn a_teammate_runs_on_its_own_model_with_its_role_and_still_no_tools() {
+        let missing = (
+            200,
+            ndjson(&[json!({"error": "model \"not-here\" not found, try pulling it first"})]),
+        );
+        let m = Mock::start(chat_script(vec![missing, text_resp("On it.")]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        conv.guest = true;
+        conv.model = Some("not-here".into());
+        conv.role = Some("You are the studio's mixing engineer.".into());
+        assert_eq!(say(&mut a, &mut conv, "can you check the mix?"), "On it.");
+        let b = m.bodies("/api/chat");
+        // the chosen model first; the engine does not have it, so the next model at once, no retries
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0]["model"], "not-here");
+        assert_eq!(b[1]["model"], "heavy-a");
+        let sys = b[1]["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            sys.contains("group chat room") && sys.contains("mixing engineer"),
+            "{sys}"
+        );
+        assert!(
+            sys.find("You have no tools").unwrap() < sys.find("mixing engineer").unwrap(),
+            "the role comes after the rules"
+        );
+        assert!(
+            b[1]["tools"].as_array().is_none_or(|t| t.is_empty()),
+            "still no tools"
         );
     }
 

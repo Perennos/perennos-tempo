@@ -104,6 +104,19 @@ pub struct Conv {
     pub think: bool,
     /// The model this conversation asked for first (`/model`); None: the config's.
     pub model: Option<String>,
+    /// A role the owner gave this conversation (a Room teammate: "you are the band's booking
+    /// manager"). It goes into the system message, never into what anyone types.
+    pub role: Option<String>,
+}
+
+/// The longest role a conversation may be given, and whether a model name is one we accept.
+pub const MAX_ROLE: usize = 2000;
+
+pub fn valid_model(m: &str) -> bool {
+    !m.is_empty()
+        && m.len() <= 100
+        && m.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":.-_/".contains(c))
 }
 
 /// What the agent may do in a conversation, as Claude Code's modes: `Default` asks as always;
@@ -205,6 +218,7 @@ impl Conv {
             usage: Usage::default(),
             think: false,
             model: None,
+            role: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)
@@ -222,6 +236,10 @@ impl Conv {
             c.model = d["model"]
                 .as_str()
                 .filter(|m| !m.trim().is_empty())
+                .map(str::to_string);
+            c.role = d["role"]
+                .as_str()
+                .filter(|r| !r.trim().is_empty())
                 .map(str::to_string);
             let u = &d["usage"];
             c.usage = Usage {
@@ -256,7 +274,7 @@ impl Conv {
         if std::fs::write(
             &tmp,
             json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" },
-                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model,
+                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role,
                 "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
         .is_ok()

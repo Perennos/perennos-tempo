@@ -677,18 +677,28 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
     let post = req.method == "POST";
     match (post, api) {
         (false, "convs") => send_json(&mut s, 200, &json!(convs(&sh.cfg))),
-        (true, "new") => match Conv::open(&sh.cfg, None) {
-            Ok(mut c) => {
-                // {"mode": "guest"}: a chat room's conversation (no tools, memory or owner context)
-                if body["mode"] == "guest" {
-                    c.guest = true;
-                    c.save();
+        (true, "new") => {
+            // {"model": "<tag>", "role": "<text>"}, both optional: a Room teammate's model (tried
+            // first; the config's models stay as fallbacks) and the role its owner wrote for it
+            let model = match body.get("model").and_then(Value::as_str).map(str::trim) {
+                Some(m) if !m.is_empty() && !crate::conv::valid_model(m) => {
+                    return refuse(
+                        &mut s,
+                        400,
+                        "model: letters, digits and : . - _ / only, at most 100 characters",
+                    )
                 }
-                lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
-                send_json(&mut s, 200, &json!({"conv": c.id}));
-            }
-            Err(e) => send_json(&mut s, 500, &json!({ "error": e })),
-        },
+                m => m.filter(|m| !m.is_empty()).map(str::to_string),
+            };
+            let role = match body.get("role").and_then(Value::as_str).map(str::trim) {
+                Some(r) if r.chars().count() > crate::conv::MAX_ROLE => {
+                    return refuse(&mut s, 400, "role: at most 2000 characters")
+                }
+                r => r.filter(|r| !r.is_empty()).map(util::redact),
+            };
+            new_conv(sh, body["mode"] == "guest", model, role, s)
+        }
+
         (true, "send") => {
             let conv = body["conv"].as_str().unwrap_or("");
             let text = body["text"].as_str().unwrap_or("").trim();
@@ -849,7 +859,7 @@ fn health(sh: &Shared, keyed: bool) -> Value {
     // `auth: "key"`: every other call needs X-Tempo-Key (see `serve`).
     let auth = if sh.opts.key.is_some() { "key" } else { "none" };
     if !keyed {
-        return json!({"ok": true, "stream": true, "guest": true, "auth": auth});
+        return json!({"ok": true, "stream": true, "guest": true, "roles": true, "auth": auth});
     }
     let hosts = {
         let mut seen = lock(&sh.hosts_seen);
@@ -880,7 +890,31 @@ fn health(sh: &Shared, keyed: bool) -> Value {
         }
     };
     let embed = lock(&sh.state).embed_ok;
-    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "auth": auth})
+    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "roles": true, "auth": auth})
+}
+
+/// A new conversation: a guest one for a chat room (no tools, memory or owner context), with the
+/// model and role a Room teammate was given, if any.
+fn new_conv(
+    sh: &Arc<Shared>,
+    guest: bool,
+    model: Option<String>,
+    role: Option<String>,
+    mut s: TcpStream,
+) {
+    match Conv::open(&sh.cfg, None) {
+        Ok(mut c) => {
+            c.guest = guest;
+            c.model = model;
+            c.role = role;
+            if guest || c.model.is_some() || c.role.is_some() {
+                c.save();
+            }
+            lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
+            send_json(&mut s, 200, &json!({"conv": c.id}));
+        }
+        Err(e) => send_json(&mut s, 500, &json!({ "error": e })),
+    }
 }
 
 fn convs(cfg: &Config) -> Vec<String> {
@@ -1244,6 +1278,64 @@ mod tests {
             "{evs:?}"
         );
         assert_eq!(evs.last().unwrap()["text"], "Hello from the room");
+    }
+
+    #[test]
+    fn a_room_teammate_gets_its_own_model_and_role() {
+        let srv = server(vec![text_resp("Booked for Friday.")], |_, _| {});
+        let (_, h) = get(&srv, "/agent/health");
+        assert_eq!(
+            h["roles"], true,
+            "rooms can see that teammates are supported"
+        );
+        let role = "You are the band's booking manager. Keep answers short.";
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "model": "teammate-model:8b", "role": role}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                saved["mode"].as_str(),
+                saved["model"].as_str(),
+                saved["role"].as_str()
+            ),
+            (Some("guest"), Some("teammate-model:8b"), Some(role))
+        );
+        let (c, _) = post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "can we play friday?"}),
+        );
+        assert_eq!(c, 200);
+        let evs = wait_idle(&srv, &conv);
+        assert_eq!(evs.last().unwrap()["text"], "Booked for Friday.");
+        // a bad model name or an overlong role is refused, and nothing is made
+        assert_eq!(
+            post(
+                &srv,
+                "/agent/new",
+                &json!({"mode": "guest", "model": "bad name; rm"})
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            post(
+                &srv,
+                "/agent/new",
+                &json!({"mode": "guest", "role": "x".repeat(2001)})
+            )
+            .0,
+            400
+        );
     }
 
     #[test]

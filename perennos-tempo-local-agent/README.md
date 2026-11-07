@@ -35,6 +35,10 @@ On Windows, `build.rs` gives `tempo-local-agent.exe` its icon (`assets/tempo-loc
 - Listens on 127.0.0.1 only; another address needs `--bind ADDR --allow-remote` (and the key still applies). The Host header must be `127.0.0.1`, `localhost` or `[::1]` with the port, the address it is bound to, or a name given with `--allow-host` (`NAME:443` also accepts the bare `NAME` that `tailscale serve` sends), and a present Origin (`http://` or `https://`) must be ours, so neither DNS rebinding nor a web page in the browser can drive the agent.
 - Only GET and POST. POST bodies must be `application/json` and at most 1 MB.
 - Approvals appear in the GUI. `/agent/confirm` resolves only an id this server issued for that conversation, and only an explicit `true` approves; an unanswered approval is denied after `--confirm-timeout` seconds (default 900).
+- **Teammates for Tempo Room.** `POST /agent/new` takes two optional fields:
+  - `model`: letters, digits and `: . - _ /`, at most 100 characters. It is tried first, with the configured models as fallbacks; a model the engine does not have falls back at once.
+  - `role`: written by the owner, at most 2,000 characters, redacted. It goes into the system message after the rules, never into what anyone types, and is kept with the conversation.
+  With `"mode": "guest"`, the conversation is still a guest one: no tools, memory or owner context. Health says `"roles": true`.
 - One worker runs turns in order; reading memory or events never waits for a turn and never creates a conversation. Event text and file excerpts are redacted.
 
 ## Working in a project
