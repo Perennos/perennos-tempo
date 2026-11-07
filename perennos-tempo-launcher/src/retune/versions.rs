@@ -29,6 +29,11 @@ pub struct Manifest {
     pub outtype: String,
     pub base_scores: Option<Scores>,
     pub tuned_scores: Option<Scores>,
+    /// The owner's own quantised Ollama copy of the base, scored for the record. The decision
+    /// uses `base_scores`, from the baseline built through the same path as the retune.
+    pub ollama_scores: Option<Scores>,
+    /// The Ollama model the baseline was scored as.
+    pub baseline: String,
     pub margin: f64,
     pub gate: Option<Gate>,
     /// The Ollama model made for it; set when it passed and was put to work.
@@ -79,6 +84,7 @@ impl Manifest {
                 J::Obj(vec![
                     ("base".into(), scores_j(&self.base_scores)),
                     ("retuned".into(), scores_j(&self.tuned_scores)),
+                    ("ollama_base".into(), scores_j(&self.ollama_scores)),
                 ]),
             ),
             ("margin".into(), J::n(self.margin)),
@@ -91,6 +97,7 @@ impl Manifest {
                     ])
                 }),
             ),
+            ("baseline".into(), s(&self.baseline)),
             ("model".into(), s(&self.model)),
         ])
     }
@@ -110,6 +117,8 @@ impl Manifest {
             outtype: s("outtype"),
             base_scores: scores_of(j.get("scores").and_then(|x| x.get("base"))),
             tuned_scores: scores_of(j.get("scores").and_then(|x| x.get("retuned"))),
+            ollama_scores: scores_of(j.get("scores").and_then(|x| x.get("ollama_base"))),
+            baseline: s("baseline"),
             margin: j.f64("margin").unwrap_or(0.0),
             gate: j.get("gate").and_then(|g| {
                 Some(Gate {

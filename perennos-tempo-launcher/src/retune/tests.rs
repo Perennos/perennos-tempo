@@ -681,6 +681,7 @@ fn the_held_out_set_is_not_reachable_from_the_bench() {
             &b.session.id,
             None,
             "q8_0",
+            None,
             true,
             1_800_000_000,
             &mut |_| true,
@@ -831,6 +832,7 @@ fn a_retune_that_stops_the_looping_is_checked_promoted_and_recorded() {
             &s.id,
             None,
             "q8_0",
+            None,
             false,
             NOW,
             &mut |q| {
@@ -843,7 +845,20 @@ fn a_retune_that_stops_the_looping_is_checked_promoted_and_recorded() {
     assert_eq!(code, 0);
     assert!(text.contains("Not started. Nothing was changed.") && e.log.borrow().is_empty());
     // yes
-    let (code, text) = said(|o| check(&ctx, &d, &s.id, None, "q8_0", false, NOW, &mut |_| true, o));
+    let (code, text) = said(|o| {
+        check(
+            &ctx,
+            &d,
+            &s.id,
+            None,
+            "q8_0",
+            None,
+            false,
+            NOW,
+            &mut |_| true,
+            o,
+        )
+    });
     assert_eq!(code, 0, "{text}");
     assert!(
         text.contains("131072 of 819200000 weights changed (0.0160%)"),
@@ -925,7 +940,20 @@ fn a_retune_that_slips_on_the_general_tasks_is_kept_but_not_promoted() {
         },
     );
     let d = deps(&e, &g, &base_modelfile, vec![machine(32.0, None)]);
-    let (code, text) = said(|o| check(&ctx, &d, &s.id, None, "q8_0", true, NOW, &mut |_| true, o));
+    let (code, text) = said(|o| {
+        check(
+            &ctx,
+            &d,
+            &s.id,
+            None,
+            "q8_0",
+            None,
+            true,
+            NOW,
+            &mut |_| true,
+            o,
+        )
+    });
     assert_eq!(code, 0);
     assert!(
         text.contains("It did not pass:")
@@ -955,7 +983,20 @@ fn check_stops_early_and_changes_nothing_when_something_is_missing() {
     );
     let d = deps(&e, &g, &base_modelfile, vec![machine(32.0, None)]);
     let run = |id: &str, held: Option<&Path>| {
-        said(|o| check(&ctx, &d, id, held, "q8_0", true, NOW, &mut |_| true, o))
+        said(|o| {
+            check(
+                &ctx,
+                &d,
+                id,
+                held,
+                "q8_0",
+                None,
+                true,
+                NOW,
+                &mut |_| true,
+                o,
+            )
+        })
     };
     // no session, no edits, no held-out set, no converter
     assert!(run("nope", None).1.contains("No session called nope"));
@@ -1065,7 +1106,20 @@ fn rehearsal_says_when_a_model_loops() {
         },
     );
     let d = deps(&e, &g, &base_modelfile, vec![machine(32.0, None)]);
-    let (_, text) = said(|o| check(&ctx, &d, &s.id, None, "q8_0", true, NOW, &mut |_| true, o));
+    let (_, text) = said(|o| {
+        check(
+            &ctx,
+            &d,
+            &s.id,
+            None,
+            "q8_0",
+            None,
+            true,
+            NOW,
+            &mut |_| true,
+            o,
+        )
+    });
     assert!(
         text.contains("loops on 40% of answers. A retune might fix that"),
         "{text}"
@@ -1197,4 +1251,172 @@ fn rust_and_the_helper_edit_a_copy_and_leave_the_original_alone() {
         crate::setup::sha256::sha256_hex(&std::fs::read(&file).unwrap()),
         before
     );
+}
+
+// ---- the like-for-like baseline
+
+/// Your own quantised Ollama copy answers badly; the baseline (the same weights through the same
+/// conversion) and the retune answer the same. Against the Ollama copy the retune would look like a
+/// win. Against the baseline it is a tie.
+struct PrecisionGen;
+
+impl Gen for PrecisionGen {
+    fn answer(&self, model: &str, m: &[(String, String)]) -> Result<String, String> {
+        let q = m.last().map(|x| x.1.as_str()).unwrap_or("");
+        if let Some((_, any)) = eval::CANARY.iter().find(|(p, _)| *p == q) {
+            return Ok(any[0].to_string());
+        }
+        Ok(
+            if model.contains("retune-try") || model.contains("-base-") {
+                format!("Answer for {q}, long enough to keep around.")
+            } else {
+                "something unrelated entirely".into()
+            },
+        )
+    }
+}
+
+#[test]
+fn the_gate_compares_against_the_baseline_built_the_same_way_not_your_quantised_copy() {
+    let ctx = home("fair");
+    let s = ready_session(&ctx);
+    let (e, g) = (RecExec::default(), PrecisionGen);
+    let d = deps(&e, &g, &base_modelfile, vec![machine(32.0, None)]);
+    let go = || {
+        said(|o| {
+            check(
+                &ctx,
+                &d,
+                &s.id,
+                None,
+                "q8_0",
+                None,
+                true,
+                NOW,
+                &mut |_| true,
+                o,
+            )
+        })
+    };
+    let (code, text) = go();
+    assert_eq!(code, 0, "{text}");
+    // a tie with the like-for-like baseline does not pass, though it beats the Ollama copy
+    assert!(
+        text.contains("It did not pass:") && text.contains("Not promoted"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("not perfectly level") && !text.contains("tilted"),
+        "{text}"
+    );
+    assert_eq!(e.ran("retuned-20270115"), 0);
+    let m = versions::list(&ctx, MODEL).pop().unwrap();
+    assert_eq!(m.baseline, "tempo-qwen3-5-0-8b-base-q8-20270115");
+    let (b, t, o) = (
+        m.base_scores.unwrap(),
+        m.tuned_scores.unwrap(),
+        m.ollama_scores.unwrap(),
+    );
+    assert_eq!(b.eval, t.eval, "the gate's base is the baseline");
+    assert!(
+        o.eval < t.eval,
+        "your own copy is scored too, and only for the record"
+    );
+    assert!(
+        text.contains("For the record, your own qwen3.5:0.8b scores"),
+        "{text}"
+    );
+    // the baseline came from the unedited weights, through the same convert command as the retune
+    let log = e.log.borrow().clone();
+    let converts: Vec<String> = log
+        .iter()
+        .map(|a| a.join(" "))
+        .filter(|l| l.contains("convert_hf_to_gguf.py"))
+        .collect();
+    assert_eq!(converts.len(), 2, "{converts:?}");
+    let base = converts
+        .iter()
+        .find(|l| l.contains(" /weights "))
+        .expect("the baseline converts the original folder");
+    let tuned = converts
+        .iter()
+        .find(|l| l.contains("/hf "))
+        .expect("the retune converts the edited copy");
+    for l in [base, tuned] {
+        assert!(
+            l.contains("--outtype q8_0") && l.contains("--outfile model.gguf"),
+            "{l}"
+        );
+    }
+    drop(log);
+    // built once: a second check reuses it
+    let (code, text) = go();
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("built earlier from the same weights"),
+        "{text}"
+    );
+    assert_eq!(e.ran("convert_hf_to_gguf.py /weights "), 1);
+    assert_eq!(e.ran("create tempo-qwen3-5-0-8b-base-q8-20270115"), 1);
+}
+
+#[test]
+fn a_real_win_over_the_baseline_still_promotes_and_the_band_follows_it() {
+    let ctx = home("band");
+    let s = ready_session(&ctx);
+    let (e, g) = (
+        RecExec::default(),
+        LoopGen {
+            tuned_breaks_canary: false,
+        },
+    );
+    let d = deps(&e, &g, &base_modelfile, vec![machine(32.0, None)]);
+    let (code, text) = said(|o| {
+        check(
+            &ctx,
+            &d,
+            &s.id,
+            None,
+            "q8_0",
+            Some("b"),
+            true,
+            NOW,
+            &mut |_| true,
+            o,
+        )
+    });
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("It passed:") && text.contains("The Conductor plays it for the parts of b"),
+        "{text}"
+    );
+    let models = crate::conductor::Models {
+        heavy: MODEL.into(),
+        fast: "qwen3:1.7b".into(),
+    };
+    let mut band = crate::conductor::templates::find("social-media")
+        .unwrap()
+        .band("b", &models);
+    for m in &mut band.members {
+        m.model = "qwen3:1.7b".into();
+    }
+    band.members[0].model = MODEL.into();
+    let changed = apply_retuned(&ctx, &mut band);
+    assert_eq!(changed, [band.members[0].handle.clone()]);
+    assert_eq!(band.members[0].model, "tempo-qwen3-5-0-8b-retuned-20270115");
+    assert_eq!(band.members[1].model, "qwen3:1.7b");
+    // a band that was not linked is left alone, and so is every band after an undo
+    let mut other = band.clone();
+    other.name = "c".into();
+    other.members[0].model = MODEL.into();
+    assert!(apply_retuned(&ctx, &mut other).is_empty());
+    said(|o| undo(&ctx, MODEL, false, 3, o));
+    band.members[0].model = MODEL.into();
+    assert!(apply_retuned(&ctx, &mut band).is_empty());
+    assert_eq!(band.members[0].model, MODEL);
+    // --band is checked
+    assert!(
+        matches!(parse_args(&["check", "s-1", "--band", "b"]).unwrap(), RetuneCmd::Check { band: Some(ref b), .. } if b == "b")
+    );
+    assert!(parse_args(&["check", "s-1", "--band", "../x"]).is_err());
 }

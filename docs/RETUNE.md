@@ -58,14 +58,17 @@ or, for Claude Desktop, a `mcpServers` snippet for `claude_desktop_config.json`.
 1. applies it to a copy of the weights (a new folder; never the original);
 2. converts the copy to GGUF with llama.cpp's `convert_hf_to_gguf.py` (`--outtype q8_0` by default; `f16` and `bf16` too);
 3. makes an Ollama model from it that keeps the base model's chat template and settings;
-4. runs the Woodshed's Rehearsal against the base: the same scorer on your held-out set, plus the canary of twelve general tasks, plus the loop count;
-5. promotes only if it wins by the margin (`margin` in `woodshed.json`, 5 points by default) and the canary does not slip. Then `ollama create tempo-<model>-retuned-<yyyymmdd>`.
+4. builds the baseline: the same unedited safetensors through the same conversion and quantisation, as `tempo-<model>-base-<outtype>-<yyyymmdd>`. It is built once and reused (the record is `baseline-<outtype>.json` next to the versions; if the Ollama model is gone it is built again);
+5. runs the Woodshed's Rehearsal of the retune against that baseline: the same scorer on your held-out set, plus the canary of twelve general tasks, plus the loop count. Your own quantised Ollama copy is scored too and shown for the record, but the decision never uses it;
+6. promotes only if it wins by the margin (`margin` in `woodshed.json`, 5 points by default) and the canary does not slip. Then `ollama create tempo-<model>-retuned-<yyyymmdd>`.
 
 Every check keeps a version folder in `<home>/retune/versions/<model>/`. Its `manifest.json` records the SHA-256 of the edit list, how many weights changed (count and share of the model), and every score. `retune versions` lists them. `retune undo <model>` steps back to the version before, or to the plain model. Nothing is deleted: the Ollama models and the folders stay.
 
 Your held-out set is a file of your own, lines like `{"prompt": "...", "answer": "..."}`, passed as `--held-out` to `bench` or `check`. It is scored with the Woodshed's token-F1, which measures how close an answer's wording is to yours, so write references the way you want answers to sound. Anything the bench handed out as practice is left out of it.
 
-One thing is not level: your Ollama copy of the base is quantised (usually Q4) and the retuned model is q8_0 or f16. A win might be a little precision. check says so.
+The comparison is like for like: the baseline and the retune differ only by the edits, so a win cannot be a little extra precision. Your own copy of the model is usually Q4, so it can score differently from the baseline; check prints both.
+
+`--band BAND` links a Conductor band to the model. Once a retune passes, that band's parts that play the base model play the active retune (`conductor run` says so), and `retune undo MODEL` takes it back out.
 
 ## The bench
 

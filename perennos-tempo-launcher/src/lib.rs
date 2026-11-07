@@ -155,7 +155,7 @@ usage: tempo-launch [command]
   retune bench MODEL [--passes N] [--weights DIR] [--held-out FILE] [--session ID]
                     the bench: an MCP server on stdio, with a fixed set of tools and a budget of forward passes (50)
   retune show SESSION | check SESSION [--held-out FILE] [--outtype f16|bf16|q8_0] [--yes]
-                    list a session's edits, or apply them to a copy, make a GGUF and run the Rehearsal against the base
+                    list a session's edits, or apply them to a copy, make a GGUF and run the Rehearsal against the same weights unedited (--band: the band plays it once it passes)
   retune undo MODEL | SESSION --edit | versions [MODEL]
                     step back to the version before (or take the last edit off a session), and every version kept
   version

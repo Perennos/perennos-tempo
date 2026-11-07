@@ -59,6 +59,8 @@ pub enum RetuneCmd {
         session: String,
         held_out: Option<PathBuf>,
         outtype: String,
+        /// A Conductor band whose parts play the retuned model once it passes.
+        band: Option<String>,
         yes: bool,
     },
     Undo {
@@ -88,7 +90,8 @@ pub fn parse_args(args: &[&str]) -> Result<RetuneCmd, String> {
         match rest[i] {
             "--yes" => yes = true,
             "--edit" => edit = true,
-            f @ ("--hf" | "--weights" | "--passes" | "--held-out" | "--session" | "--outtype") => {
+            f @ ("--hf" | "--weights" | "--passes" | "--held-out" | "--session" | "--outtype"
+            | "--band") => {
                 let v = rest
                     .get(i + 1)
                     .filter(|v| !v.starts_with("--"))
@@ -154,7 +157,12 @@ pub fn parse_args(args: &[&str]) -> Result<RetuneCmd, String> {
         }
         "show" => Ok(RetuneCmd::Show(one("a session")?)),
         "check" => {
-            allowed(&["--held-out", "--outtype"])?;
+            allowed(&["--held-out", "--outtype", "--band"])?;
+            let band = match flag("--band") {
+                Some(b) if session::plain(b) => Some(b.to_string()),
+                Some(b) => return Err(format!("retune check: \"{b}\" is not a band name")),
+                None => None,
+            };
             let outtype = flag("--outtype").unwrap_or("q8_0").to_string();
             if !matches!(outtype.as_str(), "f16" | "bf16" | "q8_0") {
                 return Err("retune check: --outtype is f16, bf16 or q8_0".into());
@@ -163,6 +171,7 @@ pub fn parse_args(args: &[&str]) -> Result<RetuneCmd, String> {
                 session: one("a session")?,
                 held_out: flag("--held-out").map(PathBuf::from),
                 outtype,
+                band,
                 yes,
             })
         }
@@ -751,6 +760,131 @@ pub fn modelfile_for(base_modelfile: &str) -> String {
     out
 }
 
+/// A command run in a folder, with a line saying what it is doing; the output tail or nothing.
+type Step<'a> = dyn Fn(&Target, Vec<String>, &str, &mut dyn Write) -> Result<String, ()> + 'a;
+
+/// The baseline for a retune: the same unedited weights, converted and quantised the same way,
+/// made once per model and output type and reused. Its name is kept in `baseline-<outtype>.json`.
+#[allow(clippy::too_many_arguments)]
+fn baseline_model(
+    ctx: &Ctx,
+    d: &Deps,
+    s: &Session,
+    outtype: &str,
+    py: &str,
+    converter: &str,
+    base_mf: &str,
+    ollama: &str,
+    now: u64,
+    step: &Step,
+    out: &mut dyn Write,
+) -> Option<String> {
+    let dir = versions::dir(ctx, &s.model);
+    let rec = dir.join(format!("baseline-{outtype}.json"));
+    let weights = s.weights.to_string_lossy().into_owned();
+    let known = std::fs::read_to_string(&rec)
+        .ok()
+        .and_then(|t| parse(&t).ok())
+        .filter(|j| j.str("weights") == Some(weights.as_str()))
+        .and_then(|j| j.str("model").map(String::from));
+    let here = local_target(&dir);
+    if let Some(m) = known {
+        let alive = d
+            .exec
+            .run(&here, &[ollama.into(), "show".into(), m.clone()], STEP)
+            .is_ok_and(|x| x.ok);
+        if alive {
+            let _ = writeln!(out, "Baseline: {m}, built earlier from the same weights.");
+            return Some(m);
+        }
+    }
+    let name = format!(
+        "tempo-{}-base-{}-{}",
+        session::slug(&s.model),
+        outtype.trim_end_matches("_0"),
+        &crate::file_stamp(now)[..8]
+    );
+    let work = local_target(&dir.join("baseline").join(outtype));
+    step(
+        &work,
+        vec![
+            py.into(),
+            converter.into(),
+            weights.clone(),
+            "--outfile".into(),
+            "model.gguf".into(),
+            "--outtype".into(),
+            outtype.into(),
+        ],
+        "Converting the unedited weights the same way, for the baseline.",
+        out,
+    )
+    .ok()?;
+    d.exec
+        .put(&work, "Modelfile", &modelfile_for(base_mf))
+        .map_err(|e| {
+            let _ = writeln!(out, "{e}");
+        })
+        .ok()?;
+    step(
+        &work,
+        vec![
+            ollama.into(),
+            "create".into(),
+            name.clone(),
+            "-f".into(),
+            "Modelfile".into(),
+        ],
+        &format!("Making the baseline {name} in Ollama."),
+        out,
+    )
+    .ok()?;
+    let j = J::Obj(vec![
+        ("model".into(), J::s(&name)),
+        ("weights".into(), J::s(&weights)),
+        ("outtype".into(), J::s(outtype)),
+        ("at".into(), J::s(&stamp(now))),
+    ]);
+    if let Err(e) = write_atomic(&rec, j.pretty().as_bytes()) {
+        let _ = writeln!(
+            out,
+            "Could not remember the baseline ({e}); it will be built again next time."
+        );
+    }
+    Some(name)
+}
+
+fn band_link(ctx: &Ctx, band: &str) -> PathBuf {
+    root(ctx).join("bands").join(format!("{band}.json"))
+}
+
+/// `retune check --band B`: B's parts that play `base` will play whatever retune is active for it.
+fn link_band(ctx: &Ctx, band: &str, base: &str) -> Result<(), String> {
+    let j = J::Obj(vec![("base".into(), J::s(base))]);
+    write_atomic(&band_link(ctx, band), j.pretty().as_bytes())
+        .map_err(|e| format!("Could not link the band: {e}"))
+}
+
+/// For the Conductor, like the Woodshed's hook: a linked band's parts that play the base model
+/// play its active retune. Going back with `retune undo` takes effect here too. Returns the
+/// handles that changed.
+pub fn apply_retuned(ctx: &Ctx, band: &mut crate::conductor::spec::Band) -> Vec<String> {
+    let base = std::fs::read_to_string(band_link(ctx, &band.name))
+        .ok()
+        .and_then(|t| parse(&t).ok())
+        .and_then(|j| j.str("base").map(String::from));
+    let (Some(base), mut changed) = (base, vec![]) else {
+        return vec![];
+    };
+    if let Some((_, model)) = versions::active(ctx, &base) {
+        for m in band.members.iter_mut().filter(|m| m.model == base) {
+            m.model = model.clone();
+            changed.push(m.handle.clone());
+        }
+    }
+    changed
+}
+
 fn check_folder(s: &Session) -> PathBuf {
     let n = (1..)
         .find(|n| !s.dir.join("work").join(format!("check-{n}")).exists())
@@ -765,6 +899,7 @@ fn check(
     id: &str,
     held_arg: Option<&Path>,
     outtype: &str,
+    band: Option<&str>,
     yes: bool,
     now: u64,
     ask: &mut dyn FnMut(&str) -> bool,
@@ -833,7 +968,7 @@ fn check(
         s.model,
         &s.edit_hash()[..12]
     );
-    let _ = writeln!(out, "Check makes a copy of the edited model (about {gb:.1} GB) in {}, turns it into a GGUF ({outtype}), makes the Ollama model it will be scored as, and runs the Rehearsal against {} on {} held-out prompts and the general tasks. Your own model is not touched.", s.dir.join("work").display(), s.model, held.len());
+    let _ = writeln!(out, "Check makes a copy of the edited model (about {gb:.1} GB) in {}, turns it into a GGUF ({outtype}), and makes the Ollama model it will be scored as. It also builds the same unedited weights through the same conversion once, as the baseline (reused after that, about {gb:.1} GB more the first time), and runs the Rehearsal of the retune against that baseline on {} held-out prompts and the general tasks. Your own {} is scored too, for the record, and is not touched.", s.dir.join("work").display(), held.len(), s.model);
     if !(yes || ask("Go? [y/N] ")) {
         let _ = writeln!(out, "Not started. Nothing was changed.");
         return 0;
@@ -848,26 +983,28 @@ fn check(
         }
     };
     let hf_dir = dir.join("hf").to_string_lossy().into_owned();
-    let step = |argv: Vec<String>, what: &str, out: &mut dyn Write| -> Result<String, ()> {
-        let _ = writeln!(out, "{what}");
-        match d.exec.run(&t, &argv, STEP) {
-            Ok(done) if done.ok => Ok(done.tail),
-            Ok(done) => {
-                let _ = writeln!(
-                    out,
-                    "`{}` failed:\n{}\nNothing was changed.",
-                    script::shown(&argv),
-                    done.tail
-                );
-                Err(())
+    let step =
+        |tg: &Target, argv: Vec<String>, what: &str, out: &mut dyn Write| -> Result<String, ()> {
+            let _ = writeln!(out, "{what}");
+            match d.exec.run(tg, &argv, STEP) {
+                Ok(done) if done.ok => Ok(done.tail),
+                Ok(done) => {
+                    let _ = writeln!(
+                        out,
+                        "`{}` failed:\n{}\nNothing was changed.",
+                        script::shown(&argv),
+                        done.tail
+                    );
+                    Err(())
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "{e}\nNothing was changed.");
+                    Err(())
+                }
             }
-            Err(e) => {
-                let _ = writeln!(out, "{e}\nNothing was changed.");
-                Err(())
-            }
-        }
-    };
+        };
     let Ok(tail) = step(
+        &t,
         vec![
             py.clone(),
             helper,
@@ -906,9 +1043,10 @@ fn check(
         }
     );
     if step(
+        &t,
         vec![
             py.clone(),
-            converter,
+            converter.clone(),
             hf_dir,
             "--outfile".into(),
             "model.gguf".into(),
@@ -939,6 +1077,7 @@ fn check(
         id_v.replace('-', "")
     );
     if step(
+        &t,
         vec![
             ollama.clone(),
             "create".into(),
@@ -953,15 +1092,21 @@ fn check(
     {
         return 1;
     }
+    // the baseline: the same unedited weights, through the same conversion and quantisation
+    let Some(baseline) = baseline_model(
+        ctx, d, &s, outtype, &py, &converter, &base_mf, &ollama, now, &step, out,
+    ) else {
+        return 1;
+    };
     let set = Settings::load(ctx);
     let _ = writeln!(
         out,
-        "Rehearsal: {} held-out prompts and {} general tasks, base and retuned.",
+        "Rehearsal: {} held-out prompts and {} general tasks, retuned against the baseline {baseline}.",
         held.len().min(eval::MAX_EVAL),
         eval::CANARY.len()
     );
     let (base, tuned) = match (
-        eval::score(d.gen, &s.model, &held),
+        eval::score(d.gen, &baseline, &held),
         eval::score(d.gen, &try_model, &held),
     ) {
         (Ok(b), Ok(t)) => (b, t),
@@ -974,7 +1119,9 @@ fn check(
             return 1;
         }
     };
-    if let Some(w) = eval::loops_words(&s.model, &base) {
+    // your own quantised copy, for the record only: the decision does not use it
+    let ollama_base = eval::score(d.gen, &s.model, &held).ok();
+    if let Some(w) = eval::loops_words(&s.model, ollama_base.as_ref().unwrap_or(&base)) {
         let _ = writeln!(out, "{w}");
     }
     let g = eval::gate(&base, &tuned, set.margin(), set.canary_slack());
@@ -991,6 +1138,8 @@ fn check(
         outtype: outtype.into(),
         base_scores: Some(base.clone()),
         tuned_scores: Some(tuned.clone()),
+        ollama_scores: ollama_base.clone(),
+        baseline: baseline.clone(),
         margin: set.margin(),
         gate: Some(g.clone()),
         status: if g.passed { "passed" } else { "failed" }.into(),
@@ -999,12 +1148,18 @@ fn check(
     };
     let _ = writeln!(
         out,
-        "Held-out: base {:.1}, retuned {:.1}. General tasks: {:.0}% to {:.0}%. Loops: {:.0}% to {:.0}%.\n{} {}.",
+        "Held-out: baseline {:.1}, retuned {:.1}. General tasks: {:.0}% to {:.0}%. Loops: {:.0}% to {:.0}%.\n{} {}.",
         base.eval, tuned.eval, base.canary, tuned.canary, base.loops, tuned.loops,
         if g.passed { "It passed:" } else { "It did not pass:" },
         g.reason
     );
-    let _ = writeln!(out, "(Your Ollama copy of {} is quantised and the retuned one is {outtype}, so the comparison is not perfectly level.)", s.model);
+    if let Some(o) = &ollama_base {
+        let _ = writeln!(
+            out,
+            "For the record, your own {} scores {:.1} on the held-out set, {:.0}% on the general tasks, loops {:.0}%. The decision above does not use it.",
+            s.model, o.eval, o.canary, o.loops
+        );
+    }
     if !g.passed {
         let saved = m.save(ctx);
         let _ = writeln!(out, "Not promoted. The edits are kept: undo the last with `tempo-launch retune undo {} --edit`, or keep editing.", s.id);
@@ -1018,6 +1173,7 @@ fn check(
     }
     let name = versions::model_name(&s.model, now, &all);
     if step(
+        &t,
         vec![
             ollama,
             "create".into(),
@@ -1049,6 +1205,20 @@ fn check(
         return 1;
     }
     let _ = writeln!(out, "{name} is made and recorded as version {}. Use it by name (`ollama run {name}`). Undo with `tempo-launch retune undo {}`; the plain model is still there.", m.version, s.model);
+    if let Some(b) = band {
+        match link_band(ctx, b, &s.model) {
+            Ok(()) => {
+                let _ = writeln!(
+                    out,
+                    "The Conductor plays it for the parts of {b} that play {}.",
+                    s.model
+                );
+            }
+            Err(e) => {
+                let _ = writeln!(out, "{e}");
+            }
+        }
+    }
     0
 }
 
@@ -1083,6 +1253,7 @@ pub fn run_with(
             session,
             held_out,
             outtype,
+            band,
             yes,
         } => check(
             ctx,
@@ -1090,6 +1261,7 @@ pub fn run_with(
             &session,
             held_out.as_deref(),
             &outtype,
+            band.as_deref(),
             yes,
             now,
             ask,
