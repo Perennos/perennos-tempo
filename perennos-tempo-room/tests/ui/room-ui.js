@@ -1,6 +1,7 @@
 // Drive the Perennos Tempo Room app in Chromium (Playwright) against a fake agent and the real binary.
 // usage: node crates/perennos-tempo-room/tests/ui/room-ui.js <path to tempo-room> <screenshot folder>
-// Covers the teammates feature too (Team section, @mentions, a mock Ollama, a DM room).
+// Covers the teammates feature too (Team section, @mentions, a mock Ollama, a DM room) and owner-only
+// rooms (the tools switch, an approval card with working buttons at the machine, the member's view).
 // Prints one line per step and ends with "PROBLEMS none" (exit 0) or the list of problems.
 const { chromium } = require('playwright');
 const http = require('http');
@@ -23,6 +24,7 @@ const convs = new Map();
 let nconv = 0;
 const prompts = [];
 const news = []; // every POST /agent/new body, with its conversation id
+const confirms = []; // every POST /agent/confirm body
 function push(c, ev) { ev.n = c.events.length; ev.t = new Date().toISOString(); c.events.push(ev); }
 function answer(p, c) {
   // A teammate's conversation was made with a role: the answer depends on it.
@@ -45,8 +47,9 @@ const agent = http.createServer((req, res) => {
     if (req.headers.origin) problems.push('the agent got an Origin header');
     if (req.method === 'GET' && url.pathname === '/agent/health') return send(200, { ok: true, stream: true, guest: true, roles: true, auth: 'none', models: ['fake'] });
     if (req.method === 'POST' && url.pathname === '/agent/new') {
-      // like the real agent: guest mode only, a role of at most 2000 bytes
-      if (j.mode !== 'guest') return send(400, { error: 'mode must be guest' });
+      // like the real agent: a guest conversation, or the owner's own (owner-only rooms), a role of
+      // at most 2000 bytes
+      if (j.mode !== 'guest' && j.mode !== 'owner') return send(400, { error: 'mode must be guest or owner' });
       if (j.role !== undefined && Buffer.byteLength(String(j.role)) > 2000) return send(400, { error: 'role is too long (2000 bytes at most)' });
       const id = 'conv-' + (++nconv);
       convs.set(id, { events: [], busy: false, mode: j.mode, model: j.model, role: j.role });
@@ -60,6 +63,13 @@ const agent = http.createServer((req, res) => {
       c.busy = true;
       push(c, { type: 'user', text: j.text });
       prompts.push(j.text);
+      if (c.mode === 'owner' && j.text.includes('WRITE-NOTES')) {
+        // an owner conversation that wants to run a command: it asks first, and waits
+        c.asked = (c.asked || 0) + 1;
+        c.pending = 'ui-c' + c.asked;
+        push(c, { type: 'confirm', id: c.pending, what: 'run command', detail: 'echo "meeting notes" > ~/notes/' + c.asked + '.txt' });
+        return send(200, { ok: true });
+      }
       setTimeout(() => {
         push(c, { type: 'tool_result', name: 'read_file', text: 'TOOL-OUTPUT-NEVER-SHOWN' });
         push(c, { type: 'assistant', text: answer(j.text, c) });
@@ -73,7 +83,16 @@ const agent = http.createServer((req, res) => {
       if (!c) return send(200, { events: [], busy: false });
       return send(200, { events: c.events.slice(since), busy: c.busy });
     }
-    if (req.method === 'POST' && url.pathname === '/agent/confirm') return send(200, { ok: false });
+    if (req.method === 'POST' && url.pathname === '/agent/confirm') {
+      confirms.push(j);
+      const c = convs.get(j.conv);
+      if (!c || !c.pending || c.pending !== j.id) return send(200, { ok: false });
+      c.pending = null;
+      push(c, { type: 'status', text: 'run command: ' + (j.ok === true ? 'approved' : 'denied or timed out') });
+      push(c, { type: 'assistant', text: j.ok === true ? 'Done: notes written.' : 'Left the notes alone.' });
+      c.busy = false;
+      return send(200, { ok: true });
+    }
     return send(404, { error: 'not found' });
   });
 });
@@ -286,7 +305,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await sheetUp();
   await owner.waitForSelector('#sheet .lbl.sec >> text=Team');
   if (!(await owner.textContent('#sheet')).includes('No teammates yet.')) problems.push('the Team section did not start empty');
-  note('People shows the Team section, empty: ' + (await owner.locator('#sheet .hint').first().textContent()));
+  note('People shows the Team section, empty: ' + (await owner.locator('#sheet .hint', { hasText: 'No teammates yet.' }).first().textContent()));
   await owner.click('#sheet >> text=Add a teammate');
   await owner.waitForSelector('.team-form');
   await owner.getByLabel(/^Handle/).fill('sage');
@@ -493,6 +512,183 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
     if ((await p.content()).includes('TOOL-OUTPUT-NEVER-SHOWN')) problems.push('tool output reached the page');
   }
   if (!prompts.some((p) => p.startsWith('[Perennos Tempo room #family] Mia: @tempo is the sky blue?'))) problems.push('the request was not wrapped');
+
+
+  // ---- owner-only rooms: the tools switch, an approval card, and what a member can see
+  const studio = await startRoom(agentPort, {});
+  const sbase = 'http://' + studio.addr;
+  const sctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const solo = await newPage(sctx, 'owner-only');
+  await solo.goto(studio.owner);
+  await solo.waitForFunction(() => /Riley/.test(document.getElementById('greeting').textContent));
+  await solo.click('#new-room');
+  await solo.fill('#new-room-name', 'Studio');
+  await solo.press('#new-room-name', 'Enter');
+  await solo.waitForFunction(() => document.getElementById('chat-name').textContent === 'Studio');
+  await solo.click('#people');
+  await solo.waitForSelector('#tools-switch');
+  if (await solo.isChecked('#tools-switch')) problems.push('the tools switch started on');
+  const offNote = (await solo.textContent('.tools-note')).trim();
+  if (offNote !== 'Tools are off.') problems.push('tools note when off: ' + offNote);
+  const switchLabel = (await solo.textContent('label.switch')).trim();
+  if (!/Tempo can use its tools here while you are the only one in this room/.test(switchLabel)) problems.push('switch label: ' + switchLabel);
+  await shot(solo, '31-desktop-tools-off.png');
+  note('People shows the Tools switch, off by default: "' + switchLabel + '" / "' + offNote + '"');
+  await solo.click('#tools-switch');
+  await solo.waitForFunction(() => /Tools are on\. Only you are here\./.test((document.querySelector('.tools-note') || {}).textContent || ''));
+  if (!(await solo.isChecked('#tools-switch'))) problems.push('the tools switch did not stay on');
+  await shot(solo, '32-desktop-tools-on.png');
+  note('the owner turned it on: "' + (await solo.textContent('.tools-note')).trim() + '"; header: ' + await solo.textContent('#chat-meta'));
+  if (!/tools on/.test(await solo.textContent('#chat-meta'))) problems.push('the room header does not say tools are on');
+  await solo.keyboard.press('Escape');
+
+  await solo.fill('#text', '@tempo WRITE-NOTES please save my meeting notes');
+  await solo.press('#text', 'Enter');
+  await solo.waitForSelector('.msg.approval .btn.go >> text=Approve', { timeout: 10000 });
+  const cardText = (await solo.textContent('.msg.approval')).replace(/\s+/g, ' ');
+  if (!/Approval needed/.test(cardText) || !/run command/.test(cardText) || !/echo "meeting notes" > ~\/notes\/1\.txt/.test(cardText)) problems.push('approval card reads "' + cardText + '"');
+  if ((await solo.locator('.msg.approval button').allTextContents()).join() !== 'Approve,Deny') problems.push('approval buttons: ' + (await solo.locator('.msg.approval button').allTextContents()).join());
+  if (!(await solo.locator('.msg.mine.private').count())) problems.push('the owner ask is not marked as only for the owner');
+  await shot(solo, '33-desktop-approval-card.png');
+  note('owner conversation asked to approve: "' + cardText.trim() + '"');
+  const ownerNew = news.filter((n) => n.mode === 'owner');
+  if (ownerNew.length !== 1) problems.push('owner conversations made: ' + JSON.stringify(news));
+
+  // another device of the owner (it cannot be at the machine): the card, with no buttons
+  const otherCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+  await otherCtx.addCookies(await sctx.cookies());
+  const other = await newPage(otherCtx, 'owner-other-device');
+  await other.route('**/room/me', async (route) => {
+    const r = await route.fetch();
+    const me = await r.json();
+    me.loopback = false;
+    await route.fulfill({ response: r, json: me });
+  });
+  await other.goto(sbase + '/');
+  await other.waitForSelector('.room');
+  await other.tap('.room');
+  await other.waitForSelector('.msg.approval');
+  await other.waitForFunction(() => /Approve on the computer running Perennos Tempo/.test(document.querySelector('.msg.approval').textContent));
+  if (await other.locator('.msg.approval button').count()) problems.push('a device that is not at the machine got approval buttons');
+  await other.evaluate(() => { const b = document.getElementById('msgs'); b.scrollTop = b.scrollHeight; });
+  await shot(other, '35-phone-other-device-card.png');
+  await noSideScroll(other, 'owner other device');
+  note('a device that is not at the machine sees the card without buttons: "Approve on the computer running Perennos Tempo"');
+  await csp(other, 'owner-other-device');
+
+  await solo.click('.msg.approval .btn.go');
+  await solo.waitForSelector('.msg.tempo >> text=Done: notes written.', { timeout: 15000 });
+  await solo.waitForFunction(() => /Approved\./.test(document.querySelector('.msg.approval').textContent));
+  if (await solo.locator('.msg.approval button').count()) problems.push('the buttons stayed after approving');
+  await shot(solo, '34-desktop-approved.png');
+  if (confirms.length !== 1 || confirms[0].ok !== true || confirms[0].id !== 'ui-c1') problems.push('confirm calls: ' + JSON.stringify(confirms));
+  note('Approve pressed at the machine: one /agent/confirm ok:true, the card says Approved., Tempo answered: ' + (await solo.locator('.msg.tempo .text').last().textContent()).trim());
+  await other.waitForFunction(() => /Approved\./.test(document.querySelector('.msg.approval').textContent), null, { timeout: 8000 });
+  note('the other device saw the card change live (SSE)');
+
+  // a second approval, denied
+  await solo.fill('#text', '@tempo WRITE-NOTES once more');
+  await solo.press('#text', 'Enter');
+  await solo.waitForSelector('.msg.approval.pending .btn >> text=Deny', { timeout: 10000 });
+  // a second owner window (a new session made with the control key, as the launcher does) sees
+  // the card but cannot answer it
+  const ctrl = fs.readFileSync(path.join(studio.data, 'control.key'), 'utf8').trim();
+  const lk = await (await fetch(sbase + '/room/owner-link', { method: 'POST', headers: { 'content-type': 'application/json', 'x-tempo-control': ctrl }, body: '{}' })).json();
+  const redeemed = await fetch(sbase + '/room/owner', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: lk.link.split('#owner=')[1] }) });
+  const minted = /tr_owner=([^;]+)/.exec(redeemed.headers.get('set-cookie') || '');
+  if (!minted) problems.push('the control key could not make a second owner session');
+  const second = await browser.newContext({ viewport: { width: 1000, height: 800 } });
+  await second.addCookies([{ name: 'tr_owner', value: minted ? minted[1] : 'x', url: sbase + '/' }]);
+  const win2 = await newPage(second, 'owner-second-window');
+  await win2.goto(sbase + '/');
+  await win2.waitForSelector('.room');
+  await win2.click('.room');
+  await win2.waitForSelector('.msg.approval.pending', { timeout: 10000 });
+  await win2.waitForFunction(() => /Approve in the window you asked from/.test(document.querySelector('.msg.approval.pending').textContent));
+  if (await win2.locator('.msg.approval.pending button').count()) problems.push('a second owner session got approval buttons');
+  await shot(win2, '38-desktop-second-window-card.png');
+  note('a second owner session sees the pending card as "Approve in the window you asked from", with no buttons');
+  await second.close();
+  await solo.click('.msg.approval.pending .btn >> text=Deny');
+  await solo.waitForSelector('.msg.tempo >> text=Left the notes alone.', { timeout: 15000 });
+  // (a settled confirmation still in the agent's event window is denied again: harmless, so
+  // look at the calls for this approval's own id)
+  const c2 = confirms.filter((c) => c.id === 'ui-c2');
+  if (c2.length !== 1 || c2[0].ok !== false) problems.push('deny was sent as ' + JSON.stringify(c2));
+  if (confirms.some((c) => c.ok === true && c.id !== 'ui-c1')) problems.push('something other than the first approval was approved: ' + JSON.stringify(confirms));
+  note('Deny pressed: /agent/confirm ok:false, Tempo left the notes alone');
+  await solo.evaluate(() => { const b = document.getElementById('msgs'); b.scrollTop = b.scrollHeight; });
+
+  // an approval waiting while a member joins: the card ends and nothing can approve it any more
+  await solo.fill('#text', '@tempo WRITE-NOTES a last time');
+  await solo.press('#text', 'Enter');
+  await solo.waitForSelector('.msg.approval.pending .btn >> text=Approve', { timeout: 10000 });
+  await solo.click('#invite');
+  await solo.waitForSelector('.code-big');
+  const slink = await solo.inputValue('.copybox input');
+  await solo.keyboard.press('Escape');
+  await solo.waitForFunction(() => !document.querySelector('.msg.approval.pending'), null, { timeout: 8000 });
+  const c3 = confirms.filter((c) => c.id === 'ui-c3');
+  if (c3.length < 1 || c3.some((c) => c.ok !== false)) problems.push('the pending approval was not denied when the invite was made: ' + JSON.stringify(confirms));
+  note('making an invite denied the approval that was waiting and ended its card');
+  await solo.click('#people');
+  await solo.waitForSelector('.tools-note');
+  const waiting = (await solo.textContent('.tools-note')).trim();
+  if (!/waiting/.test(waiting) || !/open invite/.test(waiting)) problems.push('tools note with an open invite: ' + waiting);
+  if (!(await solo.locator('button:has-text("Cancel open invites")').count())) problems.push('no way to cancel the open invite');
+  await shot(solo, '37-desktop-tools-waiting.png');
+  note('with an open invite the owner is told tools are waiting: "' + waiting + '"');
+  await solo.keyboard.press('Escape');
+
+  // Sam joins on a phone: none of the owner-only messages are visible, and Tempo answers as a guest
+  const samCtx = await browser.newContext({ viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+  const sam = await newPage(samCtx, 'member-of-studio');
+  await sam.goto(slink);
+  await sam.waitForSelector('#join:not([hidden])');
+  await sam.fill('#join-name', 'Sam');
+  await Promise.all([sam.waitForNavigation(), sam.tap('#join-form button[type=submit]')]);
+  await sam.waitForSelector('.room');
+  await sam.tap('.room');
+  await sam.waitForSelector('#chat:not([hidden]) .msg.system >> text=Sam joined');
+  const samText = await sam.textContent('#msgs');
+  for (const secret of ['WRITE-NOTES', 'Approval needed', 'notes written', 'meeting notes', 'Left the notes alone', 'run command']) {
+    if (samText.includes(secret)) problems.push('the member sees "' + secret + '"');
+  }
+  await sam.reload();
+  await sam.waitForSelector('.room');
+  if (!(await sam.isVisible('#chat:not([hidden])'))) await sam.tap('.room');
+  await sam.waitForSelector('#chat:not([hidden]) .msg.system');
+  if (await sam.locator('.more').count()) problems.push('the member is offered earlier messages although none are his to see');
+  await shot(sam, '36-phone-member-no-private.png');
+  const samJson = fetched['member-of-studio'].join('\n');
+  for (const secret of ['WRITE-NOTES', 'owner_only', 'meeting notes', 'notes written']) {
+    if (samJson.includes(secret)) problems.push('JSON the member fetched contains "' + secret + '"');
+  }
+  if (!fetched['owner-only'].join('\n').includes('owner_only')) problems.push('the owner JSON never carried an owner-only message (the member check proves nothing)');
+  const hist = await samCtx.request.get(sbase + '/room/messages?room=studio&limit=200');
+  if (/WRITE-NOTES|owner_only|meeting notes/.test(await hist.text())) problems.push('the member history route leaks owner-only text');
+  const tryTools = await samCtx.request.post(sbase + '/room/tools', { data: { room: 'studio', on: true } });
+  if (tryTools.status() !== 403) problems.push('a member got HTTP ' + tryTools.status() + ' from /room/tools');
+  const tryApprove = await samCtx.request.post(sbase + '/room/approve', { data: { room: 'studio', id: 'ui-c3', ok: true } });
+  if (tryApprove.status() !== 403) problems.push('a member got HTTP ' + tryApprove.status() + ' from /room/approve');
+  note('Sam joined: the room shows no owner-only message in the page or in the JSON he fetched; his /room/tools and /room/approve calls are 403');
+  await sam.tap('#text');
+  await sam.locator('#text').pressSequentially('@tempo what should we cook?', { delay: 10 });
+  await sam.tap('#send');
+  await sam.waitForSelector('.msg.tempo >> text=Tacos. Quick, cheerful', { timeout: 15000 });
+  const guestNew = news.filter((n) => n.mode === 'guest').pop();
+  const samConv = convs.get(news[news.length - 1].conv);
+  if (!guestNew || news[news.length - 1].mode !== 'guest' || !samConv) problems.push('Sam was not given a guest conversation: ' + JSON.stringify(news));
+  if (confirms.some((c) => c.ok === true && c.id === 'ui-c3')) problems.push('the late approval was approved');
+  await csp(sam, 'member-of-studio');
+  note('Sam asked @tempo: the agent made a guest conversation for it (' + JSON.stringify(news[news.length - 1]) + '), and the owner conversation was not used');
+  await solo.waitForSelector('.msg.tempo >> text=Tacos. Quick, cheerful', { timeout: 10000 });
+  await csp(solo, 'owner-only');
+
+  await sctx.close();
+  await otherCtx.close();
+  await samCtx.close();
+  studio.child.kill();
 
   await browser.close();
   room.child.kill();

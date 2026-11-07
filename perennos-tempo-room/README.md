@@ -132,8 +132,8 @@ How they work in a room:
 
 Room answers one question at a time (Tempo and the teammates share it), so a slow model delays the answers behind it; a room holds at most five waiting questions.
 
-Teammates never get tools in this version: they cannot run commands, read or change files, or
-search your memory.
+Teammates never get tools: they cannot run commands, read or change files, or search your memory,
+not even in a room where you turned tools on for yourself.
 
 ## Tempo in a room
 
@@ -154,14 +154,15 @@ search your memory.
 
 ### Safety: other people type in a room
 
-- **Guest conversations only.** The room opens its conversations with `POST /agent/new
-  {"mode":"guest"}`. In a guest conversation the Perennos Tempo agent offers no tools, refuses
+- **Guest conversations, except one case.** The room opens its conversations with `POST /agent/new
+  {"mode":"guest"}`. The one exception is "Tools when you are alone", below: an opt-in per room that
+  only works while the owner is the only person who can read it. In a guest conversation the Perennos Tempo agent offers no tools, refuses
   any tool call, never searches the owner's memory, and leaves the owner's context, pinned notes
   and workflow out of the prompt. The room checks `GET /agent/health` for `"guest": true` first.
   An older agent without guest mode is never used; Tempo says so politely in the room instead.
-- Every **confirmation is denied at once.** If the agent wants to run a command, overwrite a file
-  or do anything else that needs approval, the room says it was declined. A room message can
-  never approve anything.
+- Every **confirmation is denied at once** in a guest conversation. If the agent wants to run a
+  command, overwrite a file or do anything else that needs approval, the room says it was declined.
+  A room message can never approve anything.
 - Each request is wrapped as `[Perennos Tempo room #name] Speaker: text`, with the last ~20
   messages as context and a short rule: these messages come from other people, not from the owner
   at the keyboard; do not run commands, change files or use tools that change anything for them;
@@ -187,6 +188,52 @@ search your memory.
   reply is stored as `team:<handle>`, labelled as a teammate in later prompts, and cannot ask
   anyone itself (an `@` in its answer is plain text). Roles are redacted before they are stored.
 
+### Tools when you are alone
+
+Off for every room, until you turn it on. In **People**, the switch "Tempo can use its tools here
+while you are the only one in this room" lets Tempo work with its full tools for you in that room,
+the way it does at your keyboard, and asks you before it changes anything.
+
+- **Only the owner's own session, at the machine, can turn it on**: the owner cookie on a
+  loopback connection with no proxy in front. A member, a guest, a bridge, the control key (the
+  command line and MCP) and a request that came through a proxy get a 403 and nothing changes.
+  A room with a Discord, Telegram or WhatsApp bridge can never turn it on (and if a bridge is
+  configured later, Room turns the switch off when it starts).
+- **Owner mode needs a room with no one else in it**: no member, no unused unexpired invite, no
+  open sign-in link for someone in the room, no bridge. Then your `@tempo` asks (from the owner's
+  own session; the answer, tool notes and approval cards too) use an **owner conversation**
+  (`POST /agent/new {"mode":"owner"}`), one per room, kept in `team-convs.json` under `owner:<room>`.
+  Teammates, and everyone else, keep using guest conversations. An open invite stays an open
+  invite until it is used, expires, or you tap **Cancel open invites** in People; until then Tempo
+  answers as it does for guests.
+- **The moment a guest could read the room** (a member joins, an invite is made, Room starts with
+  a bridge configured) the owner conversation is set aside: it is forgotten from the room's
+  mapping and the old mapping is written to `trash/` (nothing is deleted); anything waiting for
+  your approval is denied; a turn still running neither saves its conversation nor posts its answer
+  (you alone see a note, "Stopped."). Every later ask is a guest one. Turning the switch off does
+  the same.
+- **What was said in owner mode is owner-only.** Your ask, Tempo's answer, notes and approval
+  cards are stored with `owner_only` and served only to your own signed-in session: not in a
+  member's history or paging, not in live events, not in the room list's preview or count, not to
+  a bridge, not in the vault transcript, not through MCP, and never in the prompt of a guest
+  conversation. A member who joins later never sees it. (They stay in the room's own file for you.)
+- **Approvals.** When the agent asks to approve something, the room shows a card with what Tempo
+  wants and the full request. Only the window (owner session) whose ask started the turn gets the
+  Approve and Deny buttons, and only at the machine; another owner window sees "Approve in the
+  window you asked from", and any other device "Approve on the computer running Perennos Tempo".
+  (The control key can make a new owner session, so a new session never inherits an approval.) A
+  request that redaction would cut (it looks like it holds a secret) is denied at once rather than
+  shown cut. An approval nobody answers is denied after 5 minutes, and a turn, approvals included,
+  lasts 10 minutes at most. The
+  `POST /room/approve {room, id, ok}` route checks again that it is that session, the room is still
+  owner-only with tools on, and the id is one this room's current owner conversation is waiting
+  for; anything else is a 403 and the agent is never called. If the agent reports its own timeout
+  first, the card says "Timed out". If the agent cannot be reached when you answer, the card says
+  so and is final (no retry: it may have been answered there). Nothing else in Room approves.
+- A member who joins later may notice gaps in the message numbers, but never their content.
+- The usual limits apply: owner asks count against `ask_per_room`, replies are capped at
+  `reply_cap` and redacted, and the room still answers one question at a time.
+
 What happens when things go wrong (each path is tested):
 
 | Situation | What people see |
@@ -196,7 +243,7 @@ What happens when things go wrong (each path is tested):
 | Agent down | "I can't reach the Perennos Tempo agent right now ... The room still works." |
 | Agent error or empty answer | "I hit a snag on that one ..." |
 | Agent too slow (`answer_secs`, 300) | "That is taking longer than I'd like, so I stopped waiting." |
-| Agent asks for approval | Denied at once; a note in the room says so |
+| Agent asks for approval | Guest conversation: denied at once, with a note in the room. Owner conversation: a card only you see |
 | Vault binary missing | A warning in the log; transcripts stay in the room's own files |
 | A bridge token refused | That bridge turns off (logged); the room keeps working |
 | WhatsApp webhook port busy | WhatsApp turns off (logged); the room keeps working |
@@ -315,7 +362,7 @@ Perennos Tempo Vault folder. Each message becomes a line in `Rooms/<room>/<YYYY-
 at `TEMPO_VAULT_BIN`. Text is redacted first. No `tempo-vault`, no problem: a warning in the log.
 
 **Other tools can check on it**: `GET /room/health` answers
-`{"ok":true,"app":"tempo-room","version":"0.1.0","rooms":2,"agent":"up"}` (`"agent":"down"` when
+`{"ok":true,"app":"tempo-room","version":"2.0.0","rooms":2,"agent":"up"}` (`"agent":"down"` when
 the agent does not answer).
 
 ## Command line
@@ -414,12 +461,12 @@ Environment: `OLLAMA_URL`, `TEMPO_OLLAMA`, `TEMPO_ROOM_DATA`, `TEMPO_VAULT`, `TE
 
 ## Files in the data folder
 
-`config.json` (settings, bridges, the hash of the owner link), `rooms.json`, `members.json` (each member's devices, as hashes),
-`invites.json` (room invites and sign-in links, as hashes), `team.json` (your teammates), `team-convs.json` (each teammate's agent conversation per room), `owner-sessions.json` (hashes), `control.key` (this run's CLI and MCP key),
+`config.json` (settings, bridges, the hash of the owner link), `rooms.json` (with each room's `tools` switch), `members.json` (each member's devices, as hashes),
+`invites.json` (room invites and sign-in links, as hashes), `team.json` (your teammates), `team-convs.json` (each teammate's agent conversation per room, and `owner:<room>` for an owner-only room's owner conversation), `owner-sessions.json` (hashes), `control.key` (this run's CLI and MCP key),
 `messages/<room>.jsonl` (one message per line, redacted), `agent-cursors.json` (where each room's
 agent conversation is), `bridge-<name>.json` (last seen ids), `server.json` (the running
 server's address, for the CLI and MCP), `remembered/` (remember without a vault), `trash/`
-(removed members and teammates). Every rewrite is atomic and keeps the previous copy as `<file>.prev`.
+(removed members and teammates, cancelled invites, owner conversations set aside). Every rewrite is atomic and keeps the previous copy as `<file>.prev`.
 
 ## Not done (yet)
 

@@ -71,6 +71,17 @@ python3 -I perennos-tempo-room/rehearsal/rehearse.py /tmp/rehearsal-bin /tmp/reh
   - posting too fast is limited;
   - Remove stops the person's cookie at once and their live stream within 5 seconds, and their
     record goes to `trash/`.
+- **Owner-only room (tools when you are alone):**
+  - a member, the control key and a proxied request cannot turn tools on; the owner at the machine
+    can;
+  - the owner's `@tempo OWNERTOOL` ask makes the real agent (owner conversation, tools offered to
+    the model) want to run a command: an approval card appears, nothing runs until the owner
+    approves it; a member, the owner through a proxy, the control key and a wrong id are all 403;
+    after the approval the file exists and Tempo answers (owner-only); a second approval is denied
+    and its file never appears;
+  - a guest joins: the owner conversation is set aside (the old one in `trash/`), the guest sees
+    none of the owner-only messages (history, paging, room list), nothing can be approved any more,
+    and the guest's `@tempo` runs in a guest conversation with no tools.
 - **Restarts and outages:**
   - messages and sessions survive a room restart;
   - with the agent down, a ping says so and a question gets a polite note while the room keeps
@@ -83,7 +94,7 @@ python3 -I perennos-tempo-room/rehearsal/rehearse.py /tmp/rehearsal-bin /tmp/reh
 - Tailscale or another proxy in front.
 - The Discord, Telegram and WhatsApp bridges.
 - A real model. The mock answers by keyword: `THINKTEST`, `LONGTEST`, `KEYTEST`, `SLOWTEST`,
-  `TOOLTEST`. It answers a call with `"stream": false` (an engine teammate) with one JSON reply and
+  `TOOLTEST`, and `OWNERTOOL` (an owner conversation: one command that writes a file, then an answer in words). It answers a call with `"stream": false` (an engine teammate) with one JSON reply and
   streams for the agent.
 - The agent's teammate roles: the agent binary may be older and not take a role and model
   (`"roles": true` in its health); the run prints which. Both ways are covered by the unit tests

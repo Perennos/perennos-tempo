@@ -194,7 +194,7 @@ def room_args():
 try:
     if os.path.exists(PWNED):
         os.rename(PWNED, PWNED + f".old-{int(time.time())}")
-    start("mock", [sys.executable, "-I", os.path.join(HERE, "mock_chat.py"), str(MOCK), os.path.join(RUN, "mock.jsonl"), PWNED], os.path.join(RUN, "mock"))
+    start("mock", [sys.executable, "-I", os.path.join(HERE, "mock_chat.py"), str(MOCK), os.path.join(RUN, "mock.jsonl"), PWNED, RUN], os.path.join(RUN, "mock"))
     check("mock Ollama answers", wait_http(MOCK, "/api/version") is not None)
     start("agent", [os.path.join(BIN, "tempo-local-agent"), "serve", "--port", str(AGENT)], os.path.join(RUN, "agent"))
     ah = wait_http(AGENT, "/agent/health")
@@ -448,6 +448,127 @@ try:
     wait_http(AGENT, "/agent/health")
     st, a, _ = ask(people["Mia"], "@tempo back again?", secs=60)
     check("agent back with a new key: the room re-reads it and answers", a is not None and a["text"].startswith("Mock answer"), a and a["text"])
+
+    # --- owner-only room (Room phase 2b): the owner alone with tools on, the real agent in owner
+    # mode, a relayed approval; then a guest joins
+    OK_FILE, NO_FILE = os.path.join(RUN, "owner-approved.txt"), os.path.join(RUN, "owner-denied.txt")
+    st, _, js = req("POST", "/room/create", owner, {"name": "Studio"})
+    check("the owner makes a room for owner-only work", st == 200 and js.get("room", {}).get("id") == "studio" and js["room"].get("tools") is False, js)
+    st, _, js = req("POST", "/room/tools", people["Mia"], {"room": "studio", "on": True})
+    check("a member cannot turn tools on", st == 403, st)
+    ck = open(os.path.join(HOME, "room", "control.key")).read().strip()
+    st, _, js = req("POST", "/room/tools", None, {"room": "studio", "on": True}, headers={"X-Tempo-Control": ck})
+    check("the control key (the command line and MCP) cannot turn tools on", st == 403, (st, js))
+    st, _, js = req("POST", "/room/tools", owner, {"room": "studio", "on": True}, headers={"X-Forwarded-For": "203.0.113.9"})
+    check("a proxied request cannot turn tools on", st == 403, (st, js))
+    st, _, js = req("POST", "/room/tools", owner, {"room": "studio", "on": True})
+    check("the owner at the machine turns tools on; alone, owner mode is active", st == 200 and js.get("tools") is True and js.get("tools_active") is True, js)
+
+    def owner_msgs():
+        return messages(owner, "studio")
+
+    def post_owner(text):
+        st, _, js = req("POST", "/room/post", owner, {"room": "studio", "text": text})
+        return js["msg"]["id"] if st == 200 else None
+
+    def wait_for(pred, secs=90):
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            hit = pred(owner_msgs())
+            if hit:
+                return hit
+            time.sleep(0.2)
+        return None
+
+    def card_in(ms, nth=0):
+        cards = [m for m in ms if m.get("approval")]
+        return cards[nth] if len(cards) > nth else None
+
+    q1 = post_owner("@tempo OWNERTOOL please save a note")
+    card = wait_for(lambda ms: card_in(ms))
+    check("the owner's ask makes Tempo ask for approval: a card in the room", card is not None and card["approval"].get("id") and "owner-approved.txt" in card["approval"].get("detail", ""), card)
+    check("the card is owner-only and pending", card and card.get("owner_only") is True and card["approval"].get("state") == "pending", card)
+    check("nothing has run before the owner approves", not os.path.exists(OK_FILE))
+    aid = card["approval"]["id"] if card else ""
+    sc = req("POST", "/room/approve", people["Mia"], {"room": "studio", "id": aid, "ok": True})[0]
+    check("a member cannot approve", sc == 403, sc)
+    sc = req("POST", "/room/approve", owner, {"room": "studio", "id": aid, "ok": True}, headers={"X-Forwarded-For": "203.0.113.9"})[0]
+    check("the owner from a proxy cannot approve", sc == 403, sc)
+    sc = req("POST", "/room/approve", None, {"room": "studio", "id": aid, "ok": True}, headers={"X-Tempo-Control": ck})[0]
+    check("the control key cannot approve", sc == 403, sc)
+    # a second owner session made through the control key (as the launcher does) is the owner too,
+    # but the approval belongs to the session that asked
+    st, _, lk = req("POST", "/room/owner-link", None, {}, headers={"X-Tempo-Control": ck})
+    tok = lk.get("link", "").split("#owner=")[-1]
+    st2, sc2, _ = req("POST", "/room/owner", None, {"token": tok})
+    owner2 = cookie_of(sc2, "tr_owner")
+    check("the control key can make a second owner session (the launcher relies on it)", st == 200 and st2 == 200 and owner2, (st, st2))
+    sc = req("POST", "/room/approve", owner2, {"room": "studio", "id": aid, "ok": True})[0]
+    check("a session made with the control key cannot approve what another session asked", sc == 403, sc)
+    sc = req("POST", "/room/approve", owner, {"room": "studio", "id": "not-that-id", "ok": True})[0]
+    check("a wrong id is refused", sc == 403, sc)
+    time.sleep(0.5)
+    check("still nothing ran after those refusals", not os.path.exists(OK_FILE))
+    sc, _, js = req("POST", "/room/approve", owner, {"room": "studio", "id": aid, "ok": True})
+    check("the owner at the machine approves", sc == 200, (sc, js))
+    ans = wait_for(lambda ms: next((m for m in ms if m.get("kind") == "tempo" and m.get("reply_to") == q1), None))
+    check("the approved command ran and Tempo answered (owner-only)", ans and ans["text"] == "Owner tool finished." and ans.get("owner_only") is True and os.path.exists(OK_FILE) and "owner-approved" in open(OK_FILE).read(), (ans, os.path.exists(OK_FILE)))
+    check("the card says approved", card_in(owner_msgs()) and card_in(owner_msgs())["approval"]["state"] == "approved")
+    sc = req("POST", "/room/approve", owner, {"room": "studio", "id": aid, "ok": True})[0]
+    check("a second tap on the same approval is refused", sc == 403, sc)
+    chats = mock_chats()
+    owner_chats = [b for b in chats if any("OWNERTOOL" in (x.get("content") or "") for x in b.get("messages", []) if x.get("role") == "user")]
+    check("the agent offered the model its tools in owner mode", owner_chats and owner_chats[0].get("tools"), [list(b.keys()) for b in owner_chats[:1]])
+    first_user = next((x["content"] for x in owner_chats[0]["messages"] if x.get("role") == "user" and "OWNERTOOL" in x["content"]), "") if owner_chats else ""
+    check("the owner request is the owner's own words, with the owner rule", first_user.startswith("[Perennos Tempo room #studio] Owner (owner, message") and "where only Owner is present" in first_user and "Do not run commands" not in first_user, first_user[:200])
+    convs_file = json.load(open(os.path.join(HOME, "room", "team-convs.json")))
+    oconv = convs_file.get("owner:studio", {}).get("conv")
+    adir = os.path.join(HOME, "agent", "conversations")
+    omode = json.load(open(os.path.join(adir, oconv + ".json"))).get("mode") if oconv and os.path.exists(os.path.join(adir, oconv + ".json")) else None
+    check("the room kept one owner conversation, and the agent made it in owner mode", oconv and omode == "owner", (oconv, omode))
+
+    # a second ask, denied from the room
+    q2 = post_owner("@tempo OWNERTOOL DENY please save another note")
+    card2 = wait_for(lambda ms: card_in(ms, 1))
+    check("a second approval card appears", card2 is not None and card2["approval"]["id"] != aid, card2)
+    sc = req("POST", "/room/approve", owner, {"room": "studio", "id": card2["approval"]["id"] if card2 else "", "ok": False})[0]
+    check("the owner denies it", sc == 200, sc)
+    ans2 = wait_for(lambda ms: next((m for m in ms if m.get("kind") == "tempo" and m.get("reply_to") == q2), None))
+    check("a denied command did not run and Tempo still answers", ans2 is not None and not os.path.exists(NO_FILE), (ans2, os.path.exists(NO_FILE)))
+    check("every message of the owner turns is owner-only", all(m.get("owner_only") is True for m in owner_msgs() if m["id"] >= q1), [m.get("text") for m in owner_msgs() if m["id"] >= q1 and not m.get("owner_only")][:5])
+
+    # a guest joins: the owner conversation is set aside, the guest cannot see any of it
+    st, _, inv = req("POST", "/room/invite", owner, {"room": "studio"})
+    st2, sc, js = req("POST", "/room/join", None, {"code": inv.get("code"), "name": "Pat"})
+    pat = cookie_of(sc, "tr_member")
+    check("Pat joins the studio with a one-time code", st == 200 and st2 == 200 and pat, (st, st2, js))
+    convs_file = json.load(open(os.path.join(HOME, "room", "team-convs.json")))
+    trash = os.listdir(os.path.join(HOME, "room", "trash"))
+    kept = [t for t in trash if "owner-conv-studio" in t]
+    check("the owner conversation was set aside: forgotten from the mapping, the old one in trash", "owner:studio" not in convs_file and kept and oconv in open(os.path.join(HOME, "room", "trash", kept[0])).read(), (list(convs_file), kept))
+    pat_view = json.dumps(messages(pat, "studio"))
+    check("Pat's history has none of the owner-only messages", not any(w in pat_view for w in ("OWNERTOOL", "Owner tool finished", "owner_only", "owner-approved", "Approval")), pat_view[:300])
+    rooms_pat = json.dumps(req("GET", "/room/rooms", pat)[2])
+    check("nor does Pat's room list (preview and count)", "OWNERTOOL" not in rooms_pat and "Owner tool" not in rooms_pat and "owner_only" not in rooms_pat, rooms_pat[:200])
+    big = max([m["id"] for m in owner_msgs()] + [0]) + 10
+    paged = json.dumps([req("GET", f"/room/messages?room=studio&before={big}&limit=100", pat)[2], req("GET", "/room/messages?room=studio&since=0", pat)[2]])
+    check("nor paging, nor since", "OWNERTOOL" not in paged and "owner_only" not in paged, paged[:200])
+    sc = req("POST", "/room/approve", pat, {"room": "studio", "id": aid, "ok": True})[0]
+    sc2 = req("POST", "/room/approve", owner, {"room": "studio", "id": card2["approval"]["id"] if card2 else "x", "ok": True})[0]
+    check("neither Pat nor the owner can approve anything there now", sc == 403 and sc2 == 403, (sc, sc2))
+    n_before = len(mock_chats())
+    st, a, _ = ask(pat, "@tempo what is the capital of France?", room="studio")
+    check("Pat's @tempo is answered in a guest conversation", a is not None and a["text"].startswith("Mock answer") and a.get("owner_only") is None, a)
+    chats = mock_chats()
+    new_chats = chats[n_before:]
+    check("that guest request offered the model no tools, and carried nothing owner-only", new_chats and not any(b.get("tools") for b in new_chats) and not any("OWNERTOOL" in json.dumps(b) or "Owner tool finished" in json.dumps(b) for b in new_chats), [list(b.keys()) for b in new_chats])
+    rooms_file = json.load(open(os.path.join(HOME, "room", "rooms.json")))
+    gconv = next((r.get("conv") for r in rooms_file.get("rooms", []) if r["id"] == "studio"), None)
+    gmode = json.load(open(os.path.join(adir, gconv + ".json"))).get("mode") if gconv and os.path.exists(os.path.join(adir, gconv + ".json")) else None
+    check("the studio's conversation is now a guest one, not the owner's", gconv and gconv != oconv and gmode == "guest", (gconv, oconv, gmode))
+    st, _, js = req("GET", "/room/rooms", owner)
+    check("the owner is told tools are waiting while a guest is in", any(r["id"] == "studio" and r.get("tools") is True and r.get("tools_active") is False for r in js.get("rooms", [])), js)
+    check("and the guest-mode tool test file never appeared", not os.path.exists(PWNED))
 finally:
     for n in list(procs):
         stop(n)

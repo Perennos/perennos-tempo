@@ -160,8 +160,12 @@ pub enum Script {
     Answer(String),
     /// Refuse with 409 this many times first, then answer.
     BusyThen(u32, String),
-    /// Ask to confirm something; once denied, answer.
+    /// Ask to confirm something (the id is always `c-77`); once answered, answer.
     Confirm(String),
+    /// The same with an id of your own (an owner conversation's approval card).
+    ConfirmId(String, String),
+    /// A confirmation with an id, what it asks and its detail, then an answer.
+    ConfirmWith(String, String, String, String),
     /// The turn fails.
     Error(String),
     /// The turn never ends (the agent stays busy).
@@ -182,7 +186,8 @@ struct AgentState {
     script: VecDeque<Script>,
     busy_left: u32,
     next: u32,
-    confirm_answer: HashMap<String, String>,
+    /// Per conversation: the confirmation waiting (its id) and the answer to give afterwards.
+    confirm_answer: HashMap<String, (String, String)>,
     /// Behave like an older agent without guest conversations.
     no_guest: bool,
     /// Take a model and a role in `/agent/new` and say so in the health (`"roles": true`).
@@ -191,6 +196,10 @@ struct AgentState {
     answer_polls: u32,
     /// The `roles` answer of the next health calls, one each, before `roles` applies again.
     health_roles: VecDeque<bool>,
+    /// How long `/agent/confirm` takes to answer (a slow agent).
+    confirm_delay: Duration,
+    /// `/agent/confirm` fails with a 500 (an agent that cannot be reached for it).
+    confirm_fail: bool,
     /// When set, every request but the health check must carry this `X-Tempo-Key` (else 401).
     key: Option<String>,
 }
@@ -352,7 +361,25 @@ impl FakeAgent {
                                 "confirm",
                                 json!({"id": "c-77", "what": "run a command", "detail": "rm -rf /important"}),
                             );
-                            s.confirm_answer.insert(conv.clone(), a);
+                            s.confirm_answer.insert(conv.clone(), ("c-77".into(), a));
+                        }
+                        Script::ConfirmWith(id, what, detail, a) => {
+                            push(
+                                &mut s,
+                                &conv,
+                                "confirm",
+                                json!({"id": id, "what": what, "detail": detail}),
+                            );
+                            s.confirm_answer.insert(conv.clone(), (id, a));
+                        }
+                        Script::ConfirmId(id, a) => {
+                            push(
+                                &mut s,
+                                &conv,
+                                "confirm",
+                                json!({"id": id, "what": "run a command", "detail": "echo hi > notes.txt"}),
+                            );
+                            s.confirm_answer.insert(conv.clone(), (id, a));
                         }
                         Script::Error(e) => {
                             push(&mut s, &conv, "error", json!({"text": e}));
@@ -364,8 +391,18 @@ impl FakeAgent {
                     ok(json!({"ok": true}))
                 }
                 ("POST", "/agent/confirm") => {
+                    if s.confirm_fail {
+                        return (500, vec![], json!({"error": "broken"}).to_string());
+                    }
+                    std::thread::sleep(s.confirm_delay);
                     let conv = body["conv"].as_str().unwrap_or("").to_string();
-                    if let Some(a) = s.confirm_answer.remove(&conv) {
+                    // like the real agent: only the id it issued for that conversation counts
+                    let waiting = s
+                        .confirm_answer
+                        .get(&conv)
+                        .is_some_and(|(id, _)| body["id"].as_str() == Some(id.as_str()));
+                    if let Some((_, a)) = waiting.then(|| s.confirm_answer.remove(&conv)).flatten()
+                    {
                         let verdict = if body["ok"] == true {
                             "approved"
                         } else {
@@ -429,6 +466,43 @@ impl FakeAgent {
         self.state.lock().unwrap().script.push_back(s);
     }
 
+    /// The agent's own timeout for an unanswered approval: every waiting one ends as "denied or
+    /// timed out" and its turn goes on to answer.
+    pub fn time_out_confirms(&self) {
+        let mut s = self.state.lock().unwrap();
+        let waiting: Vec<(String, (String, String))> = s.confirm_answer.drain().collect();
+        for (conv, (_, a)) in waiting {
+            push(
+                &mut s,
+                &conv,
+                "status",
+                json!({"text": "run a command: denied or timed out"}),
+            );
+            push(&mut s, &conv, "assistant", json!({"text": a}));
+            s.busy.insert(conv, false);
+        }
+    }
+
+    /// From now on `/agent/confirm` takes this long to answer.
+    pub fn slow_confirms(&self, d: Duration) {
+        self.state.lock().unwrap().confirm_delay = d;
+    }
+
+    /// From now on `/agent/confirm` fails.
+    pub fn failing_confirms(&self) {
+        self.state.lock().unwrap().confirm_fail = true;
+    }
+
+    /// The bodies of every `/agent/confirm`, in order.
+    pub fn confirm_calls(&self) -> Vec<Value> {
+        self.http
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/agent/confirm")
+            .map(|r| r.json())
+            .collect()
+    }
+
     /// The bodies of every `/agent/new`, in order.
     pub fn new_bodies(&self) -> Vec<Value> {
         self.http
@@ -437,6 +511,25 @@ impl FakeAgent {
             .filter(|r| r.path == "/agent/new")
             .map(|r| r.json())
             .collect()
+    }
+
+    /// The conversation of every `/agent/send`, in order.
+    pub fn send_convs(&self) -> Vec<String> {
+        self.http
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/agent/send")
+            .map(|r| r.json()["conv"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// The mode a conversation was made with (`guest` or `owner`), from the order of `/agent/new`.
+    pub fn mode_of(&self, conv: &str) -> String {
+        let n: usize = conv.trim_start_matches("conv-").parse().unwrap_or(0);
+        self.new_bodies()
+            .get(n.wrapping_sub(1))
+            .and_then(|b| b["mode"].as_str().map(str::to_string))
+            .unwrap_or_default()
     }
 
     /// The texts sent to the agent, in order.

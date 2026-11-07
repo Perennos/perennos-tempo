@@ -3,7 +3,8 @@
 //! Contract (from the agent's `server.rs`): `POST /agent/new` -> `{"conv"}`; `POST /agent/send
 //! {"conv","text"}` -> 200, 409 while busy, 404 for an unknown conversation; `GET
 //! /agent/events?conv&since` -> `{"events":[{"n","t","type","text",...}],"busy"}`; `POST
-//! /agent/confirm {"conv","id","ok"}`; `GET /agent/health`. The Host header is the agent URL's
+//! /agent/confirm {"conv","id","ok"}` -> `{"ok": still-waiting}`; `GET /agent/health`. `POST
+//! /agent/new {"mode":"owner"}` is the owner's own conversation (owner-only rooms). The Host header is the agent URL's
 //! host:port (ureq sets it), POSTs are JSON, and no Origin header is ever sent.
 //!
 //! The key: every call except `GET /agent/health` sends `X-Tempo-Key`. It is `TEMPO_AGENT_KEY` when
@@ -130,16 +131,26 @@ impl AgentClient {
     /// One call. Everything but the health check carries the key; a 401 reads the key file once
     /// more and retries once.
     fn call(&self, path: &str, body: Option<&Value>) -> Result<(u16, Value), AgentError> {
+        self.call_t(path, body, None)
+    }
+
+    /// `call` with a time limit of its own (the default is 20 s).
+    fn call_t(
+        &self,
+        path: &str,
+        body: Option<&Value>,
+        limit: Option<Duration>,
+    ) -> Result<(u16, Value), AgentError> {
         if path == "/agent/health" {
-            return self.call_with(path, body, None);
+            return self.call_with(path, body, None, limit);
         }
         let key = self.key();
-        let first = self.call_with(path, body, key.as_deref())?;
+        let first = self.call_with(path, body, key.as_deref(), limit)?;
         if first.0 != 401 {
             return Ok(first);
         }
         match self.fresh_key(key.as_deref()) {
-            Some(k) => self.call_with(path, body, Some(&k)),
+            Some(k) => self.call_with(path, body, Some(&k), limit),
             None => Ok(first),
         }
     }
@@ -149,6 +160,7 @@ impl AgentClient {
         path: &str,
         body: Option<&Value>,
         key: Option<&str>,
+        limit: Option<Duration>,
     ) -> Result<(u16, Value), AgentError> {
         let url = format!("{}{path}", self.base);
         let resp = match body {
@@ -160,10 +172,16 @@ impl AgentClient {
                 r.call()
             }
             Some(b) => {
-                let mut r = self
-                    .http
-                    .post(&url)
-                    .header("Content-Type", "application/json");
+                let base = match limit {
+                    Some(t) => self
+                        .http
+                        .post(&url)
+                        .config()
+                        .timeout_global(Some(t))
+                        .build(),
+                    None => self.http.post(&url),
+                };
+                let mut r = base.header("Content-Type", "application/json");
                 if let Some(k) = key {
                     r = r.header("X-Tempo-Key", k);
                 }
@@ -251,6 +269,53 @@ impl AgentClient {
         }
     }
 
+    /// An owner conversation (`"mode": "owner"`): the agent's full tools, the owner's memory and
+    /// context. Only ever made for an owner-only room, for the owner alone; nothing else in Room
+    /// calls this.
+    pub fn new_owner_conv(&self) -> Result<String, AgentError> {
+        match self.call("/agent/new", Some(&json!({"mode": "owner"})))? {
+            (200, v) => v["conv"]
+                .as_str()
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| AgentError::Bad("no conversation id".into())),
+            (401, _) => Err(AgentError::Unauthorized),
+            (c, v) => Err(AgentError::Http(
+                c,
+                v["error"].as_str().unwrap_or("").into(),
+            )),
+        }
+    }
+
+    /// Answer a confirmation the owner was shown. `Ok(true)` when the agent was still waiting for
+    /// it; `Ok(false)` when it was not (answered already, or timed out).
+    pub fn confirm(&self, conv: &str, id: &str, ok: bool) -> Result<bool, AgentError> {
+        self.confirm_within(conv, id, ok, None)
+    }
+
+    /// `confirm` that gives up after `limit` (an `Err(Down)` then: the agent may or may not have
+    /// got it).
+    pub fn confirm_within(
+        &self,
+        conv: &str,
+        id: &str,
+        ok: bool,
+        limit: Option<Duration>,
+    ) -> Result<bool, AgentError> {
+        match self.call_t(
+            "/agent/confirm",
+            Some(&json!({"conv": conv, "id": id, "ok": ok})),
+            limit,
+        )? {
+            (200, v) => Ok(v["ok"] == true),
+            (401, _) => Err(AgentError::Unauthorized),
+            (c, v) => Err(AgentError::Http(
+                c,
+                v["error"].as_str().unwrap_or("").into(),
+            )),
+        }
+    }
+
     pub fn send(&self, conv: &str, text: &str) -> Result<(), AgentError> {
         match self.call("/agent/send", Some(&json!({"conv": conv, "text": text})))? {
             (200, _) => Ok(()),
@@ -284,17 +349,7 @@ impl AgentClient {
 
     /// Deny a confirmation. Room messages never approve anything.
     pub fn deny(&self, conv: &str, id: &str) -> Result<(), AgentError> {
-        self.call(
-            "/agent/confirm",
-            Some(&json!({"conv": conv, "id": id, "ok": false})),
-        )
-        .and_then(|(c, _)| {
-            if c == 401 {
-                Err(AgentError::Unauthorized)
-            } else {
-                Ok(())
-            }
-        })
+        self.confirm(conv, id, false).map(|_| ())
     }
 }
 

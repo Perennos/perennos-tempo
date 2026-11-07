@@ -143,6 +143,23 @@ pub struct Msg {
     pub reply_to: Option<u64>,
     pub reply_name: Option<String>,
     pub reply_text: Option<String>,
+    /// Written in an owner-only room's owner conversation (the owner's ask, Tempo's answer, tool
+    /// notes, approval cards): only the owner is ever shown it, and it never leaves Room (no
+    /// bridge, no vault, no prompt for a guest conversation).
+    pub owner_only: bool,
+    /// An approval card: what Tempo wants to do, waiting for the owner at the machine.
+    pub approval: Option<Box<Approval>>,
+}
+
+/// What an approval card asks: the agent's confirmation id, what Tempo wants, and the detail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Approval {
+    pub id: String,
+    pub what: String,
+    pub detail: String,
+    /// The owner session (a hash, never the cookie) whose ask started the turn: only that
+    /// session's window can answer the card.
+    pub session: String,
 }
 
 impl Msg {
@@ -159,6 +176,8 @@ impl Msg {
             reply_to: None,
             reply_name: None,
             reply_text: None,
+            owner_only: false,
+            approval: None,
         }
     }
 
@@ -177,6 +196,15 @@ impl Msg {
             m.insert("reply_name".into(), json!(self.reply_name));
             m.insert("reply_text".into(), json!(self.reply_text));
         }
+        if self.owner_only {
+            m.insert("owner_only".into(), json!(true));
+        }
+        if let Some(a) = &self.approval {
+            m.insert(
+                "approval".into(),
+                json!({"id": a.id, "what": a.what, "detail": a.detail, "session": a.session}),
+            );
+        }
         Value::Object(m)
     }
 
@@ -194,6 +222,15 @@ impl Msg {
             reply_to: v["reply_to"].as_u64(),
             reply_name: v["reply_name"].as_str().map(str::to_string),
             reply_text: v["reply_text"].as_str().map(str::to_string),
+            owner_only: v["owner_only"].as_bool().unwrap_or(false),
+            approval: v["approval"]["id"].as_str().map(|id| {
+                Box::new(Approval {
+                    id: id.to_string(),
+                    what: v["approval"]["what"].as_str().unwrap_or("").to_string(),
+                    detail: v["approval"]["detail"].as_str().unwrap_or("").to_string(),
+                    session: v["approval"]["session"].as_str().unwrap_or("").to_string(),
+                })
+            }),
         })
     }
 }
@@ -208,6 +245,9 @@ pub struct Room {
     pub conv: Option<String>,
     /// Handles of the teammates present in this room (Tempo is always there).
     pub team: Vec<String>,
+    /// "Tools" (off by default, the owner's switch): while the owner is alone in the room, Tempo
+    /// works with its full tools in an owner conversation and the owner approves its actions here.
+    pub tools: bool,
     /// The id the next message gets.
     pub next: u64,
     pub tail: VecDeque<Msg>,
@@ -215,7 +255,7 @@ pub struct Room {
 
 impl Room {
     fn to_json(&self) -> Value {
-        json!({"id": self.id, "name": self.name, "mode": self.mode.as_str(), "personality": self.personality.as_str(), "created": self.created, "conv": self.conv, "team": self.team})
+        json!({"id": self.id, "name": self.name, "mode": self.mode.as_str(), "personality": self.personality.as_str(), "created": self.created, "conv": self.conv, "team": self.team, "tools": self.tools})
     }
 }
 
@@ -650,6 +690,7 @@ impl Store {
                     .filter(|h| s.team.iter().any(|t| t.handle == *h))
                     .map(str::to_string)
                     .collect(),
+                tools: r["tools"].as_bool().unwrap_or(false),
                 next: last + 1,
                 tail,
             });
@@ -859,6 +900,7 @@ impl Store {
             created: unix_now(),
             conv: None,
             team: vec![],
+            tools: false,
             next: 1,
             tail: VecDeque::new(),
         });
@@ -885,8 +927,8 @@ impl Store {
         Ok(m)
     }
 
-    /// Oldest first. `since`: newer than that id. `before`: older than that id (read from the
-    /// file when the memory tail does not reach back far enough). Neither: the newest.
+    /// Oldest first, owner-only messages included (the owner's own view; tests). Everything that
+    /// serves people uses `messages_for`.
     pub fn messages(
         &self,
         room: &str,
@@ -894,15 +936,31 @@ impl Store {
         before: Option<u64>,
         limit: usize,
     ) -> Vec<Msg> {
+        self.messages_for(room, since, before, limit, true)
+    }
+
+    /// Oldest first. `since`: newer than that id. `before`: older than that id (read from the
+    /// file when the memory tail does not reach back far enough). Neither: the newest.
+    /// `private`: the viewer is the owner's own session; without it owner-only messages are left
+    /// out before the limit applies (so paging never stalls on a page of hidden ones).
+    pub fn messages_for(
+        &self,
+        room: &str,
+        since: Option<u64>,
+        before: Option<u64>,
+        limit: usize,
+        private: bool,
+    ) -> Vec<Msg> {
         let Some(r) = self.room(room) else {
             return vec![];
         };
         let limit = limit.clamp(1, 500);
+        let shown = |m: &Msg| private || !m.owner_only;
         if let Some(s) = since {
             return r
                 .tail
                 .iter()
-                .filter(|m| m.id > s)
+                .filter(|m| m.id > s && shown(m))
                 .take(limit)
                 .cloned()
                 .collect();
@@ -910,7 +968,7 @@ impl Store {
         let older: Vec<&Msg> = r
             .tail
             .iter()
-            .filter(|m| before.is_none_or(|b| m.id < b))
+            .filter(|m| before.is_none_or(|b| m.id < b) && shown(m))
             .collect();
         let tail_reaches_start = r.tail.front().is_none_or(|m| m.id <= 1);
         if older.len() >= limit || tail_reaches_start || before.is_none() {
@@ -926,7 +984,7 @@ impl Store {
                 if let Some(m) = serde_json::from_str::<Value>(l)
                     .ok()
                     .and_then(|v| Msg::from_json(&v))
-                    .filter(|m| m.id < b)
+                    .filter(|m| m.id < b && shown(m))
                 {
                     ring.push_back(m);
                     if ring.len() > limit {
@@ -938,8 +996,107 @@ impl Store {
         ring.into_iter().collect()
     }
 
+    /// A message by id. Owner-only ones are found only with `private` (a quote of one must never
+    /// reach a message that others can read).
+    pub fn find_msg_for(&self, room: &str, id: u64, private: bool) -> Option<Msg> {
+        self.room(room)?
+            .tail
+            .iter()
+            .find(|m| m.id == id && (private || !m.owner_only))
+            .cloned()
+    }
+
     pub fn find_msg(&self, room: &str, id: u64) -> Option<Msg> {
-        self.room(room)?.tail.iter().find(|m| m.id == id).cloned()
+        self.find_msg_for(room, id, true)
+    }
+
+    /// The newest message in the room that `private` (or not) may be shown.
+    pub fn last_visible(&self, room: &Room, private: bool) -> Option<Msg> {
+        room.tail
+            .iter()
+            .rev()
+            .find(|m| private || !m.owner_only)
+            .cloned()
+    }
+
+    // ---- owner-only rooms
+
+    /// Why this room is not owner-only right now (`None`: nobody but the owner can be in it).
+    /// Anyone who is in it, and any invite or sign-in link that is still unused and unexpired
+    /// for it, counts: such a person could read it. (Bridges are the hub's to check.)
+    pub fn guest_present(&self, room: &str, now: f64) -> Option<&'static str> {
+        if self
+            .members
+            .iter()
+            .any(|m| m.rooms.iter().any(|r| r == room))
+        {
+            return Some("someone else is in this room");
+        }
+        let live = |i: &Invite| i.used.is_none() && i.expires > now;
+        // a sign-in link is for a member; one for a member of this room is covered above, and
+        // one for a member of another room opens nothing here
+        if self.invites.iter().any(|i| live(i) && i.room == room) {
+            return Some("this room has an open invite");
+        }
+        if self.invites.iter().any(|i| {
+            live(i)
+                && i.member
+                    .as_deref()
+                    .and_then(|m| self.member(m))
+                    .is_some_and(|m| m.rooms.iter().any(|r| r == room))
+        }) {
+            return Some("this room has an open sign-in link");
+        }
+        None
+    }
+
+    /// How many unused, unexpired invites this room has.
+    pub fn open_invites(&self, room: &str, now: f64) -> usize {
+        self.invites
+            .iter()
+            .filter(|i| i.used.is_none() && i.expires > now && i.room == room)
+            .count()
+    }
+
+    /// Cancel this room's open invites (the owner's revoke). They are kept in `trash/`, hashes
+    /// only. Returns how many.
+    pub fn revoke_invites(&mut self, room: &str, now: f64) -> Result<usize, String> {
+        let open: Vec<Value> = self
+            .invites
+            .iter()
+            .filter(|i| i.used.is_none() && i.expires > now && i.room == room)
+            .map(|i| json!({"hash": i.hash, "room": i.room, "created": i.created, "expires": i.expires}))
+            .collect();
+        if open.is_empty() {
+            return Ok(0);
+        }
+        to_trash(
+            &self.dir,
+            &format!("invites-{room}"),
+            &json!({"revoked": open}).to_string(),
+        )?;
+        let before = self.invites.clone();
+        self.invites
+            .retain(|i| !(i.used.is_none() && i.expires > now && i.room == room));
+        if let Err(e) = self.save_invites() {
+            self.invites = before;
+            return Err(e);
+        }
+        Ok(open.len())
+    }
+
+    /// The owner's tools switch for one room (saved at once; unchanged when the disk refuses).
+    pub fn set_tools(&mut self, room: &str, on: bool) -> Result<(), String> {
+        let r = self.room_mut(room).ok_or("No such room.")?;
+        let old = r.tools;
+        r.tools = on;
+        if let Err(e) = self.save_rooms() {
+            if let Some(r) = self.room_mut(room) {
+                r.tools = old;
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     // ---- invites
@@ -2289,14 +2446,11 @@ mod team_tests {
         assert_eq!(s2.team.len(), 1);
         let t = s2.teammate("sage").unwrap();
         assert_eq!(
-            (
-                t.name.as_str(),
-                t.role.as_str(),
-                t.model.as_deref(),
-                t.created
-            ),
-            ("Sage the Wise", "Be bold.", Some("mock:8b"), created)
+            (t.name.as_str(), t.role.as_str(), t.model.as_deref()),
+            ("Sage the Wise", "Be bold.", Some("mock:8b"))
         );
+        // (a time written as JSON can come back one digit off in the last place)
+        assert!((t.created - created).abs() < 1e-3);
         assert_eq!(s2.room("family").unwrap().team, ["sage"]);
         assert_eq!(s2.teammates_in("book-club").len(), 1);
         // remove: the record goes to trash/, nothing is deleted, it leaves every room

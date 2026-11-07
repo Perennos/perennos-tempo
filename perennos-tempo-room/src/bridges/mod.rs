@@ -550,6 +550,22 @@ impl Outbound {
         }
     }
 
+    /// The room names every bridge that is on is mapped to (a bridged chat mirrors into a local
+    /// room). A room with any of them can never be owner-only.
+    pub fn mapped_rooms(&self) -> Vec<String> {
+        let mut out = vec![];
+        if let Some(c) = &self.discord {
+            out.extend(c.channels.iter().map(|(_, r)| r.clone()));
+        }
+        if let Some(c) = &self.telegram {
+            out.extend(c.chats.iter().map(|(_, r)| r.clone()));
+        }
+        if let Some(c) = &self.whatsapp {
+            out.extend(c.numbers.iter().map(|(_, r)| r.clone()));
+        }
+        out
+    }
+
     /// Reply in the platform's thread. Failures are logged; the local room already has the reply.
     pub fn send(&self, t: &Target, text: &str) {
         let r = match t {
