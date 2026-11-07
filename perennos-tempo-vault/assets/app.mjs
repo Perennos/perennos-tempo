@@ -469,7 +469,7 @@ function setTheme(t, animate = false) {
     paintTheme(t);
     setTimeout(() => document.documentElement.classList.remove('tt-fading'), 400);
   } else paintTheme(t);
-  if (S.graph) openGraphView(); // the points take the new colours
+  retheme(); // the points take the new colours
 }
 
 // ------------------------------------------------------------------ the note
@@ -834,23 +834,37 @@ function pick(src) {
 }
 
 // ------------------------------------------------------------------ graph view
+// The Brain: brain-world.mjs (three.js), the same module the chat surface uses. Notes are the points, [[links]]
+// and #tags the arcs, and a note changed today glows warm. Opening it again (a filter, a change on disk)
+// hands the world the new graph, which diffs it: nothing is rebuilt, new notes grow in, removed ones dissolve.
+let bw = null;
+const brainWorld = () => (bw ||= import('/brain-world.mjs'));
+const retheme = () => { if (!S.graph) return; if (S.graph.retheme) S.graph.retheme(); else openGraphView(); };
+async function noteTime(n) {
+  if (!n.path.toLowerCase().endsWith('.md')) return null;
+  try { const r = await api(`note?path=${enc(n.id)}`); return { mtime: r.mtime }; } catch { return null; }
+}
 async function openGraphView() {
-  closeGraphView();
   const stage = $('#gstage');
-  stage.replaceChildren(h('p', { class: 'empty' }, 'Laying out the field…'));
+  if (!S.graph) stage.replaceChildren(h('p', { class: 'empty' }, 'Tuning the score…'));
   const o = S.gopts;
   const q = `graph?tags=${+o.tags}&attachments=${+o.attachments}&unresolved=${+o.unresolved}&orphans=${+o.orphans}&filter=${enc($('#gfilter').value.trim())}`;
   try {
-    const [g, m] = await Promise.all([api(q), memgraph()]);
+    const [g, m] = await Promise.all([api(q), brainWorld()]);
     if (!S.both && S.view !== 'graph') return;
-    stage.replaceChildren();
     const kinds = {};
     for (const n of g.nodes) kinds[n.kind] = (kinds[n.kind] || 0) + 1;
     const used = g.nodes.filter(n => n.used).length;
-    $('#legend').replaceChildren(...Object.entries(kinds).map(([k, c]) => h('span', { 'data-k': k }, `${k} ${c}`)), used ? h('span', { 'data-k': 'used' }, `changed today ${used}`) : null, h('span', { 'data-k': 'edges' }, `${g.edges.length} links`));
-    if (!g.nodes.length) { stage.append(h('p', { class: 'empty' }, 'Nothing to draw yet.')); return; }
-    S.graph = await m.openGraph(stage, g, { reduced: reduced(), onPick: pick, flatLabel: 'Vault graph' });
-  } catch (e) { stage.replaceChildren(h('p', { class: 'empty' }, e.message)); }
+    $('#legend').replaceChildren(...Object.entries(kinds).map(([k, c]) => h('span', { 'data-k': k }, `${k} ${c}`)), used ? h('span', { 'data-k': 'used' }, `playing today (changed) ${used}`) : null, h('span', { 'data-k': 'edges' }, `${g.edges.length} links`));
+    if (!g.nodes.length) { closeGraphView(); stage.replaceChildren(h('p', { class: 'empty' }, 'Nothing on the score yet. Write a note and it shows up.')); return; }
+    if (S.graph) { S.graph.setData(g); return; }
+    closeGraphView();
+    stage.replaceChildren();
+    S.graph = await m.mountBrain(stage, {
+      data: g, source: 'vault', reduced: reduced(), flatLabel: 'Vault graph', describe: noteTime,
+      copy: { nodes: 'notes', open: 'Open note', search: 'Search the score', noMatch: 'Nothing by that name' }, onOpen: n => pick(n.id),
+    });
+  } catch (e) { closeGraphView(); stage.replaceChildren(h('p', { class: 'empty' }, e.message)); }
 }
 function closeGraphView() { if (S.graph) { S.graph.close(); S.graph = null; } }
 
@@ -1226,7 +1240,7 @@ function connect() {
     for (const p of paths) PV.cache.delete(p);
     await loadTree();
     if (S.view !== 'files' && S.view !== 'graph') renderSide();
-    if (S.view === 'graph') openGraphView();
+    if (S.graph || S.view === 'graph') openGraphView(); // the brain takes what changed: new notes grow in, deleted ones dissolve
     const cur = S.current;
     if (!cur && S.missing && paths.includes(S.missing) && (S.notes.has(S.missing) || S.files.some(f => f.path === S.missing))) return openNote(S.missing);
     if (!cur || !paths.includes(cur.path)) return;
@@ -1489,7 +1503,7 @@ function signature() {
 async function boot() {
   S.both = store.get('layout', 'dashboard') === 'both';
   setTheme(store.get('theme', 'system'));
-  matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => { if (S.graph) openGraphView(); });
+  matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', retheme);
   wire();
   signature();
   konami();

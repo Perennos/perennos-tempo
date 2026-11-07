@@ -30,10 +30,10 @@
   "searchMemory": "Search memory",
   "graph": "Graph",
   "graphTitle": "Second brain",
-  "graphHint": "Drag to turn, scroll to zoom, click a file to read it.",
+  "graphHint": "Drag to turn the score (your memory), scroll to zoom, click a node to fly to it, press / to search.",
   "graphHintFlat": "Flat view (no 3D on this device). Scroll to zoom, click a file to read it.",
-  "graphEmpty": "Nothing to draw yet: the memory index is empty or still building.",
-  "used": "Used this turn",
+  "graphEmpty": "Nothing on the score yet: the memory index is empty or still building.",
+  "used": "Playing now (used this turn)",
   "noMemory": "No memory files indexed yet. Add rag_files or rag_globs to agent-config.json.",
   "back": "Back",
   "close": "Close",
@@ -64,5 +64,13 @@
   "brainTitle": "The second brain, as a field.",
   "about": "About",
   "madeIn": "Built and maintained in the Cayman Islands",
-  "motionNote": "Your system asks for less motion, so the sphere holds still."
+  "motionNote": "Your system asks for less motion, so the sphere holds still.",
+  "brainOpen": "Open",
+  "brainClose": "Close",
+  "brainLinks": "Linked to",
+  "brainChanged": "Last changed",
+  "brainSearch": "Search the score",
+  "brainNoMatch": "Nothing by that name",
+  "brainLoadError": "The 3D view didn't load. Here's the flat one instead.",
+  "brainNodes": "sources"
 }
