@@ -1,22 +1,39 @@
 # Perennos Tempo setup guide
 
-Installation results belong to the matching [GitHub Release](https://github.com/Perennos/perennos-tempo/releases): check its tested Windows image, installer checksum, and individual acceptance results. An extracted folder or running process alone is not acceptance. Consumer Windows, removal, recovery and external-client reconnect remain unverified unless that release records their results.
+## Install the apps (version 2.0.0)
 
-## Requirements and network use
+Open the [latest release](https://github.com/Perennos/perennos-tempo/releases/latest) and download the file for your computer:
 
-Download `PerennosTempo-Setup-unsigned.exe` from the matching [GitHub Release](https://github.com/Perennos/perennos-tempo/releases), verify its published SHA-256, open it, and click **Install and open**. Setup extracts its bundled app-local Python/Tk runtime; no existing Python installation is required or modified. The EXE is unsigned. Keep SmartScreen, antivirus, and UAC enabled.
+| Computer | File |
+|---|---|
+| Windows 10 and 11 (x64) | `PerennosTempo-Setup-2.0.0-x64-source-available.exe` |
+| macOS, Apple silicon | `perennos-tempo-source-available-2.0.0-aarch64-apple-darwin.tar.gz` |
+| Linux (x86_64) | `perennos-tempo-source-available-2.0.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Debian and Ubuntu (x86_64) | `perennos-tempo-source-available_2.0.0-1_amd64.deb` |
 
-First setup needs network access and several gigabytes of disk space for pinned packages, the app-owned Ollama runtime, a local `qwen3:4b` model, and pinned decision-head files. The source catalog indicates about 2.5 GB for the default engine; the decision-head fetcher describes about 1.7 GB for its model files. Package wheels and the Ollama archive add more. Exact bytes vary; setup shows the resolved plan and free-space checks. Model weights are not bundled.
+**Windows.** Download the Setup file and double-click it. The installer is not code-signed, so Windows may show "Windows protected your PC": click **More info**, then **Run anyway**. Keep SmartScreen, antivirus and UAC enabled; this is the one prompt to click through. Follow the installer's steps. It adds Start-menu entries and `tempo-launch` to your PATH. The installer's optional "Set up models" step downloads several gigabytes, so leave it unticked if you would rather choose later with `tempo-launch setup`.
 
-Setup has two download-related confirmations. The first authorizes dependency resolution, which can contact package indexes and transfer candidate wheel data before exact totals are known (15-minute preflight and 2 GiB of app-local temporary data). The second shows resolved dependency, model and Ollama download sizes and available space before those downloads. The second prompt is not the first network contact.
+**macOS and Linux.** Unpack the archive and run the installer:
+
+```sh
+tar xzf perennos-tempo-source-available-*.tar.gz && cd perennos-tempo-source-available-*/ && ./install.sh
+```
+
+On Debian and Ubuntu, `sudo apt install ./perennos-tempo-source-available_2.0.0-1_amd64.deb` works too.
+
+**Check a download** (optional): compare its SHA-256 with `SHA256SUMS.txt` on the release page, or run `gh attestation verify <file> --repo Perennos/perennos-tempo`, which checks that this repository's release workflow built the file.
+
+## First start and network use
+
+Run `tempo-launch setup`. It checks the memory, graphics card and disk of this computer, recommends models that fit, and shows the exact plan with the free space before anything large is fetched. Nothing is downloaded until you say yes. When no Ollama is installed it can fetch a pinned one, checked against its published SHA-256. Models and Ollama need network access and several gigabytes of free storage.
 
 ## Prepare a private data folder
 
 For manual source use, run from the extracted package folder with Python 3.12 or newer. Use a data folder owned by the current OS user and separate it from the application and model folders. The bootstrap refuses non-empty unowned folders.
 
-For the Windows download, use the native setup above and review the exact download-size and free-space plan before consenting. The default setup is local; do not pass hosted-provider options unless you have deliberately reviewed the provider, privacy policy, credentials, and cost cap.
+If you installed the gateway with its own Windows desktop installer (`PerennosTempo-Setup-unsigned.exe`, in the [v1.0.0 release](https://github.com/Perennos/perennos-tempo/releases/tag/v1.0.0)), use its native setup and review the exact download-size and free-space plan before consenting. The default setup is local; do not pass hosted-provider options unless you have deliberately reviewed the provider, privacy policy, credentials, and cost cap.
 
-The Windows installer does not put Python on PATH. For the commands below, replace `python tempo.py` with `& "<app-folder>\runtime\venv\Scripts\python.exe" -I -B "<app-folder>\tempo.py"` in PowerShell. Use the `data_home` and `gateway_port` values from `<app-folder>\desktop-install-receipt.json`, rather than assuming port 8765 is free. Closing the chat leaves its local API available; a second gateway on the same port is unnecessary.
+The gateway's own Windows installer (v1.0.0) does not put Python on PATH. For the commands below, replace `python tempo.py` with `& "<app-folder>\runtime\venv\Scripts\python.exe" -I -B "<app-folder>\tempo.py"` in PowerShell. Use the `data_home` and `gateway_port` values from `<app-folder>\desktop-install-receipt.json`, rather than assuming port 8765 is free. Closing the chat leaves its local API available; a second gateway on the same port is unnecessary.
 
 ## Desktop chat
 

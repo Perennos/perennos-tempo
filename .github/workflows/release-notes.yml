@@ -1,0 +1,39 @@
+name: release-notes
+# Sets the body of an existing release (draft or published) to .github/release-notes/<tag>.md as it is
+# on the branch this is run from. Run by hand: Actions, release-notes, Run workflow, with the tag.
+# It changes nothing else about the release (not its files, not whether it is published).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose notes to update, for example v2.0.0"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-notes-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  notes:
+    name: Update the release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Update the notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "the tag must look like v2.0.0"; exit 1 ;; esac
+          [ -f ".github/release-notes/$TAG.md" ] || { echo "no .github/release-notes/$TAG.md on this branch"; exit 1; }
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null || { echo "no release named $TAG"; exit 1; }
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file ".github/release-notes/$TAG.md"
+          echo "notes of $TAG updated"
