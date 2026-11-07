@@ -276,12 +276,12 @@ pub fn render_with(
     let engine_cards: String = engines.iter().map(engine_card).collect();
     let up = engines.iter().filter(|e| e.up).count();
     let bands_html = if bands.is_empty() {
-        "<p>No bands yet. Ask the Conductor to set one up: <code>tempo-launch conductor new --template social-media</code></p>".to_string()
+        "<p class=\"empty\">No bands yet. Ask the Conductor to set one up: <code>tempo-launch conductor new --template social-media</code></p>".to_string()
     } else {
         bands.iter().map(|v| band_block(v, engines)).collect()
     };
     let runs_html = if bands.iter().all(|v| v.runs.is_empty()) {
-        "<p>No runs yet. The Conductor is waiting with the baton up: start one with the command under a flow above.</p>".to_string()
+        "<p class=\"empty\">No runs yet. The Conductor is waiting with the baton up: start one with the command under a flow above.</p>".to_string()
     } else {
         bands
             .iter()
@@ -297,7 +297,8 @@ pub fn render_with(
     };
     let apps_html: String = apps.iter().map(app_card).collect();
     format!(
-        r#"{top}<h1>{heading}</h1>
+        r#"{top}<p class="tt-kicker">Conductor</p>
+<h1>{heading}</h1>
 <p class="lede">The Conductor raises the baton. Here is every engine it can cue, every band it leads, what they played last, and which apps are awake.</p>
 
 {fleet}<h2>Engines</h2>

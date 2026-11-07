@@ -38,6 +38,7 @@ impl Handler for JobHandler {
         };
         let (node, runner, from) = (node.clone(), self.0.clone(), from.to_string());
         std::thread::spawn(move || {
+            let _busy = super::route::Busy::new();
             let job = j.str("job").unwrap_or("").to_string();
             let r = runner.run(
                 j.str("model").unwrap_or(""),
@@ -64,6 +65,24 @@ impl Handler for JobHandler {
     }
 }
 
+/// Hand a step to `m` under the request id `job`.
+pub fn submit_as(
+    node: &Node,
+    m: &store::Machine,
+    job: &str,
+    model: &str,
+    role: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let body = J::Obj(vec![
+        ("job".into(), J::s(job)),
+        ("model".into(), J::s(model)),
+        ("role".into(), J::s(role)),
+        ("prompt".into(), J::s(prompt)),
+    ]);
+    node.send(m, "job", body.compact().as_bytes()).map(|_| ())
+}
+
 /// Hand a step to `m`; returns the job's id.
 pub fn submit(
     node: &Node,
@@ -73,13 +92,7 @@ pub fn submit(
     prompt: &str,
 ) -> Result<String, String> {
     let job = super::crypto::hex(&super::crypto::random(8));
-    let body = J::Obj(vec![
-        ("job".into(), J::s(&job)),
-        ("model".into(), J::s(model)),
-        ("role".into(), J::s(role)),
-        ("prompt".into(), J::s(prompt)),
-    ]);
-    node.send(m, "job", body.compact().as_bytes())?;
+    submit_as(node, m, &job, model, role, prompt)?;
     Ok(job)
 }
 
@@ -97,7 +110,10 @@ pub fn wait(node: &Node, job: &str, limit: Duration) -> Result<String, String> {
 }
 
 /// When `engine` is the Ollama of a fleet machine that is up and takes jobs, let that machine's
-/// own agent play the step. `None`: do it the usual way.
+/// own agent play the step. If the wire fails (no answer, a dropped connection) the same request
+/// goes once to the next best machine; a step that was answered, even with "no", is final. A
+/// step only talks and drafts, so a second try is safe; tool calls are never retried.
+/// `None`: do it the usual way.
 pub fn try_remote(
     ctx: &crate::Ctx,
     engine: &str,
@@ -108,18 +124,33 @@ pub fn try_remote(
     let p = Paths::of(ctx);
     let want = engine.trim().trim_end_matches('/');
     let fleet = store::load(&p);
-    let m = fleet
-        .peers()
+    let now = store::now_s();
+    let ranked = super::route::rank(&fleet, model, now);
+    let first = *ranked
+        .iter()
         .find(|m| m.engine() && m.engine_url() == want)?;
-    let fresh = store::now_s().saturating_sub(m.last_seen) < 30;
-    if !fresh || m.health.bool("jobs") != Some(true) {
-        return None;
-    }
+    let mut order = vec![first];
+    order.extend(ranked.into_iter().filter(|m| m.name != first.name));
     let node = Node::open(&p, store::read_key(&p)?).ok()?;
-    let r = submit(&node, m, model, role, text)
-        .and_then(|job| wait(&node, &job, Duration::from_secs(900)));
-    Some(r.map(|text| Said {
-        text,
-        engine: Some(format!("{} (fleet)", m.name)),
-    }))
+    let job = super::crypto::hex(&super::crypto::random(8));
+    let mut last = String::new();
+    for m in order.into_iter().take(2) {
+        let r = submit_as(&node, m, &job, model, role, text)
+            .and_then(|()| wait(&node, &job, Duration::from_secs(900)));
+        match r {
+            Ok(text) => {
+                return Some(Ok(Said {
+                    text,
+                    engine: Some(format!("{} (fleet)", m.name)),
+                }))
+            }
+            Err(e) if super::route::retryable(&e) => {
+                // the first machine must not run it later, when it comes back
+                node.cancel_queued(&m.name, "job", &job);
+                last = e;
+            }
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    Some(Err(last))
 }

@@ -3,9 +3,11 @@
    (chat, status, engines) or Both. Tokens only; light, dark or the system's. Motion is transform and opacity. */
 /* The artwork and the fonts are named here, once: swap the files or these lines and nothing else.
    Paths are relative to this sheet. Fonts are the site's own (SIL OFL 1.1; see NOTICE.md). */
-@font-face{font-family:"Archivo";src:url(./fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:"Archivo";src:url(./fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-stretch:62% 125%;font-style:normal;font-display:swap}
 @font-face{font-family:"Instrument Serif";src:url(./fonts/instrument-serif-italic-latin.woff2) format("woff2");font-weight:400;font-style:italic;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url(./fonts/jetbrains-mono-latin-700.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(./fonts/bodoni-moda-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(./fonts/bodoni-moda-italic-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:italic;font-display:swap}
 .ch{--wm-src:url(./perennos-wordmark-cream.png);--ins-src:url(./perennos-insignia.webp)}
 .ch{--rail:156px;--top:42px;position:relative;height:100%;min-height:0;overflow:hidden;display:grid;grid-template-columns:var(--rail) minmax(0,1fr);grid-template-rows:var(--top) minmax(0,1fr);background:var(--bg);color:var(--frost);font:13px/1.5 var(--sans)}
 .ch *{scrollbar-width:thin;scrollbar-color:var(--dim) transparent}
@@ -178,3 +180,79 @@ details.ch-tool[data-state=err]>summary{border-left-color:var(--warm);color:var(
   .ch[data-view=both] .mg-hd{padding:10px 14px}.ch[data-view=both] .mg-hd h1{font-size:20px}.ch[data-view=both] .mg-hint,.ch[data-view=both] .mg-legend{display:none}
   .ch-pop{left:auto;right:8px;bottom:58px}
 }
+
+/* ============================================================== couture
+   Type, hairlines, pills and slow easing for the non-brain parts (tokens: tempo-theme.css). */
+.ch{font-size:13.5px;line-height:1.6;--top:48px}
+.ch-top{padding:0 var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.ch-where{font-weight:700;letter-spacing:.24em}
+.ch-rail{border-right:var(--hair) solid var(--line2);padding:var(--s5) 0 var(--s3)}
+.ch-rail button{padding:var(--s2) var(--s5);font-weight:700;letter-spacing:.24em;transition:color .4s var(--expo),padding-left .6s var(--expo)}
+.ch-rail button:hover{padding-left:calc(var(--s5) + var(--s1))}
+.ch-rail .sub{padding:var(--s4) var(--s5) var(--s2);font-weight:700;letter-spacing:.3em}
+.ch-rail kbd{border-width:var(--hair)}
+.ch-strip{padding:var(--s4) var(--s6);gap:var(--s2) var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.ch-v{font-weight:700;letter-spacing:.14em}
+.ch-num{font:300 clamp(24px,1vw + 18px,32px)/1 var(--display);letter-spacing:-.02em;font-variant-numeric:lining-nums tabular-nums}
+.ch-side{padding:var(--s5) var(--s4) var(--s5) var(--s6);border-right:var(--hair) solid var(--line2)}
+.ch-conv{min-height:40px;border-bottom:var(--hair) solid var(--line);letter-spacing:.12em}
+.ch-file{border-bottom:var(--hair) solid var(--line);min-height:38px}
+.ch-fname{font-size:13px}
+.ch-title{font:italic 400 clamp(22px,.8vw + 17px,28px)/1.1 var(--serif);letter-spacing:-.02em}
+.ch-log{padding:var(--s7) var(--s6) var(--s6);gap:var(--s5)}
+.ch-log>.ch-empty{max-width:20em;font:italic 400 clamp(26px,1.2vw + 16px,38px)/1.08 var(--display);font-optical-sizing:auto;letter-spacing:-.035em;color:var(--ink);text-wrap:balance}
+.ch-m{max-width:70ch}
+.ch-t{font-size:15px;line-height:1.65;text-wrap:pretty}
+.ch-bot{padding-left:var(--s4);border-left:1.5px solid var(--warm)}
+.ch-m>.tt-lbl,.ch-m>.ch-who{letter-spacing:.28em;font-weight:700}
+.ch-tool .ch-t,.ch-status .ch-t{letter-spacing:.1em}
+.ch-confirm{border-radius:var(--r);border-width:var(--hair);border-left:1.5px solid var(--warm)}
+.ch-comp{padding:var(--s4) var(--s6);border-top:var(--hair) solid var(--line2);gap:var(--s3)}
+.ch-in{border:var(--hair) solid var(--line3);border-radius:var(--r);padding:var(--s3) var(--s4);transition:border-color .5s var(--expo)}
+.ch-comp .ch-in{border-radius:22px;padding:var(--s3) var(--s5)}
+.ch-in:focus-visible{border-color:var(--warm);outline:0}
+.ch-btn{min-height:36px;padding:0 var(--s5);border:var(--hair) solid var(--line3);border-radius:999px;font-weight:700;letter-spacing:.2em;transition:background-color .5s var(--expo),color .5s var(--expo),border-color .5s var(--expo),transform .12s var(--ease)}
+.ch-btn:hover:not(:disabled){background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.ch-btn[aria-pressed=true]{background:var(--warm-soft)}
+.ch-go{background:var(--warm);border-color:var(--warm);color:var(--on-warm)}
+.ch-go:hover:not(:disabled){background:transparent;border-color:var(--warm);color:var(--warm2);filter:none}
+.ch-comp .ch-btn{align-self:flex-end;min-height:46px}
+.ch-pop{padding:var(--s5) var(--s5);border:var(--hair) solid var(--line3);background:color-mix(in srgb,var(--bg2) 90%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.ch-pop h2{font-size:clamp(26px,1vw + 18px,32px);letter-spacing:-.022em;line-height:1.05;margin-bottom:var(--s4)}
+.ch-pop .tt-lbl{margin:var(--s4) 0 var(--s2)}
+@container dash (max-width:700px){.ch-strip{padding:var(--s3) var(--s4)}.ch-log{padding:var(--s5) var(--s4)}.ch-comp{padding:var(--s3) var(--s4)}}
+@media (max-width:860px){.ch-top{padding:0 var(--s4)}}
+.ch-kpis{gap:var(--s5)}
+
+/* The second brain world (brain-world.mjs): labels, the node card, search, the count. Same block in the chat
+   surface and in Vault. Colours are the theme's tokens, so light and dark both work. */
+.bw-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;cursor:grab}
+.bw-canvas:active{cursor:grabbing}
+.bw-labels{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1}
+.bw-label{position:absolute;left:0;top:0;font:700 10px/14px var(--label);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap;color:var(--silver);opacity:0;transition:opacity .3s var(--ease);will-change:transform;text-shadow:0 0 6px var(--bg),0 0 2px var(--bg)}
+.bw-label.used{color:var(--warm2)}
+.bw-label.lift{color:var(--ink)}
+.bw-card{position:absolute;left:20px;bottom:20px;z-index:3;width:min(320px,calc(100% - 40px));max-height:calc(100% - 120px);overflow:auto;padding:16px 18px 14px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);animation:bw-in .35s var(--ease) both}
+.bw-card[hidden],.bw-search[hidden],.bw-note[hidden]{display:none}
+.bw-kind{font:500 9.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--warm2)}
+.bw-title{margin:8px 24px 6px 0;font:italic 400 24px/1.1 var(--serif);letter-spacing:-.005em;color:var(--ink);overflow-wrap:anywhere}
+.bw-path{font:400 11px/1.4 var(--mono);color:var(--mute);overflow-wrap:anywhere}
+.bw-when{margin-top:6px;font:500 9.5px/1.4 var(--label);letter-spacing:.12em;text-transform:uppercase;color:var(--silver)}
+.bw-sub{margin-top:12px;font:500 9.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--silver)}
+.bw-links{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.bw-link{max-width:100%;padding:3px 8px;border:1px solid var(--line2);border-radius:var(--r);background:transparent;color:var(--ink);font:400 11px/1.3 var(--sans);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bw-link:hover,.bw-link:focus-visible{border-color:var(--warm);outline:none}
+.bw-open{margin-top:14px;padding:7px 14px;border:1px solid var(--line3);border-radius:var(--r);background:transparent;color:var(--ink);font:500 10px/1 var(--label);letter-spacing:.16em;text-transform:uppercase;cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.bw-open:hover,.bw-open:focus-visible{border-color:var(--warm);color:var(--warm2);outline:none}
+.bw-x{position:absolute;right:8px;top:6px;width:26px;height:26px;border:0;background:transparent;color:var(--mute);font:300 20px/1 var(--sans);cursor:pointer}
+.bw-x:hover{color:var(--ink)}
+.bw-search{position:absolute;right:20px;top:18px;z-index:3;display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);animation:bw-in .25s var(--ease) both}
+.bw-search input{width:210px;border:0;outline:none;background:transparent;color:var(--ink);font:500 11px/1.4 var(--label);letter-spacing:.08em}
+.bw-search input::placeholder{color:var(--mute);text-transform:uppercase}
+.bw-count{min-width:1.5em;font:500 9.5px/1 var(--label);letter-spacing:.12em;text-transform:uppercase;color:var(--warm2);text-align:right}
+.bw-total{position:absolute;right:20px;bottom:18px;z-index:2;font:500 9.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--mute);pointer-events:none}
+.bw-note{position:absolute;left:50%;top:18px;transform:translateX(-50%);z-index:2;margin:0;padding:6px 12px;border:1px solid var(--line2);border-radius:var(--r);background:var(--panel);font:500 10px/1.4 var(--label);letter-spacing:.12em;text-transform:uppercase;color:var(--silver);pointer-events:none;max-width:calc(100% - 32px);text-align:center}
+.mg-key[data-kind=pack]::before{background:var(--sand)}
+@keyframes bw-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (max-width:720px){.bw-card{left:12px;right:12px;bottom:12px;width:auto;max-height:46%}.bw-search{right:12px;top:12px}.bw-search input{width:150px}.bw-total{display:none}}
+@media (prefers-reduced-motion:reduce){.bw-card,.bw-search{animation:none}.bw-label{transition:none}}

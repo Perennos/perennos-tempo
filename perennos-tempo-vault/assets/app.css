@@ -2,9 +2,11 @@
    mono labels, red-orange for what is active) applied to notes. Tokens only; three themes. */
 /* Tokens, themes and motion come from tempo-theme.css (loaded first). The artwork and the fonts are named
    here, once: swap the files or these lines and nothing else. Fonts are the site's own (SIL OFL 1.1). */
-@font-face{font-family:"Archivo";src:url(/fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:"Archivo";src:url(/fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-stretch:62% 125%;font-style:normal;font-display:swap}
 @font-face{font-family:"Instrument Serif";src:url(/fonts/instrument-serif-italic-latin.woff2) format("woff2");font-weight:400;font-style:italic;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url(/fonts/jetbrains-mono-latin-700.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(/fonts/bodoni-moda-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(/fonts/bodoni-moda-italic-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:italic;font-display:swap}
 :root{--wm-src:url(/perennos-wordmark-cream.png);--ins-src:url(/perennos-insignia.webp)}
 :root{--rail:176px;--side:272px;--insp:300px;--top:38px;--status:28px}
 html{height:100%}
@@ -440,7 +442,7 @@ body.lay-both .graph-hd{padding:14px 16px 10px}
 .top .r .tt-seg>button{min-height:24px;padding:0 8px;gap:0}
 .top .tt-seg{margin:0}
 .top .r{gap:12px}
-.top .tt-seg>button[aria-pressed=true]{color:var(--warm2)}
+.top .tt-seg>button[aria-pressed=true]{color:var(--bg)}
 /* ------------------------------------------------------------- palette, sheets, suggest */
 .pal{position:fixed;inset:0;z-index:20;background:color-mix(in srgb,var(--bg) 55%,transparent);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;justify-content:center;align-items:flex-start;padding-top:12vh}
 .pal-box{width:min(640px,calc(100% - 32px));border:1px solid var(--line2);background:var(--bg2);box-shadow:0 30px 80px var(--shadow)}
@@ -450,6 +452,7 @@ body.lay-both .graph-hd{padding:14px 16px 10px}
 .pi[aria-selected=true]{background:var(--codebg);border-left-color:var(--warm);color:var(--ink)}
 .pi b{font:400 14px/1.3 var(--sans);color:var(--ink)}
 .pi i{margin-left:auto;font:500 9.5px var(--label);font-style:normal;letter-spacing:.08em;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50%}
+.pi kbd{margin-left:auto;min-width:18px;padding:2px 6px;border:1px solid var(--line2);border-radius:var(--r);font:700 9.5px/1 var(--label);color:var(--mute);text-align:center}
 .pi.cmd b::before{content:"› ";color:var(--warm2)}
 .pal-foot{display:flex;gap:16px;padding:8px 16px;border-top:1px solid var(--line)}
 .sheet{position:fixed;inset:0;z-index:21;background:color-mix(in srgb,var(--bg) 55%,transparent);display:flex;justify-content:center;align-items:flex-start;padding-top:14vh}
@@ -500,3 +503,101 @@ body.konami .status .dot{background:var(--warm);box-shadow:0 0 8px var(--warm)}
   body.lay-both .graph{border-left:0;border-top:1px solid var(--line)}
 }
 @media (max-width:640px){.top .r .seg.pal-open,.top .r .seg.live{display:none}.top .tt-brand .tt-wm,.top .tt-brand b{display:none}.top .r .tt-seg>button{padding:0 6px}.top .r .tt-seg .tt-word{display:none}}
+
+/* ============================================================== couture
+   Editorial type, hairlines, pill buttons and slow easing over the bones above (tokens: tempo-theme.css). */
+body{font-size:13.5px;line-height:1.6}
+.lbl{font-weight:700;font-size:9.5px;letter-spacing:.28em}
+kbd{border-width:var(--hair);font-variant-numeric:lining-nums tabular-nums}
+.top{border-bottom:var(--hair) solid var(--line2);padding:0 var(--s5)}
+.top .seg{font-weight:700;letter-spacing:.2em}
+.top .seg.auto{border:var(--hair) solid var(--line3);border-radius:999px;padding:var(--s1) var(--s3);letter-spacing:.24em}
+.rail{border-right:var(--hair) solid var(--line2);padding:var(--s5) 0 var(--s3)}
+.rail button{padding:var(--s2) var(--s5);letter-spacing:.24em;font-weight:700;transition:color .4s var(--expo),padding-left .6s var(--expo)}
+.rail button:hover{padding-left:calc(var(--s5) + var(--s1))}
+.rail .sub{padding:var(--s4) var(--s5) var(--s2);letter-spacing:.3em;font-weight:700}
+.side{border-right:var(--hair) solid var(--line2)}
+.side-hd{padding:var(--s5) var(--s4) var(--s3);border-bottom:var(--hair) solid var(--line2)}
+.filter{padding:var(--s2) 0;border:0;border-bottom:var(--hair) solid var(--line3);border-radius:0;font-size:13px;transition:border-color .5s var(--expo)}
+.filter:focus{border-bottom-color:var(--warm)}
+.ti{padding:var(--s1) var(--s4)}
+.ti.dir{letter-spacing:.24em;font-weight:700}
+.hit{padding:var(--s3) var(--s4);border-bottom:var(--hair) solid var(--line)}
+.hit b{font-size:17px;letter-spacing:-.012em}
+.empty{padding:var(--s5) var(--s4);font-size:18px;line-height:1.35;letter-spacing:-.01em;text-wrap:balance}
+/* the note: a magazine opener */
+.doc-hd{padding:var(--s7) clamp(20px,6vw,88px) var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.doc-hd .lbl:first-child,.crumbs{color:var(--warm2)}
+.doc-hd h1{margin:var(--s3) 0 0;font:italic 400 clamp(36px,3.4vw + 14px,64px)/.98 var(--display);font-optical-sizing:auto;letter-spacing:-.04em;text-wrap:balance;max-width:16em}
+.meta{margin-top:var(--s4);letter-spacing:.24em}
+.doc-tools{gap:var(--s2);margin-top:var(--s5)}
+.doc-body{padding:var(--s7) clamp(20px,6vw,88px) 140px}
+.editor{padding:var(--s7) clamp(20px,6vw,88px) 140px;line-height:1.75}
+.md{max-width:66ch;font:440 18px/1.7 "Bodoni Moda",var(--serif);font-optical-sizing:auto;font-variant-numeric:oldstyle-nums proportional-nums;hanging-punctuation:first last;text-wrap:pretty;color:var(--frost)}
+.md p{margin:.9em 0;text-wrap:pretty}
+.md>p:first-of-type::first-letter{float:left;margin:.07em .09em 0 0;font:italic 400 3.5em/.78 var(--display);color:var(--warm2)}
+.md h1,.md h2,.md h3{font-family:var(--display);font-style:italic;font-weight:400;letter-spacing:-.03em;text-wrap:balance}
+.md h1{font-size:2.2em;line-height:1.02}
+.md h2{font-size:1.7em;line-height:1.08;margin-top:2em}
+.md h3{font-size:1.3em;margin-top:1.8em}
+.md h4,.md h5,.md h6{font-weight:700;letter-spacing:.28em}
+.md blockquote{margin:1.6em 0;padding:.2em 0 .2em 1.4em;border-left:1.5px solid var(--warm);font:italic 400 1.35em/1.35 var(--serif);color:var(--ink);letter-spacing:-.01em}
+.md a{background:linear-gradient(currentColor,currentColor) 0 100%/0 var(--hair) no-repeat;border-bottom:var(--hair) solid var(--line3);transition:background-size .6s var(--expo)}
+.md a:hover{background-size:100% var(--hair);border-bottom-color:transparent}
+.md pre{border:var(--hair) solid var(--line2);border-left:1.5px solid var(--warm);padding:var(--s4) var(--s5)}
+.md hr{border:0;height:var(--hair);background:var(--line3);margin:var(--s7) 0}
+.md table,.md td,.md th,.md code{font-variant-numeric:lining-nums tabular-nums}
+.md img{max-width:100%}
+/* buttons: pills */
+.btn{min-height:34px;padding:0 var(--s4);border:var(--hair) solid var(--line3);border-radius:999px;font-weight:600;transition:background-color .5s var(--expo),color .5s var(--expo),border-color .5s var(--expo),transform .12s var(--ease)}
+.btn.sm{min-height:28px;padding:0 var(--s3);font-weight:700;letter-spacing:.2em}
+.btn:hover{background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.btn:hover kbd{color:var(--bg);border-color:currentColor}
+.btn[aria-pressed=true]{background:var(--warm-soft)}
+.btn.go{background:var(--warm);border-color:var(--warm);color:var(--on-warm)}
+.btn.go:hover{background:transparent;color:var(--warm2)}
+.btn.danger:hover{background:transparent;border-color:var(--warm);color:var(--warm2)}
+.banner{border:var(--hair) solid var(--warm);border-radius:var(--r);padding:var(--s3) var(--s4)}
+.insp{border-left:var(--hair) solid var(--line2)}
+.insp-body{padding:var(--s5)}
+.pal-box,.sheet-box{border:var(--hair) solid var(--line3);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);background:color-mix(in srgb,var(--bg2) 90%,transparent)}
+.pal-box input{padding:var(--s5);font-size:26px;letter-spacing:-.015em}
+.sheet-box{padding:var(--s6)}
+.sheet-box h2{font:italic 400 clamp(28px,1.6vw + 18px,38px)/1.05 var(--serif);letter-spacing:-.022em}
+.sheet-box input{border:0;border-bottom:var(--hair) solid var(--line3);border-radius:0;padding:var(--s2) 0;transition:border-color .5s var(--expo)}
+.sheet-box input:focus{border-bottom-color:var(--warm)}
+.status{border-top:var(--hair) solid var(--line2);letter-spacing:.2em;font-weight:700;padding:0 var(--s5)}
+@media (max-width:640px){.doc-hd{padding:var(--s6) var(--s4) var(--s4)}.doc-body,.editor{padding:var(--s5) var(--s4) 120px}.md{font-size:17px}.top{padding:0 var(--s3)}}
+
+/* The second brain world (brain-world.mjs): labels, the node card, search, the count. Same block in the chat
+   surface and in Vault. Colours are the theme's tokens, so light and dark both work. */
+.bw-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;cursor:grab}
+.bw-canvas:active{cursor:grabbing}
+.bw-labels{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1}
+.bw-label{position:absolute;left:0;top:0;font:700 10px/14px var(--label);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap;color:var(--silver);opacity:0;transition:opacity .3s var(--ease);will-change:transform;text-shadow:0 0 6px var(--bg),0 0 2px var(--bg)}
+.bw-label.used{color:var(--warm2)}
+.bw-label.lift{color:var(--ink)}
+.bw-card{position:absolute;left:20px;bottom:20px;z-index:3;width:min(320px,calc(100% - 40px));max-height:calc(100% - 120px);overflow:auto;padding:16px 18px 14px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);animation:bw-in .35s var(--ease) both}
+.bw-card[hidden],.bw-search[hidden],.bw-note[hidden]{display:none}
+.bw-kind{font:500 9.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--warm2)}
+.bw-title{margin:8px 24px 6px 0;font:italic 400 24px/1.1 var(--serif);letter-spacing:-.005em;color:var(--ink);overflow-wrap:anywhere}
+.bw-path{font:400 11px/1.4 var(--mono);color:var(--mute);overflow-wrap:anywhere}
+.bw-when{margin-top:6px;font:500 9.5px/1.4 var(--label);letter-spacing:.12em;text-transform:uppercase;color:var(--silver)}
+.bw-sub{margin-top:12px;font:500 9.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--silver)}
+.bw-links{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.bw-link{max-width:100%;padding:3px 8px;border:1px solid var(--line2);border-radius:var(--r);background:transparent;color:var(--ink);font:400 11px/1.3 var(--sans);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bw-link:hover,.bw-link:focus-visible{border-color:var(--warm);outline:none}
+.bw-open{margin-top:14px;padding:7px 14px;border:1px solid var(--line3);border-radius:var(--r);background:transparent;color:var(--ink);font:500 10px/1 var(--label);letter-spacing:.16em;text-transform:uppercase;cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.bw-open:hover,.bw-open:focus-visible{border-color:var(--warm);color:var(--warm2);outline:none}
+.bw-x{position:absolute;right:8px;top:6px;width:26px;height:26px;border:0;background:transparent;color:var(--mute);font:300 20px/1 var(--sans);cursor:pointer}
+.bw-x:hover{color:var(--ink)}
+.bw-search{position:absolute;right:20px;top:18px;z-index:3;display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);animation:bw-in .25s var(--ease) both}
+.bw-search input{width:210px;border:0;outline:none;background:transparent;color:var(--ink);font:500 11px/1.4 var(--label);letter-spacing:.08em}
+.bw-search input::placeholder{color:var(--mute);text-transform:uppercase}
+.bw-count{min-width:1.5em;font:500 9.5px/1 var(--label);letter-spacing:.12em;text-transform:uppercase;color:var(--warm2);text-align:right}
+.bw-total{position:absolute;right:20px;bottom:18px;z-index:2;font:500 9.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--mute);pointer-events:none}
+.bw-note{position:absolute;left:50%;top:18px;transform:translateX(-50%);z-index:2;margin:0;padding:6px 12px;border:1px solid var(--line2);border-radius:var(--r);background:var(--panel);font:500 10px/1.4 var(--label);letter-spacing:.12em;text-transform:uppercase;color:var(--silver);pointer-events:none;max-width:calc(100% - 32px);text-align:center}
+.mg-key[data-kind=pack]::before{background:var(--sand)}
+@keyframes bw-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (max-width:720px){.bw-card{left:12px;right:12px;bottom:12px;width:auto;max-height:46%}.bw-search{right:12px;top:12px}.bw-search input{width:150px}.bw-total{display:none}}
+@media (prefers-reduced-motion:reduce){.bw-card,.bw-search{animation:none}.bw-label{transition:none}}

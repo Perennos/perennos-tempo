@@ -3,11 +3,13 @@
    Mobile first. Tokens only; light, dark or the system's. No inline styles anywhere (strict CSP). */
 /* Tokens, themes and motion come from tempo-theme.css (loaded first). The artwork and the fonts are named
    here, once: swap the files or these lines and nothing else. Fonts are the site's own (SIL OFL 1.1). */
-@font-face{font-family:"Archivo";src:url(/fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:"Archivo";src:url(/fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-stretch:62% 125%;font-style:normal;font-display:swap}
 @font-face{font-family:"Instrument Serif";src:url(/fonts/instrument-serif-italic-latin.woff2) format("woff2");font-weight:400;font-style:italic;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url(/fonts/jetbrains-mono-latin-700.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(/fonts/bodoni-moda-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(/fonts/bodoni-moda-italic-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:italic;font-display:swap}
 :root{--wm-src:url(/perennos-wordmark-cream.png);--ins-src:url(/perennos-insignia.webp)}
-:root{--top:46px;--status:26px;--side:300px}
+:root{--top:54px;--status:26px;--side:300px}
 html{height:100%}
 body{margin:0;height:100%;font:14px/1.5 var(--sans);background:var(--bg);color:var(--ink);overflow:hidden}
 .lbl{font:500 10px/1.3 var(--label);letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
@@ -79,8 +81,6 @@ body.in-room .stage,body.guest .stage{display:block}
 .empty-stage{display:none;background-image:radial-gradient(circle,var(--line2) 1px,transparent 1.4px);background-size:32px 32px;align-items:center;justify-content:center;padding:24px;text-align:center}
 .join{display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:8vh 18px 40px}
 .join-box{position:relative;width:min(440px,100%)}
-.join-box>*{animation:tt-rise .7s var(--ease) both}
-.join-box>:nth-child(2){animation-delay:.06s}.join-box>:nth-child(3){animation-delay:.12s}.join-box>:nth-child(4){animation-delay:.18s}.join-box>:nth-child(5){animation-delay:.24s}
 .art{margin:0 0 14px;line-height:0}
 .art .tt-ins.hero{height:min(190px,32vh)}
 .empty-stage .art{margin:0 auto 18px}
@@ -210,3 +210,99 @@ select.field{appearance:auto;background:var(--bg2);font-size:14px}
   .beat i{opacity:.6}
 }
 @media (max-width:480px){body.in-room .top .tt-brand .tt-wm,body.in-room .top .tt-brand b{display:none}.top .tt-brand .tt-wm{height:12px}}
+
+/* ============================================================== couture
+   Editorial type, hairlines and quiet motion over the bones above. Tokens come from tempo-theme.css. */
+body{line-height:1.6;font-size:var(--fs-body)}
+.lbl{font:700 9.5px/1.3 var(--label);letter-spacing:.28em;color:var(--mute)}
+.sub{line-height:1.6;max-width:46ch;text-wrap:pretty}
+h1{margin:var(--s1) 0 0;font:italic 400 clamp(38px,5vw + 14px,76px)/.96 var(--display);letter-spacing:-.04em;text-wrap:balance}
+h1 em{font-style:italic;color:var(--warm2)}
+h2{font:italic 400 clamp(22px,1vw + 17px,28px)/1.1 var(--serif);letter-spacing:-.015em}
+code{font-variant-numeric:lining-nums tabular-nums}
+.tt-kicker{margin-bottom:var(--s4)}
+.empty-stage .tt-kicker{justify-content:center}
+.empty-stage .tt-kicker::before{display:none}
+.join-box .sub,.empty-stage .sub{margin-top:var(--s4)}
+/* the field behind the join and empty screens (three.js, when WebGL works) */
+.stagefx{position:absolute;inset:0;z-index:0;width:100%;height:100%;display:block;pointer-events:none;opacity:0;transition:opacity 2.4s var(--expo)}
+.stagefx.on{opacity:1}
+body.in-room .stagefx{display:none}
+.stagefx.on~.empty-stage{background-image:none}
+.stage{background:radial-gradient(60% 50% at 50% 38%,var(--warm-soft),transparent 72%),var(--bg)}
+/* frame */
+.top{padding:0 var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.top .seg.auto{padding:var(--s1) var(--s3);border:var(--hair) solid var(--line3);border-radius:999px;letter-spacing:.24em;font-weight:700}
+.top .seg{font-weight:700;letter-spacing:.2em}
+.status{border-top:var(--hair) solid var(--line2);padding:0 var(--s5);letter-spacing:.2em}
+.back{font-family:var(--serif)}
+/* rooms */
+.hello{padding:var(--s7) var(--s5) var(--s5)}
+.hello h1{font-size:clamp(36px,2.4vw + 22px,50px);line-height:.98}
+.hello .lbl{margin-bottom:var(--s3)}
+.hello .sub{font-size:var(--fs-small)}
+.side-hd{padding:var(--s4) var(--s5) var(--s3);border-top:var(--hair) solid var(--line2)}
+.new-room{padding:var(--s1) var(--s5) var(--s4)}
+.room{padding:var(--s4) var(--s5);gap:var(--s1) var(--s3);border-bottom:var(--hair) solid var(--line);border-left:0;position:relative;transition:padding-left .6s var(--expo),background-color .4s var(--expo)}
+.room::before{content:"";position:absolute;left:0;top:var(--s4);bottom:var(--s4);width:1.5px;background:var(--warm);transform:scaleY(0);transition:transform .6s var(--expo)}
+.room:hover{padding-left:calc(var(--s5) + var(--s2));background:transparent}
+.room[aria-current=true]{background:var(--hover)}
+.room[aria-current=true]::before{transform:scaleY(1)}
+.room b{font-size:clamp(20px,.6vw + 16px,24px);letter-spacing:-.015em}
+.room .when{letter-spacing:.14em;font-variant-numeric:lining-nums tabular-nums}
+.room .unread{font-variant-numeric:lining-nums tabular-nums}
+.empty{padding:var(--s5);font-size:var(--fs-lead);line-height:1.4;letter-spacing:-.01em;text-wrap:balance}
+.side-ft{padding:var(--s4) var(--s5) calc(var(--s4) + env(safe-area-inset-bottom));border-top:var(--hair) solid var(--line2)}
+/* buttons: pills; the main one is filled with the accent */
+.btn{min-height:38px;padding:0 var(--s5);border:var(--hair) solid var(--line3);border-radius:999px;font:700 10.5px/1 var(--label);letter-spacing:.2em;text-transform:uppercase;color:var(--ink);transition:background-color .5s var(--expo),color .5s var(--expo),border-color .5s var(--expo),transform .12s var(--ease)}
+.btn.sm{min-height:30px;padding:0 var(--s4);font-size:9.5px;letter-spacing:.22em}
+.btn:hover{background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.btn.go{background:var(--warm);border-color:var(--warm);color:var(--on-warm)}
+.btn.go:hover{background:transparent;color:var(--warm2)}
+.btn.ghost{border-color:transparent}
+.btn.ghost:hover{background:transparent;border-color:transparent;color:var(--warm2)}
+.btn[aria-pressed=true]{background:var(--warm-soft)}
+.btn.danger:hover{background:transparent;border-color:var(--warm);color:var(--warm2)}
+.btn.wide{margin-top:var(--s5);min-height:48px}
+.field{padding:var(--s3) var(--s4);border:var(--hair) solid var(--line3);background:transparent;transition:border-color .4s var(--expo)}
+.field:focus{border-color:var(--warm)}
+.join-form{margin-top:var(--s6);gap:var(--s2)}
+.join-form .hint{margin:var(--s1) 0 0}
+.join-form .tt-field input.mono{letter-spacing:.2em}
+.join-box{width:min(460px,100%)}
+.join{padding:7vh var(--s5) var(--s7)}
+.art{position:relative;margin:0 0 var(--s5)}
+.art::before{content:"";position:absolute;left:-40px;top:-30px;width:300px;height:300px;background:radial-gradient(closest-side,var(--warm-soft),transparent);pointer-events:none}
+.art .tt-ins.hero{position:relative}
+.join .art .tt-ins.hero{height:min(150px,20vh)}
+.join-form{margin-top:var(--s5)}
+/* the chat */
+.chat-hd{padding:var(--s4) var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.chat-title h2{font-size:clamp(26px,1.4vw + 18px,36px);line-height:1.05;letter-spacing:-.022em}
+.msgs{padding:var(--s5) var(--s4) var(--s5)}
+.day{display:flex;align-items:center;gap:var(--s3);align-self:stretch;margin:var(--s6) 0 var(--s3);font:700 9px/1 var(--label);letter-spacing:.3em}
+.day::before,.day::after{content:"";flex:1;height:var(--hair);background:var(--line2)}
+.msg{margin-top:var(--s3);padding:var(--s2) var(--s4) var(--s3);border-left-width:1.5px}
+.msg.mine{border-right-width:1.5px}
+.msg .who{font:600 12px/1.3 var(--sans);font-stretch:112%;letter-spacing:.06em;text-transform:uppercase}
+.msg .text{font-size:15.5px;line-height:1.6;text-wrap:pretty}
+.msg .time{font-variant-numeric:lining-nums tabular-nums;letter-spacing:.1em}
+.msg.approval{border-width:var(--hair);border-left-width:1.5px}
+.mark{font-size:17px;letter-spacing:-.005em}
+.thinking{padding:var(--s2) var(--s5);border-top:var(--hair) solid var(--line)}
+.composer{padding:var(--s3) var(--s4) calc(var(--s3) + env(safe-area-inset-bottom));border-top:var(--hair) solid var(--line2)}
+.composer textarea{border:var(--hair) solid var(--line3);border-radius:22px;padding:var(--s3) var(--s5);transition:border-color .4s var(--expo)}
+.composer textarea:focus{border-color:var(--warm)}
+.send{height:44px;padding:0 var(--s5);border-radius:999px;background:var(--warm);color:var(--on-warm);font-weight:700;letter-spacing:.22em;transition:background-color .5s var(--expo),color .5s var(--expo),transform .12s var(--ease)}
+.send:not(:disabled):hover{background:transparent;color:var(--warm2)}
+.send:disabled{background:transparent;border-color:var(--line2);color:var(--mute)}
+.jump{border-radius:999px;padding:var(--s2) var(--s4);background:var(--bg2);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.suggest,.toast{border-color:var(--line3);background:color-mix(in srgb,var(--bg2) 86%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.sheet{backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.sheet-box{padding:var(--s6) var(--s6) calc(var(--s6) + env(safe-area-inset-bottom));border-color:var(--line3)}
+.sheet-box h2{font-size:clamp(28px,1.6vw + 18px,38px);letter-spacing:-.022em}
+.person{padding:var(--s3) 0;border-bottom:var(--hair) solid var(--line)}
+.code-big{font-variant-numeric:lining-nums tabular-nums}
+.bpm{font-variant-numeric:lining-nums tabular-nums}
+@media (max-width:480px){.hello{padding:var(--s6) var(--s4) var(--s4)}.hello h1{font-size:40px}.top{padding:0 var(--s3)}.join{padding-top:var(--s5)}.sheet-box{padding:var(--s5) var(--s4) calc(var(--s5) + env(safe-area-inset-bottom))}}
+@media (min-width:860px){.msgs{padding:var(--s6) var(--s7) var(--s5)}.composer{padding:var(--s3) var(--s7) var(--s4)}.suggest{left:var(--s7)}.chat-hd{padding:var(--s4) var(--s7)}}

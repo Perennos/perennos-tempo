@@ -103,6 +103,9 @@ struct Shared {
     graph: Mutex<GraphCache>,
     /// The engines' last probe for health, reused for 15 s (probing takes seconds per host).
     hosts_seen: Mutex<Option<(Instant, Value)>>,
+    // slash menu: the connected servers' tools (filled by the worker) and the catalog, kept 5 s
+    mcp_tools: Mutex<Vec<Value>>,
+    catalog: Mutex<Option<(Instant, Value)>>,
 }
 
 struct Job {
@@ -283,6 +286,21 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         rag.build_index(&cfg, false);
         lock(&shared.state).embed_ok = rag.embed_ok;
     }
+    {
+        // slash menu: what the connected servers offer, and which of it asks first
+        let mut mcp = agent.env.mcp.borrow_mut();
+        let tools: Vec<Value> = mcp
+            .load_catalog()
+            .into_iter()
+            .map(|(server, t)| {
+                let tool = t["name"].as_str().unwrap_or("");
+                json!({"server": server, "tool": tool, "name": crate::mcp::exposed(&server, tool),
+                    "description": t["description"].as_str().map(|d| crate::util::cap(d, 160)).unwrap_or_default(),
+                    "approval": mcp.needs_confirm(&server, tool)})
+            })
+            .collect();
+        *lock(&shared.mcp_tools) = tools;
+    }
     for job in rx {
         lock(&current).clone_from(&job.conv);
         let live = Rc::new(Live {
@@ -388,6 +406,8 @@ pub fn start(
         streams: AtomicUsize::new(0),
         graph: Mutex::new(None),
         hosts_seen: Mutex::new(None),
+        mcp_tools: Mutex::new(vec![]),
+        catalog: Mutex::new(None),
     });
     let w = shared.clone();
     std::thread::spawn(move || worker(w, servers, rx));
@@ -683,6 +703,23 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
 fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream) {
     let post = req.method == "POST";
     match (post, api) {
+        (false, "catalog") => {
+            // everything the slash menu lists; built at most every 5 s
+            let v = {
+                let mut seen = lock(&sh.catalog);
+                match seen.as_ref() {
+                    Some((t, v)) if t.elapsed() < Duration::from_secs(5) => v.clone(),
+                    _ => {
+                        let mcp = lock(&sh.mcp_tools).clone();
+                        let home = crate::tempo_home::tempo_home().dir;
+                        let v = crate::catalog::build(&sh.cfg, &home, &mcp);
+                        *seen = Some((Instant::now(), v.clone()));
+                        v
+                    }
+                }
+            };
+            send_json(&mut s, 200, &v);
+        }
         (false, "convs") => send_json(&mut s, 200, &json!(convs(&sh.cfg))),
         (true, "new") => {
             // {"model": "<tag>", "role": "<text>", "engine": "<url>"}, all optional: a Room
@@ -719,7 +756,15 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                 },
                 Some(_) => return refuse(&mut s, 400, "engine: a URL as text"),
             };
-            new_conv(sh, body["mode"] == "guest", model, role, engine, s)
+            // "format": a JSON Schema for the answers (the Conductor's band spec uses one)
+            let format = match body.get("format") {
+                None | Some(Value::Null) => None,
+                Some(f) if f.is_object() && f.to_string().len() <= 8192 => Some(f.clone()),
+                Some(_) => {
+                    return refuse(&mut s, 400, "format: a JSON Schema object, at most 8 KB")
+                }
+            };
+            new_conv(sh, body["mode"] == "guest", model, role, engine, format, s)
         }
 
         (true, "send") => {
@@ -924,6 +969,7 @@ fn new_conv(
     model: Option<String>,
     role: Option<String>,
     engine: Option<String>,
+    format: Option<Value>,
     mut s: TcpStream,
 ) {
     match Conv::open(&sh.cfg, None) {
@@ -932,7 +978,13 @@ fn new_conv(
             c.model = model;
             c.role = role;
             c.engine = engine;
-            if guest || c.model.is_some() || c.role.is_some() || c.engine.is_some() {
+            c.format = format;
+            if guest
+                || c.model.is_some()
+                || c.role.is_some()
+                || c.engine.is_some()
+                || c.format.is_some()
+            {
                 c.save();
             }
             lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
@@ -1279,6 +1331,28 @@ mod tests {
     }
 
     #[test]
+    fn the_catalog_lists_commands_tools_and_needs_the_key() {
+        let srv = server(vec![], |_, o| o.key = Some("k3y".repeat(20)));
+        let p = srv.addr.port();
+        let (c, _) = raw(
+            srv.addr,
+            &format!("GET /agent/catalog HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n"),
+        );
+        assert_eq!(c, 401);
+        let (c, b) = raw(
+            srv.addr,
+            &format!(
+                "GET /agent/catalog HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nX-Tempo-Key: {}\r\n\r\n",
+                "k3y".repeat(20)
+            ),
+        );
+        assert_eq!(c, 200);
+        let v: Value = serde_json::from_str(&b).unwrap();
+        let has = |list: &str, n: &str| v[list].as_array().unwrap().iter().any(|x| x["name"] == n);
+        assert!(has("commands", "/undo") && has("commands", "/soundcheck") && has("tools", "grep"));
+    }
+
+    #[test]
     fn guest_conversations_for_chat_rooms() {
         let srv = server(vec![text_resp("Hello from the room")], |_, _| {});
         let (_, h) = get(&srv, "/agent/health");
@@ -1412,6 +1486,29 @@ mod tests {
         )
         .unwrap();
         assert!(saved["engine"].is_null());
+    }
+
+    #[test]
+    fn a_conversation_can_be_opened_with_a_json_schema() {
+        let srv = server(vec![text_resp("{}")], |_, _| {});
+        let schema = json!({"type": "object", "required": ["name"]});
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "format": schema}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["format"], schema);
+        for bad in [json!("json"), json!(7), json!([1])] {
+            let (c, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "format": bad}));
+            assert_eq!(c, 400, "{v}");
+        }
     }
 
     #[test]
@@ -1678,6 +1775,8 @@ mod tests {
                 streams: AtomicUsize::new(0),
                 graph: Mutex::new(None),
                 hosts_seen: Mutex::new(None),
+                mcp_tools: Mutex::new(vec![]),
+                catalog: Mutex::new(None),
             };
             assert!(sh.ensure(&mut st, &conv));
             st.convs[&conv].events.clone()

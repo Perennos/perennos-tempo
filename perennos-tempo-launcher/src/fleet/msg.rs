@@ -1,10 +1,12 @@
 //! The fleet messenger: signed frames over persistent connections, and a durable outbox and inbox.
 //!
-//! A frame is `u32 length | 32-byte HMAC-SHA256 | header line | body`. The header is one line of
-//! compact JSON (kind, id, from, to, topic, time, nonce); the body is raw bytes, so a picture
-//! travels without being made bigger. The MAC covers header and body and uses the fleet key. A
-//! frame whose MAC is wrong, whose clock is more than two minutes off, whose nonce was seen, or
-//! that is addressed to someone else, closes the connection. One connection per peer is kept and
+//! A frame is `u32 length | 32-byte HMAC-SHA256 | 64-byte Ed25519 signature | header line | body`.
+//! The header is one line of compact JSON (kind, id, from, to, topic, time, nonce); the body is raw
+//! bytes, so a picture travels without being made bigger. The MAC covers header and body and uses
+//! the fleet key; the signature is the sender's own identity, which the receiver pinned when the
+//! two computers paired. A frame whose MAC is wrong, from a computer that is not pinned, signed by
+//! another identity, whose clock is more than two minutes off, whose nonce was seen, or that is
+//! addressed to someone else, closes the connection. One connection per peer is kept and
 //! reused, and many frames go out in one write with their answers read after.
 //!
 //! Messages are written to the outbox (SQLite, WAL) before anything else; they are sent at once
@@ -15,6 +17,7 @@
 use super::crypto::{hmac, same};
 use super::store::{now_ms, now_s, Machine, Paths};
 use crate::setup::json::{parse, J};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
@@ -49,7 +52,7 @@ pub struct Frame {
     pub body: Vec<u8>,
 }
 
-pub fn encode(key: &[u8; 32], f: &Frame) -> Vec<u8> {
+pub fn encode(key: &[u8; 32], sk: &SigningKey, f: &Frame) -> Vec<u8> {
     let mut o = vec![
         ("k".to_string(), J::s(&f.kind.to_string())),
         ("id".into(), J::s(&f.id)),
@@ -71,9 +74,11 @@ pub fn encode(key: &[u8; 32], f: &Frame) -> Vec<u8> {
     payload.push(b'\n');
     payload.extend_from_slice(&f.body);
     let mac = hmac(key, &[&payload]);
-    let mut out = Vec::with_capacity(payload.len() + 36);
-    out.extend_from_slice(&((payload.len() + 32) as u32).to_be_bytes());
+    let sig = sk.sign(&payload).to_bytes();
+    let mut out = Vec::with_capacity(payload.len() + 100);
+    out.extend_from_slice(&((payload.len() + 96) as u32).to_be_bytes());
     out.extend_from_slice(&mac);
+    out.extend_from_slice(&sig);
     out.extend_from_slice(&payload);
     out
 }
@@ -86,7 +91,10 @@ pub enum Bad {
     Refused(&'static str),
 }
 
-pub fn read_frame(r: &mut impl Read, key: &[u8; 32]) -> Result<Frame, Bad> {
+/// The pinned identity of a computer, by name.
+pub type Pins<'a> = &'a dyn Fn(&str) -> Option<VerifyingKey>;
+
+pub fn read_frame(r: &mut impl Read, key: &[u8; 32], pins: Pins) -> Result<Frame, Bad> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len) {
         Ok(()) => {}
@@ -94,13 +102,14 @@ pub fn read_frame(r: &mut impl Read, key: &[u8; 32]) -> Result<Frame, Bad> {
         Err(_) => return Err(Bad::Refused("read failed")),
     }
     let n = u32::from_be_bytes(len) as usize;
-    if !(34..=MAX_FRAME).contains(&n) {
+    if !(98..=MAX_FRAME).contains(&n) {
         return Err(Bad::Refused("frame size"));
     }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf)
         .map_err(|_| Bad::Refused("short frame"))?;
-    let (mac, payload) = buf.split_at(32);
+    let (mac, rest) = buf.split_at(32);
+    let (sig, payload) = rest.split_at(64);
     if !same(mac, &hmac(key, &[payload])) {
         return Err(Bad::Refused("wrong key"));
     }
@@ -113,6 +122,10 @@ pub fn read_frame(r: &mut impl Read, key: &[u8; 32]) -> Result<Frame, Bad> {
         .and_then(|t| parse(t).ok())
         .ok_or(Bad::Refused("header"))?;
     let s = |k: &str| h.str(k).unwrap_or("").to_string();
+    let vk = pins(&s("f")).ok_or(Bad::Refused("not a pinned computer"))?;
+    let sig = Signature::from_slice(sig).map_err(|_| Bad::Refused("signature"))?;
+    vk.verify(payload, &sig)
+        .map_err(|_| Bad::Refused("wrong identity"))?;
     Ok(Frame {
         kind: h.str("k").and_then(|k| k.chars().next()).unwrap_or('?'),
         id: s("id"),
@@ -172,7 +185,10 @@ struct Link {
 pub struct Node {
     pub paths: Paths,
     pub me: String,
-    pub key: [u8; 32],
+    /// The fleet key, read again when `fleet.key` changes (a rotation), checked every two seconds.
+    key: Mutex<KeyState>,
+    sk: SigningKey,
+    pins: Mutex<(Instant, HashMap<String, VerifyingKey>)>,
     db: Mutex<Connection>,
     guard: Mutex<Guard>,
     links: Mutex<HashMap<String, Arc<Mutex<Link>>>>,
@@ -183,6 +199,30 @@ pub struct Node {
     pub kick: (Mutex<bool>, Condvar),
     /// How long to wait for a connection to open.
     pub connect: Duration,
+}
+
+struct KeyState {
+    key: [u8; 32],
+    mtime: Option<std::time::SystemTime>,
+    checked: Instant,
+}
+
+fn key_mtime(p: &Paths) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p.file("fleet.key"))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// The identities pinned in fleet.json, by machine name.
+pub fn pins_of(p: &Paths) -> HashMap<String, VerifyingKey> {
+    super::store::load(p)
+        .machines
+        .into_iter()
+        .filter_map(|m| {
+            let k = <[u8; 32]>::try_from(super::crypto::unhex(&m.id)?.as_slice()).ok()?;
+            Some((m.name, VerifyingKey::from_bytes(&k).ok()?))
+        })
+        .collect()
 }
 
 pub fn backoff(tries: u32) -> u64 {
@@ -209,10 +249,17 @@ impl Node {
              CREATE INDEX IF NOT EXISTS inbox_topic ON inbox(topic, received);",
         )
         .map_err(|e| format!("fleet.db: {e}"))?;
+        let sk = super::pair::identity(paths)?;
         Ok(Arc::new(Node {
             paths: paths.clone(),
             me,
-            key,
+            key: Mutex::new(KeyState {
+                key,
+                mtime: key_mtime(paths),
+                checked: Instant::now(),
+            }),
+            sk,
+            pins: Mutex::new((Instant::now(), pins_of(paths))),
             db: Mutex::new(db),
             guard: Mutex::new(Guard::default()),
             links: Mutex::new(HashMap::new()),
@@ -222,6 +269,40 @@ impl Node {
             kick: (Mutex::new(false), Condvar::new()),
             connect: Duration::from_secs(1),
         }))
+    }
+
+    pub fn key(&self) -> [u8; 32] {
+        let mut g = lock(&self.key);
+        if g.checked.elapsed() > Duration::from_secs(2) {
+            g.checked = Instant::now();
+            let now = key_mtime(&self.paths);
+            if now != g.mtime {
+                g.mtime = now;
+                if let Some(k) = super::store::read_key(&self.paths) {
+                    g.key = k;
+                }
+            }
+        }
+        g.key
+    }
+
+    /// This computer's identity as a pinned peer would hold it (hex).
+    pub fn identity_hex(&self) -> String {
+        super::crypto::hex(self.sk.verifying_key().as_bytes())
+    }
+
+    /// Who `name` is, as pinned in fleet.json (read again when the list is two seconds old or
+    /// the name is not in it, so a computer paired a moment ago is known at once).
+    fn pin(&self, name: &str) -> Option<VerifyingKey> {
+        let mut g = lock(&self.pins);
+        if g.0.elapsed() > Duration::from_secs(2) || !g.1.contains_key(name) {
+            *g = (Instant::now(), pins_of(&self.paths));
+        }
+        g.1.get(name).copied()
+    }
+
+    fn encode(&self, f: &Frame) -> Vec<u8> {
+        encode(&self.key(), &self.sk, f)
     }
 
     fn next_id(&self) -> String {
@@ -316,6 +397,14 @@ impl Node {
         }
     }
 
+    /// Take back a message that was not delivered (a step handed to another machine instead).
+    pub fn cancel_queued(&self, peer: &str, topic: &str, needle: &str) {
+        let _ = lock(&self.db).execute(
+            "DELETE FROM outbox WHERE delivered=0 AND peer=?1 AND topic=?2 AND instr(body, ?3)>0",
+            params![peer, topic, needle.as_bytes()],
+        );
+    }
+
     pub fn tries(&self, id: &str) -> u32 {
         lock(&self.db)
             .query_row("SELECT tries FROM outbox WHERE id=?1", params![id], |r| {
@@ -372,11 +461,11 @@ impl Node {
                 let s = link.stream.as_mut().ok_or("no connection")?;
                 let mut wire = Vec::new();
                 for f in &frames[got.len()..] {
-                    wire.extend(encode(&self.key, f));
+                    wire.extend(self.encode(f));
                 }
                 s.get_mut().write_all(&wire).map_err(|e| e.to_string())?;
                 while got.len() < frames.len() {
-                    match read_frame(s, &self.key) {
+                    match read_frame(s, &self.key(), &|n| self.pin(n)) {
                         Ok(f) if f.kind == want => got.push(f),
                         Ok(_) => return Err("unexpected answer".into()),
                         Err(Bad::Closed) => return Err("the connection closed".into()),
@@ -501,6 +590,11 @@ impl Node {
         .unwrap_or_default()
     }
 
+    /// Drop the messages of one topic (the pieces of a file once it is put together).
+    pub fn forget(&self, topic: &str) {
+        let _ = lock(&self.db).execute("DELETE FROM inbox WHERE topic=?1", params![topic]);
+    }
+
     pub fn get(&self, id: &str) -> Option<Inbound> {
         lock(&self.db)
             .query_row(
@@ -565,7 +659,7 @@ impl Node {
         };
         let mut out: Vec<u8> = Vec::new();
         loop {
-            let f = match read_frame(&mut r, &self.key) {
+            let f = match read_frame(&mut r, &self.key(), &|n| self.pin(n)) {
                 Ok(f) => f,
                 Err(_) => return,
             };
@@ -573,10 +667,10 @@ impl Node {
                 return;
             }
             match f.kind {
-                'p' => out.extend(encode(&self.key, &self.frame('o', &f.from, "", &f.id, b""))),
+                'p' => out.extend(self.encode(&self.frame('o', &f.from, "", &f.id, b""))),
                 'm' => {
                     self.receive(&f);
-                    out.extend(encode(&self.key, &self.frame('a', &f.from, "", &f.id, b"")));
+                    out.extend(self.encode(&self.frame('a', &f.from, "", &f.id, b"")));
                 }
                 _ => return,
             }

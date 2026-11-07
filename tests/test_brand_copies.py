@@ -24,6 +24,8 @@ FILES = [
     "fonts/archivo-latin-variable.woff2",
     "fonts/instrument-serif-italic-latin.woff2",
     "fonts/jetbrains-mono-latin-700.woff2",
+    "fonts/bodoni-moda-latin-variable.woff2",
+    "fonts/bodoni-moda-italic-latin-variable.woff2",
 ]
 SHEETS = ["tempo-agent/gui-chat/chat.css", "perennos-tempo-vault/assets/app.css", "perennos-tempo-room/assets/app.css", "perennos-tempo-vault/assets/publish.css"]
 GREENS = ["#b8ff3b", "#4f8a00", "#46b35f", "#8fcf9a", "--learn"]
@@ -52,7 +54,7 @@ class BrandCopies(unittest.TestCase):
             text = read(rel).decode()
             self.assertIn("--ins-src:", text, rel)
             self.assertIn("--wm-src:", text, rel)
-            self.assertEqual(len(re.findall(r"@font-face", text)), 3, rel)
+            self.assertEqual(len(re.findall(r"@font-face", text)), 5, rel)
 
 
 if __name__ == "__main__":

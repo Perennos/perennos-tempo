@@ -10,14 +10,19 @@ pub mod jobs;
 pub mod mdns;
 pub mod msg;
 pub mod page;
+pub mod pair;
+pub mod route;
 pub mod scan;
 pub mod serve;
 pub mod service;
 pub mod ssh;
 pub mod store;
+pub mod tools;
 
 #[cfg(test)]
-mod tests;
+mod band_tests;
+#[cfg(test)]
+pub(crate) mod tests;
 
 use crate::setup::json::{parse, J};
 use crate::{allowed_remote_host, Ctx};
@@ -128,6 +133,16 @@ pub enum FleetCmd {
         name: Option<String>,
         peers: Vec<String>,
     },
+    Invite,
+    Join {
+        code: Option<String>,
+        controller: Option<String>,
+        yes: bool,
+    },
+    Allow(Vec<String>, bool),
+    Rotate {
+        yes: bool,
+    },
 }
 
 pub fn parse_args(rest: &[&str]) -> Result<FleetCmd, String> {
@@ -211,6 +226,41 @@ pub fn parse_args(rest: &[&str]) -> Result<FleetCmd, String> {
         Some("ping") => FleetCmd::Ping(one("ping")?),
         Some("page") => FleetCmd::Page,
         Some("apply-proposal") => FleetCmd::ApplyProposal,
+        Some("invite") => match &rest[1..] {
+            [] => FleetCmd::Invite,
+            _ => return Err("fleet invite takes nothing".into()),
+        },
+        Some("join") => {
+            let (mut code, mut controller, mut yes) = (None, None, false);
+            let mut it = rest[1..].iter();
+            while let Some(a) = it.next() {
+                match *a {
+                    "--code" => code = it.next().map(|s| s.to_string()),
+                    "--controller" => controller = it.next().map(|s| s.to_string()),
+                    "--yes" => yes = true,
+                    x => return Err(format!("fleet join: unexpected {x}")),
+                }
+            }
+            FleetCmd::Join {
+                code,
+                controller,
+                yes,
+            }
+        }
+        Some(w @ ("allow" | "deny")) => {
+            let list: Vec<String> = rest[1..].iter().map(|s| s.to_string()).collect();
+            if list.is_empty() || list.iter().any(|e| !tools::allow_entry_ok(e)) {
+                return Err(format!(
+                    "fleet {w} takes comfy_image, mcp:SERVER/TOOL or mcp:SERVER/*"
+                ));
+            }
+            FleetCmd::Allow(list, w == "allow")
+        }
+        Some("rotate") => match &rest[1..] {
+            [] => FleetCmd::Rotate { yes: false },
+            ["--yes"] => FleetCmd::Rotate { yes: true },
+            _ => return Err("fleet rotate takes only --yes".into()),
+        },
         Some("install-key") => {
             let (mut name, mut peers) = (None, vec![]);
             let mut it = rest[1..].iter();
@@ -723,8 +773,11 @@ pub fn setup_cmd(
     let me = store::load(p).me;
     let mut steps = ssh::setup_steps(&m.addr, with_launch);
     let mut peers = vec![];
+    let my_id = pair::identity(p)
+        .map(|sk| crypto::hex(sk.verifying_key().as_bytes()))
+        .unwrap_or_default();
     if let Some(a) = me_addr {
-        peers.push((me.clone(), a));
+        peers.push((me.clone(), format!("{a}#{my_id}")));
     }
     steps.insert(
         0,
@@ -768,12 +821,23 @@ pub fn setup_cmd(
         let _ = writeln!(out, "Nothing was run.");
         return 0;
     }
+    let mut remote_id = String::new();
     for (i, s) in steps.iter().enumerate() {
         let r = ssh::args_for(&target, &["sh".into(), "-s".into()])
             .and_then(|a| ssh::run(&a, Some(&s.script), Duration::from_secs(900)));
         match r {
             Ok(said) => {
-                let _ = write!(out, "{}", said.out);
+                // the other computer's identity, to pin: its line is kept, not shown
+                for l in said.out.lines() {
+                    match l.strip_prefix("identity=") {
+                        Some(id) if id.len() == 64 && crypto::unhex(id).is_some() => {
+                            remote_id = id.to_string()
+                        }
+                        _ => {
+                            let _ = writeln!(out, "{l}");
+                        }
+                    }
+                }
                 if !said.ok {
                     eprintln!(
                         "tempo-launch: fleet setup: step {} failed: {}",
@@ -795,6 +859,15 @@ pub fn setup_cmd(
         "both".into()
     };
     let code = add(p, pinned, &m.addr, Some(&role), Some(&m.name), out);
+    if code == 0 && !remote_id.is_empty() {
+        let _ = store::update(p, |f| {
+            if let Some(x) = f.machines.iter_mut().find(|x| x.name == m.name) {
+                x.id = remote_id.clone();
+            }
+        });
+    } else if code == 0 {
+        let _ = writeln!(out, "Its identity was not reported (an older Tempo there?), so its messages will not be trusted yet. Update Tempo there and run `fleet setup {}` again, or add it with `fleet invite` and `fleet join`.", m.name);
+    }
     if code == 0 {
         let _ = writeln!(out, "{} is set up and linked here.", m.name);
     }
@@ -830,10 +903,16 @@ pub fn install_key(
             f.me = store::clean_name(n);
         }
         for pe in peers {
-            if let Some((n, a)) = pe.split_once('=') {
+            // `name=address`, or `name=address#identity` (the identity to pin, 64 hex characters)
+            if let Some((n, rest)) = pe.split_once('=') {
+                let (a, id) = rest.split_once('#').unwrap_or((rest, ""));
                 let n = store::clean_name(n);
                 if allowed_remote_host(a) && !n.is_empty() && f.find(&n).is_none() {
                     f.machines.push(Machine::new(&n, a, "both"));
+                }
+                if let (Some(i), true) = (f.find(&n), id.len() == 64 && crypto::unhex(id).is_some())
+                {
+                    f.machines[i].id = id.to_string();
                 }
             }
         }
@@ -843,6 +922,14 @@ pub fn install_key(
         return 1;
     }
     let _ = writeln!(out, "The fleet key is in place.");
+    // this computer's identity, for the other side to pin
+    if let Ok(sk) = pair::identity(p) {
+        let _ = writeln!(
+            out,
+            "identity={}",
+            crypto::hex(sk.verifying_key().as_bytes())
+        );
+    }
     0
 }
 
@@ -1131,6 +1218,456 @@ pub fn apply_proposal(
     code
 }
 
+// ---- adding a computer: invite and join
+
+fn hello_answers(port: u16) -> bool {
+    let a = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    crate::http_get_at(
+        a,
+        &format!("127.0.0.1:{port}"),
+        "/hello",
+        Duration::from_millis(500),
+    )
+    .is_some_and(|(c, b)| c == 200 && b.contains("tempo-fleet"))
+}
+
+/// `fleet invite`: a code for the new computer, and the messenger running to hear it. With
+/// `wait`, stays until the code is used or runs out and says who joined.
+pub fn invite_cmd(p: &Paths, wait: bool, out: &mut dyn Write) -> i32 {
+    if let Err(e) = store::init_key(p).and_then(|_| pair::identity(p).map(|_| ())) {
+        eprintln!("tempo-launch: fleet invite: {e}");
+        return 1;
+    }
+    let port = store::fleet_port();
+    if !hello_answers(port) {
+        // the messenger has to be up to hear the new computer knock
+        if let Ok(exe) = std::env::current_exe() {
+            let mut c = std::process::Command::new(exe);
+            c.args(["fleet", "serve", "--quiet"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let _ = crate::spawn_hidden(&mut c);
+        }
+        for _ in 0..50 {
+            if hello_answers(port) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !hello_answers(port) {
+            eprintln!("tempo-launch: fleet invite: the messenger did not start. Run `tempo-launch fleet serve` in another window and try again.");
+            return 1;
+        }
+    }
+    let inv = match pair::create_invite(p, store::now_s()) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("tempo-launch: fleet invite: {e}");
+            return 1;
+        }
+    };
+    let _ = writeln!(
+        out,
+        "Add a computer to the band.\n\nInstall Tempo on the new computer, then run this there:\n\n    tempo-launch fleet join\n\nWhen it asks, give it this code:\n\n        {}\n\nIt works once, for 10 minutes, and only on your own network. Waiting here for it.",
+        inv.code
+    );
+    if !wait {
+        return 0;
+    }
+    let before: Vec<String> = store::load(p)
+        .machines
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    while store::now_s() < inv.expires && p.file(pair::INVITE_FILE).exists() {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let f = store::load(p);
+    let new = f.machines.iter().find(|m| !before.contains(&m.name));
+    match new {
+        Some(m) => {
+            let _ = writeln!(
+                out,
+                "\n{} joined the band as {}. The Conductor sees it already. Restart Tempo (`tempo-launch stop`, then `tempo-launch start`) so the agent can use its models too.",
+                m.name,
+                pair::role_words(&m.role)
+            );
+            0
+        }
+        None if store::now_s() >= inv.expires => {
+            let _ = writeln!(
+                out,
+                "\nThe code ran out. Run `tempo-launch fleet invite` for a fresh one."
+            );
+            1
+        }
+        None => {
+            let _ = writeln!(out, "\nThat code was used up by wrong tries. Run `tempo-launch fleet invite` for a fresh one.");
+            1
+        }
+    }
+}
+
+pub struct JoinOpts {
+    pub code: Option<String>,
+    pub controller: Option<String>,
+    pub yes: bool,
+}
+
+/// A main computer found on the network.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Candidate {
+    pub name: String,
+    pub addr: std::net::SocketAddr,
+    pub invite: bool,
+}
+
+/// Look for main computers: mDNS, then the same gentle sweep as `fleet scan`, asking only the
+/// fleet port for its `/hello`.
+pub fn discover() -> Vec<Candidate> {
+    let own = scan::local_addrs();
+    let mut targets = scan::ranges(&own);
+    let mut hosts: Vec<std::net::Ipv4Addr> = vec![];
+    for s in mdns::browse(
+        mdns::TEMPO,
+        &scan::listen_addrs(&own),
+        Duration::from_millis(900),
+    ) {
+        if let Some(ip) = s.ip.filter(|ip| scan::is_lan(*ip) || scan::is_tailnet(*ip)) {
+            hosts.push(ip);
+        }
+    }
+    let tail = scan::tailnet_peers(
+        &crate::setup::probe::run_with_timeout(
+            "tailscale",
+            &["status", "--json"],
+            Duration::from_secs(5),
+        )
+        .unwrap_or_default(),
+    );
+    hosts.extend(tail.iter().map(|t| t.0));
+    for h in hosts {
+        if !targets.contains(&h) {
+            targets.push(h);
+        }
+    }
+    targets.retain(|t| !own.contains(t));
+    probe_hello(&targets, store::fleet_port())
+}
+
+pub fn probe_hello(targets: &[std::net::Ipv4Addr], port: u16) -> Vec<Candidate> {
+    scan::open_ports(targets, &[port], scan::CONNECT, scan::AT_ONCE)
+        .into_iter()
+        .filter_map(|(ip, port)| {
+            let a = std::net::SocketAddr::from((ip, port));
+            let (c, b) =
+                crate::http_get_at(a, &format!("{ip}:{port}"), "/hello", Duration::from_secs(2))?;
+            (c == 200 && b.contains("\"app\":\"tempo-fleet\"")).then(|| Candidate {
+                name: crate::json_str(&b, "name").unwrap_or_else(|| ip.to_string()),
+                addr: a,
+                invite: b.contains("\"invite\":true"),
+            })
+        })
+        .collect()
+}
+
+/// How `join` runs a command or a script: what it is for, the program and its arguments, and a
+/// script for its input. True when it worked.
+pub type Exec<'a> = &'a mut dyn FnMut(&str, &[String], Option<&str>) -> bool;
+
+pub fn real_exec(_why: &str, argv: &[String], stdin: Option<&str>) -> bool {
+    let Some((prog, args)) = argv.split_first() else {
+        return false;
+    };
+    let mut c = std::process::Command::new(prog);
+    c.args(args);
+    if stdin.is_some() {
+        c.stdin(std::process::Stdio::piped());
+    }
+    match c.spawn() {
+        Ok(mut ch) => {
+            if let (Some(t), Some(mut si)) = (stdin, ch.stdin.take()) {
+                let _ = si.write_all(t.as_bytes());
+            }
+            ch.wait().is_ok_and(|s| s.success())
+        }
+        Err(_) => false,
+    }
+}
+
+/// After joining: this computer gets ready to play. Ollama listens on the private address (the
+/// engine only), Tempo sets itself up, and the messenger starts and is kept running.
+pub fn configure_self(ctx: &Ctx, role: &str, out: &mut dyn Write, exec: Exec) {
+    let own = scan::listen_addrs(&scan::local_addrs());
+    if role == "engine" {
+        match (own.first(), cfg!(unix)) {
+            (Some(a), true) => {
+                let _ = writeln!(out, "Starting Ollama on {a}, for your own network only...");
+                let step = &ssh::setup_steps(&a.to_string(), true)[0];
+                if !exec("ollama", &["sh".into(), "-s".into()], Some(&step.script)) {
+                    let _ = writeln!(
+                        out,
+                        "That did not work. By hand: OLLAMA_HOST={a}:11434 ollama serve"
+                    );
+                }
+            }
+            (Some(a), false) => {
+                let _ = writeln!(out, "To let the band use this computer's models, set OLLAMA_HOST to {a}:11434 (Windows: `setx OLLAMA_HOST {a}:11434`), then restart Ollama.");
+            }
+            _ => {}
+        }
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tempo-launch"));
+    let _ = writeln!(
+        out,
+        "Getting Tempo ready here (it fetches what is missing and asks nothing)..."
+    );
+    let argv = [
+        exe.to_string_lossy().into_owned(),
+        "setup".into(),
+        "--apply".into(),
+        "--yes".into(),
+    ];
+    if !exec("setup", &argv, None) {
+        let _ = writeln!(
+            out,
+            "Setup did not finish. Run `tempo-launch setup --apply` when you are ready."
+        );
+    }
+    schedule(ctx, &exe, false);
+    autostart(ctx);
+    let _ = writeln!(out, "The messenger is running here and starts with this computer. See the band on `tempo-launch fleet page`.");
+}
+
+/// `fleet join`: find the main computer, say who it is, ask for the code, and play along.
+pub fn join_cmd(
+    ctx: &Ctx,
+    p: &Paths,
+    o: &JoinOpts,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+    exec: Exec,
+) -> i32 {
+    let target = match &o.controller {
+        Some(c) => {
+            let (h, port) = c
+                .rsplit_once(':')
+                .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p)))
+                .unwrap_or((c.as_str(), store::fleet_port()));
+            match private_v4(h) {
+                Some(ip) => Candidate {
+                    name: h.to_string(),
+                    addr: std::net::SocketAddr::from((ip, port)),
+                    invite: true,
+                },
+                None => {
+                    eprintln!("tempo-launch: fleet join: {h} is not a home-network, tailnet or private address");
+                    return 2;
+                }
+            }
+        }
+        None => {
+            let _ = writeln!(out, "Looking for your main computer on your own network...");
+            let found = discover();
+            let ready: Vec<&Candidate> = found.iter().filter(|c| c.invite).collect();
+            match (ready.as_slice(), found.as_slice()) {
+                ([one], _) => (*one).clone(),
+                ([], []) => {
+                    let _ = writeln!(out, "Nobody answered. On your main computer run `tempo-launch fleet invite`, then try again. If it is on another network, use `tempo-launch fleet join --controller ADDRESS`.");
+                    return 1;
+                }
+                ([], _) => {
+                    let _ = writeln!(
+                        out,
+                        "Found {}, but it is not showing a code. Run `tempo-launch fleet invite` there, then try again.",
+                        found.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ")
+                    );
+                    return 1;
+                }
+                (many, _) => {
+                    for (i, c) in many.iter().enumerate() {
+                        let _ = writeln!(out, "  {}. {} ({})", i + 1, c.name, c.addr.ip());
+                    }
+                    let _ = write!(out, "Which one? ");
+                    let _ = out.flush();
+                    let mut l = String::new();
+                    let _ = input.read_line(&mut l);
+                    match l
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| many.get(n.wrapping_sub(1)))
+                    {
+                        Some(c) => (*c).clone(),
+                        None => {
+                            let _ = writeln!(out, "No such number. Nothing was done.");
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    };
+    if !o.yes && o.controller.is_none() {
+        let _ = write!(out, "Join {} ({})? [y/N] ", target.name, target.addr.ip());
+        let _ = out.flush();
+        let mut l = String::new();
+        let _ = input.read_line(&mut l);
+        if !matches!(l.trim().to_lowercase().as_str(), "y" | "yes") {
+            let _ = writeln!(out, "Okay, nothing was done.");
+            return 0;
+        }
+    }
+    let code = match &o.code {
+        Some(c) => c.clone(),
+        None => {
+            let _ = write!(out, "Type the code from the main computer's screen: ");
+            let _ = out.flush();
+            let mut l = String::new();
+            let _ = input.read_line(&mut l);
+            l
+        }
+    };
+    let probe = pair::probe_json(p);
+    let me = store::hostname();
+    match pair::join(p, target.addr, &code, &me, store::fleet_port(), &probe) {
+        Ok(j) => {
+            if let Err(e) = pair::keep(p, &j, &target.addr.ip().to_string()) {
+                eprintln!("tempo-launch: fleet join: {e}");
+                return 1;
+            }
+            let _ = writeln!(
+                out,
+                "Joined the band. {} knows this computer as {}, and gave it the part of {}.",
+                j.main,
+                j.you_are,
+                pair::role_words(&j.role)
+            );
+            configure_self(ctx, &j.role, out, exec);
+            0
+        }
+        Err(e) => {
+            eprintln!("tempo-launch: fleet join: {e}. Check the code on the other screen, or run `tempo-launch fleet invite` there for a fresh one.");
+            1
+        }
+    }
+}
+
+pub fn allow_cmd(p: &Paths, list: &[String], on: bool, out: &mut dyn Write) -> i32 {
+    let r = store::update(p, |f| {
+        for e in list {
+            f.allow.retain(|a| a != e);
+            if on {
+                f.allow.push(e.clone());
+            }
+        }
+        f.allow.clone()
+    });
+    match r {
+        Ok(a) => {
+            let _ = writeln!(
+                out,
+                "{} {}. This computer now offers the band: {}.",
+                if on { "Allowed" } else { "No longer offered" },
+                list.join(", "),
+                if a.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    a.join(", ")
+                }
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("tempo-launch: fleet: {e}");
+            1
+        }
+    }
+}
+
+/// `fleet rotate`: a new fleet key. It goes to each computer over your ssh first, then this
+/// computer switches. A computer it cannot reach keeps the old key and drops out of the
+/// conversation until `fleet setup NAME` (or a new `fleet invite`) gives it the new one.
+pub fn rotate_cmd(
+    p: &Paths,
+    yes: bool,
+    ask: &mut dyn FnMut(&str) -> bool,
+    out: &mut dyn Write,
+) -> i32 {
+    if store::read_key(p).is_none() {
+        eprintln!(
+            "tempo-launch: fleet rotate: there is no fleet key yet; run tempo-launch fleet init"
+        );
+        return 1;
+    }
+    let f = store::load(p);
+    let names: Vec<&str> = f.peers().map(|m| m.name.as_str()).collect();
+    let _ = writeln!(
+        out,
+        "A new fleet key will be sent over your ssh to: {}. Then this computer switches to it. Anyone who has the old key (a copied file, a lost laptop) is shut out once everyone has switched.",
+        if names.is_empty() { "nobody else yet".to_string() } else { names.join(", ") }
+    );
+    if !yes && !ask("Rotate the key? [y/N] ") {
+        let _ = writeln!(out, "Okay, the key stays as it is.");
+        return 0;
+    }
+    let key: [u8; 32] = crypto::random(32).try_into().unwrap_or([0; 32]);
+    let mut missed = Vec::new();
+    for m in f.peers() {
+        let sent = ssh_target(p, &m.name).and_then(|(t, _)| {
+            ssh::args_for(&t, &["sh".into(), "-s".into()])
+                .and_then(|a| {
+                    ssh::run(
+                        &a,
+                        Some(&install_script(&key, &m.name, &[])),
+                        Duration::from_secs(30),
+                    )
+                })
+                .and_then(|s| {
+                    if s.ok {
+                        Ok(())
+                    } else {
+                        Err(first_line(&s.err))
+                    }
+                })
+        });
+        match sent {
+            Ok(()) => {
+                let _ = writeln!(out, "  {} has the new key.", m.name);
+            }
+            Err(e) => {
+                let _ = writeln!(out, "  {} could not be reached over ssh ({e}).", m.name);
+                missed.push(m.name.clone());
+            }
+        }
+    }
+    if let Err(e) = std::fs::copy(p.file("fleet.key"), p.file("fleet.key.old"))
+        .and_then(|_| crypto::write_private(&p.file("fleet.key"), &key))
+    {
+        eprintln!("tempo-launch: fleet rotate: {e}");
+        return 1;
+    }
+    let _ = writeln!(
+        out,
+        "This computer has the new key; a running messenger picks it up within a couple of seconds."
+    );
+    if !missed.is_empty() {
+        let _ = writeln!(
+            out,
+            "Still on the old key: {}. Give each the new one with {}.",
+            missed.join(", "),
+            missed
+                .iter()
+                .map(|n| format!("`tempo-launch fleet setup {n}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        );
+        return 1;
+    }
+    0
+}
+
 // ---- starting with Tempo
 
 /// `tempo-launch start`: when the fleet has more than one machine, start the messenger (it ends
@@ -1217,6 +1754,25 @@ pub fn run(ctx: &Ctx, cmd: FleetCmd) -> i32 {
             }
         },
         FleetCmd::ApplyProposal => apply_proposal(&p, pinned, &mut ask, &mut out),
+        FleetCmd::Invite => invite_cmd(&p, true, &mut out),
+        FleetCmd::Join {
+            code,
+            controller,
+            yes,
+        } => join_cmd(
+            ctx,
+            &p,
+            &JoinOpts {
+                code,
+                controller,
+                yes,
+            },
+            &mut std::io::stdin().lock(),
+            &mut out,
+            &mut real_exec,
+        ),
+        FleetCmd::Allow(list, on) => allow_cmd(&p, &list, on, &mut out),
+        FleetCmd::Rotate { yes } => rotate_cmd(&p, yes, &mut ask, &mut out),
         FleetCmd::InstallKey { name, peers } => {
             let mut s = String::new();
             let _ = std::io::Read::read_to_string(&mut std::io::stdin().take(4096), &mut s);

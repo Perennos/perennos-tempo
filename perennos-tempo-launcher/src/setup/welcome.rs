@@ -68,10 +68,11 @@ pub fn code_command(exe: &Path) -> String {
 pub fn fleet_block(heading: &str) -> String {
     let pre = |s: &str| format!("<pre>{}</pre>", html_escape(s));
     format!(
-        "<h2>6. Your own computers</h2>\n<h3 class=\"bandname\">{}</h3>\n<p>Tempo can know every computer you own and talk between them. It looks for them on your own network only (never the internet) after you say yes, you choose which ones are in the fleet, and it can set one up over your own ssh. Nothing is sent anywhere else.</p>\n<p class=\"step\">Look for them (it explains what it does first and asks y/N):</p>\n{}<p class=\"step\">Add one, and see them all:</p>\n{}",
+        "<h2>6. Your own computers</h2>\n<h3 class=\"bandname\">{}</h3>\n<p>One strong computer needs nothing here: it plays on its own, and the plan above says so when it is true. If you have more than one, they can play together. Is this your main computer, or is it joining another?</p>\n<div class=\"choices\">\n<div class=\"card\"><h3>This is my main computer</h3><p>Add a computer in a minute. This shows a short code, good for 10 minutes and once only, and only on your own network.</p>{}<p class=\"small\">Then run <code>tempo-launch fleet join</code> on the new one and type the code.</p></div>\n<div class=\"card\"><h3>This one is joining another</h3><p>Run this here. It finds your main computer on the network, asks if it is the right one, and asks for the code. Then it sets itself up: models, tools and all.</p>{}</div>\n</div>\n<p class=\"step\">Already know the address? Look around first (it explains itself and asks y/N), or add one yourself, over your own ssh if you like:</p>\n{}<p class=\"small\">Nothing leaves your own network, and no computer is added without you.</p>",
         html_escape(heading),
-        pre("tempo-launch fleet scan"),
-        pre("tempo-launch fleet add <address or name>\ntempo-launch fleet page"),
+        pre("tempo-launch fleet invite"),
+        pre("tempo-launch fleet join"),
+        pre("tempo-launch fleet scan\ntempo-launch fleet add <address or name>\ntempo-launch fleet page"),
     )
 }
 
@@ -104,17 +105,18 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
         })
         .collect();
     format!(
-        r#"{top}<h1>Welcome to Perennos Tempo</h1>
+        r#"{top}<p class="tt-kicker">First run</p>
+<h1>Welcome to <em>Perennos Tempo</em></h1>
 <p class="lede">Tempo has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
 
-<h2>1. What this computer can run</h2>
+<h2>What this computer can run</h2>
 <p class="verdict">{verdict}</p>
 <ul>{fits}</ul>
 {note}
 <p><strong>What Tempo found</strong></p>
 <ul>{scan}</ul>
 
-<h2>2. Is this your only computer?</h2>
+<h2>Is this your only computer?</h2>
 <p>This page cannot take a click, so each answer shows the exact command. Run the one that fits, in a terminal.</p>
 <div class="choices">
 <div class="card">
@@ -136,7 +138,8 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
 </div>
 </div>
 
-<h2>3. Let your AI help you set up</h2>
+{ollama_tip}
+<h2>Let your AI help you set up</h2>
 <p>Add Tempo's setup helper to the AI you already use. It can read the scan and the plan above, talk you through the choice in step 2, and write a <em>proposal</em> for your settings. It cannot change anything: you apply a proposal yourself with <code>{apply_cmd}</code>, which shows what would change and asks y/N.</p>
 <h3>Claude Desktop</h3>
 <p>Open <code>claude_desktop_config.json</code> (Windows: <code>%APPDATA%\Claude\</code>; Mac: <code>~/Library/Application Support/Claude/</code>), add this inside the file (keep any servers already there), and restart Claude Desktop:</p>
@@ -151,13 +154,13 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
 <p>ChatGPT's connectors need an MCP server reachable over the internet, so it cannot start a program on your computer. Instead, run this, read what it prints, and paste it into your chat yourself:</p>
 {scan_cmd}
 
-<h2>4. What connecting an AI shares</h2>
+<h2>What connecting an AI shares</h2>
 <div class="share">
 <p><strong>Only the scan facts and the plan.</strong> The helper answers with this computer's system, CPU and graphics card class, memory, free disk, whether Ollama is there, the models Tempo recommends, and which Tempo apps are running. It never sends files, notes or chats, and its answers hold no user name, folder name, computer name or address.</p>
 <p>It is opt-in: nothing connects unless you add the entry to your AI yourself, and Tempo never calls out to any AI on its own. Once you do, what the helper answers becomes part of your conversation with that AI, so it reaches that AI's provider like anything else you type there. To stop, remove the entry from the AI's settings.</p>
 </div>
 
-<h2>5. Let the Conductor set up a band for your work</h2>
+<h2>Let the Conductor set up a band for your work</h2>
 <p>The <em>Tempo Conductor</em> ties you to your workflows and to your engines. A <em>band</em> is the team it sets up for your own workflow, all on this computer: for a social media account, say, a researcher, a writer, an editor and a scheduler. Each one shows up in Room as a teammate you can talk to like a person (<code>@writer</code>), and when you raise the baton a flow walks them one after another and files what they make as linked notes in your Vault. The Conductor also knows every engine you have (this computer's Ollama and each one you added with <code>tempo-launch link</code>) and cues each member on the one that suits the part: the writers on your strongest engine, the sorters on a quick one. They only talk and write drafts: they never post, send, buy or delete anything.</p>
 <p>See your engines first:</p>
 {band_engines}
@@ -172,14 +175,22 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
 
 {fleet}
 
+{crate_section}
 <p class="small">The longer plan, with sizes and licences, is in <code>setup.html</code> in the Tempo folder (<code>tempo-launch setup</code> shows it in the terminal). This page can be opened again with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
 {end}"#,
         top = brand::page_top("Welcome to Perennos Tempo", true, true),
         end = brand::PAGE_END,
+        crate_section = crate::bank::welcome_section(
+            &m.os,
+            m.ram_total_gb,
+            !matches!(m.gpu, super::probe::Gpu::None)
+        ),
         verdict = html_escape(&verdict(p)),
         fits = fits,
         note = note,
         scan = scan,
+        ollama_tip = super::apply::ollama_tip(&m.ollama)
+            .map_or(String::new(), |t| format!("<p class=\"small\">{}</p>", html_escape(&t))),
         single = pre("tempo-launch setup --apply"),
         engine = pre(&format!(
             "Windows:       setx OLLAMA_HOST \"<engine address>:{OLLAMA_DEFAULT_PORT}\"\nMac or Linux:  OLLAMA_HOST=<engine address>:{OLLAMA_DEFAULT_PORT} ollama serve"

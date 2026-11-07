@@ -75,6 +75,19 @@ pub trait Chat {
     /// the answer out.
     fn say(&self, model: &str, role: &str, text: &str) -> Result<String, String>;
 
+    /// `say`, for an answer that must follow `schema` (JSON Schema text, sent to the engine as
+    /// its `format`). A stand-in that cannot hold the model to one keeps this default.
+    fn say_json(
+        &self,
+        model: &str,
+        role: &str,
+        text: &str,
+        schema: &str,
+    ) -> Result<String, String> {
+        let _ = schema;
+        self.say(model, role, text)
+    }
+
     /// `say`, asking for the engine at address `engine` (empty: the agent's own order). The
     /// answer says which engine played it, when the agent can tell. A stand-in that cannot
     /// choose an engine keeps this default: it ignores the address and reports none.
@@ -764,6 +777,16 @@ impl Chat for RealChat<'_> {
             return r;
         }
         self.agent()?.say_on(engine, model, role, text)
+    }
+
+    fn say_json(
+        &self,
+        model: &str,
+        role: &str,
+        text: &str,
+        schema: &str,
+    ) -> Result<String, String> {
+        self.agent()?.say_json(model, role, text, schema)
     }
 }
 

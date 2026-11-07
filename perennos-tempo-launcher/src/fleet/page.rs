@@ -113,7 +113,7 @@ fn card(m: &Machine, now: u64) -> String {
 pub fn section(p: &Paths, with_heading: bool) -> String {
     let f: Fleet = store::load(p);
     let now = now_s();
-    let me_health = super::serve::health_with(0);
+    let me_health = super::serve::health_with(0, None);
     let me = format!(
         "<div class=\"card up\"><p class=\"inst up\">this computer</p><h3>{}</h3>{}</div>",
         html_escape(&f.me),
@@ -133,8 +133,9 @@ pub fn section(p: &Paths, with_heading: bool) -> String {
     } else {
         String::new()
     };
+    let add = "<div class=\"verdict\"><h3>Add a computer</h3><p>On this computer: <code>tempo-launch fleet invite</code>. It shows a short code, good for 10 minutes and once only. On the new computer, once Tempo is installed: <code>tempo-launch fleet join</code>, then type the code. It finds this one by itself, sets itself up, and shows up here with the part its hardware suits.</p></div>";
     format!(
-        "{CSS}{lede}<div class=\"cards\">{me}{others}</div>{hint}<p class=\"small\">Health is what each computer's last heartbeat said (every 10 seconds, while <code>tempo-launch fleet serve</code> runs). This page is static: a switch is the command under a machine.</p>",
+        "{CSS}{lede}<div class=\"cards\">{me}{others}</div>{add}{hint}<p class=\"small\">Health is what each computer's last heartbeat said (every 10 seconds, while <code>tempo-launch fleet serve</code> runs). This page is static: a switch is the command under a machine.</p>",
     )
 }
 

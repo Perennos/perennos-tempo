@@ -234,7 +234,7 @@ const INIT: &str = "Look at the folder {dir}: list it, glob for the build files,
 
 const COMPACT_SYSTEM: &str = "You summarize a conversation between an owner and their local agent so the agent can carry on without the full history. Keep: the goal; decisions made; facts learned (file paths, commands, results, errors); what is done; what is left; the next step. Plain text, under 300 words, no preamble.";
 
-const HELP_TEXT: &str = "Commands:
+pub(crate) const HELP_TEXT: &str = "Commands:
 /cd <folder>       work in another folder (commands, relative paths and AGENTS.md come from there)
 /mode [name]       default (asks before changes), accept-edits (file edits go ahead), plan (read and plan only)
 /plan [task]       plan mode; with a task, plan it
@@ -514,6 +514,9 @@ impl Agent {
         let mut host = self.env.mcp.borrow_mut();
         host.retry_failed();
         let mut sel: Vec<Offered> = host.select(text, builtins.len(), cfg.tool_cap);
+        // GUARD: a tool whose definition changed since it was pinned, or reads like instructions
+        // to the model, is offered only after the owner approves it (see mcp.rs)
+        sel = host.vet(sel, &|what, detail| self.env.ask(what, detail).is_ok());
         if cfg.prefix_stable {
             // Sticky and sorted: tools offered earlier in this conversation stay offered (the tool
             // block sits before the history in the prompt, so any change would void the cache);
@@ -539,6 +542,13 @@ impl Agent {
                 "name": o.exposed_name(),
                 "description": head_chars(o.tool.get("description").and_then(|d| d.as_str()).unwrap_or(""), 300).trim(),
                 "parameters": mcp::shrink(o.tool.get("inputSchema").unwrap_or(&Value::Null))}}));
+        }
+        // other computers' tools, offered by the fleet's messenger when one runs (none otherwise)
+        if !conv.guest {
+            tools.extend(crate::fleet_tools::schemas(
+                cfg,
+                conv.permission == Permission::Plan,
+            ));
         }
         let route = host.route();
         (tools, route, sel.len())
@@ -588,9 +598,16 @@ impl Agent {
         let key = conv.path.to_string_lossy().into_owned();
         let pin = conv.engine.clone();
         let pin = pin.as_deref();
+        // a conversation that was opened with a JSON Schema answers in that shape
+        let format = conv.format.clone();
+        let extra = ollama::Extra {
+            format: format.as_ref(),
+            conv: Some(&key),
+            ..Default::default()
+        };
         loop {
             let model = models[*idx].clone();
-            let mut last = match ollama::chat_pooled(
+            let mut last = match ollama::chat_pooled_with(
                 cfg,
                 Some(&key),
                 pin,
@@ -598,6 +615,7 @@ impl Agent {
                 messages,
                 tools,
                 think,
+                &extra,
                 &mut |t| hold.push(t, sink),
             ) {
                 Ok(r) => return Ok(r),
@@ -617,7 +635,7 @@ impl Agent {
                 conv.emit("status", &msg);
                 sink.status(&msg);
                 std::thread::sleep(backoff(cfg.retry_delay_ms, attempt as u32));
-                match ollama::chat_pooled(
+                match ollama::chat_pooled_with(
                     cfg,
                     Some(&key),
                     pin,
@@ -625,6 +643,7 @@ impl Agent {
                     messages,
                     tools,
                     think,
+                    &extra,
                     &mut |t| hold.push(t, sink),
                 ) {
                     Ok(r) => return Ok(r),
@@ -666,6 +685,27 @@ impl Agent {
         };
         let r = if Env::is_builtin(name) {
             self.env.run_builtin(conv, name, args)
+        } else if let Some(remote) = crate::fleet_tools::find(name) {
+            // a tool on another computer is held to the same rules as one here
+            let cfg = self.cfg();
+            if conv.permission == Permission::Plan && !remote.read_only {
+                return "refused: plan mode only reads, and this tool on another computer may change things; put it in the plan".into();
+            }
+            if crate::fleet_tools::blocked(cfg, &remote) {
+                return format!("refused: {name} is on your deny list");
+            }
+            let asked = if crate::fleet_tools::needs_confirm(cfg, &remote) {
+                self.env.ask(
+                    &format!("fleet {}:{}:{}", remote.node, remote.server, remote.tool),
+                    &args.to_string(),
+                )
+            } else {
+                Ok(())
+            };
+            match asked {
+                Err(no) => no,
+                Ok(()) => crate::fleet_tools::run_remote(cfg, &remote, args),
+            }
         } else if let Some((srv, tn)) = route.get(name) {
             if conv.permission == Permission::Plan
                 && !self
@@ -686,11 +726,15 @@ impl Agent {
             if let Err(no) = asked {
                 no
             } else {
-                self.env
+                let r = self
+                    .env
                     .mcp
                     .borrow_mut()
                     .call(srv, tn, args)
-                    .unwrap_or_else(|e| format!("ERROR: {e}"))
+                    .unwrap_or_else(|e| format!("ERROR: {e}"));
+                // GUARD: what an unmarked server says is untrusted text (see tools.rs)
+                self.env.note_mcp_result(conv, srv);
+                r
             }
         } else {
             format!("unknown tool {name}")
@@ -1114,6 +1158,12 @@ impl Agent {
         let (mut tools, mut route, mut n_mcp) = (vec![], HashMap::new(), 0);
         if lane == Lane::Heavy && !conv.guest {
             (tools, route, n_mcp) = self.tools_for(text, conv);
+            // GUARD: a second server that took another's tool name was refused; say so
+            let refused = self.env.mcp.borrow_mut().take_refusals();
+            for m in refused {
+                conv.emit("status", &m);
+                sink.status(&m);
+            }
         }
         let mut models: Vec<String> = if lane == Lane::Heavy || self.cfg().fast_models.is_empty() {
             self.heavy_models(conv)
@@ -1248,6 +1298,11 @@ impl Agent {
                     continue;
                 }
                 let r = self.run_tool(conv, &route, &name, &args);
+                // GUARD: the first time this turn takes in something untrusted, say so once
+                if let Some(m) = self.env.take_taint_notice(conv) {
+                    conv.emit("status", m);
+                    sink.status(m);
+                }
                 // after a call that may change things, earlier reads are stale: let them run again
                 if CHANGES.contains(&name.as_str())
                     || name == "run_command"
@@ -1888,6 +1943,43 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(last["content"], "unknown tool nope_tool");
+    }
+
+    #[test]
+    fn num_ctx_stays_put_across_the_turns_of_a_conversation() {
+        let m = Mock::start(chat_script(vec![
+            text_resp("one"),
+            text_resp("two"),
+            text_resp("three"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| c.default_num_ctx = 32768);
+        for q in ["hello", "and a longer follow-up question", "thanks"] {
+            a.turn(&mut conv, q, &mut VecSink::default()).unwrap();
+        }
+        let ctx: Vec<u64> = m
+            .bodies("/api/chat")
+            .iter()
+            .map(|b| b["options"]["num_ctx"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ctx.len(), 3);
+        assert!(ctx.iter().all(|n| *n == ctx[0]), "{ctx:?}");
+        assert!(m
+            .bodies("/api/chat")
+            .iter()
+            .all(|b| b["keep_alive"] == "60m"));
+    }
+
+    #[test]
+    fn a_conversation_opened_with_a_schema_asks_for_it_every_turn() {
+        let m = Mock::start(chat_script(vec![text_resp("{}"), text_resp("{}")]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        let schema = json!({"type": "object", "required": ["name"]});
+        conv.format = Some(schema.clone());
+        a.turn(&mut conv, "one", &mut VecSink::default()).unwrap();
+        a.turn(&mut conv, "two", &mut VecSink::default()).unwrap();
+        for b in m.bodies("/api/chat") {
+            assert_eq!(b["format"], schema);
+        }
     }
 
     #[test]
@@ -2760,5 +2852,108 @@ mod tests {
             .to_string();
         assert!(sys.contains("[facts.md] The launch date is the fourth of May."));
         assert!(m.bodies("/api/embed").len() <= 1);
+    }
+
+    struct Say(bool, std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl crate::conv::Confirm for Say {
+        fn confirm(&self, what: &str, _: &str) -> bool {
+            self.1.lock().unwrap().push(what.to_string());
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_tool_on_another_computer_asks_first_and_obeys_plan_mode_and_the_deny_list() {
+        use crate::fleet_tools::tests::{fake_messenger, ENV};
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tmpdir("fleet-agent-home");
+        std::fs::write(home.join("fleet-local.token"), "t".repeat(64)).unwrap();
+        let (port, _seen, calls) = fake_messenger(vec![]);
+        std::env::set_var("TEMPO_FLEET_PORT", port.to_string());
+        std::env::set_var("TEMPO_LAUNCH_HOME", &home);
+        crate::fleet_tools::forget_view();
+        let make = |yes: bool, tweak: &dyn Fn(&mut Config)| {
+            let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let d = tmpdir("agent-fleet");
+            let mut c = Config::defaults(Some(d.to_string_lossy().into_owned()));
+            tweak(&mut c);
+            let conv = Conv::open(&c, Some("c1")).unwrap();
+            let env = Env::new(
+                c.clone(),
+                Box::new(Say(yes, asked.clone())),
+                McpHost::empty(&c),
+            );
+            (Agent::new(env), conv, asked)
+        };
+        let route = HashMap::new();
+        let append = "studio-box__notes__append";
+        let search = "studio-box__notes__search";
+        // the model is offered both, under their long names
+        let (a, mut conv, _) = make(true, &|_| {});
+        let (tools, _, _) = a.tools_for("notes", &mut conv);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&append) && names.contains(&search),
+            "{names:?}"
+        );
+        // a tool that writes asks first; a no means nothing is sent
+        let (a, conv, asked) = make(false, &|_| {});
+        let r = a.run_tool(&conv, &route, append, &json!({"text": "x"}));
+        assert_eq!(r, "denied by user");
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["fleet studio-box:notes:append"]
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // a yes sends it, and the answer is redacted
+        let (a, conv, _) = make(true, &|_| {});
+        let r = a.run_tool(&conv, &route, append, &json!({"text": "x"}));
+        assert!(
+            r.contains("Ran on studio-box") && !r.contains("hunter2xyz"),
+            "{r}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // a read-only one does not ask
+        let (a, conv, asked) = make(false, &|_| {});
+        let r = a.run_tool(&conv, &route, search, &json!({"q": "x"}));
+        assert!(
+            asked.lock().unwrap().is_empty() && r.contains("Ran on studio-box"),
+            "{r}"
+        );
+        // plan mode: the writing one is refused unasked, and not even offered
+        let (a, mut conv, asked) = make(true, &|_| {});
+        conv.permission = Permission::Plan;
+        let r = a.run_tool(&conv, &route, append, &json!({}));
+        assert!(
+            r.contains("plan mode") && asked.lock().unwrap().is_empty(),
+            "{r}"
+        );
+        let (tools, _, _) = a.tools_for("notes", &mut conv);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(
+            !names.contains(&append) && names.contains(&search),
+            "{names:?}"
+        );
+        // the deny list: refused, unasked, and not offered
+        let (a, mut conv, asked) = make(true, &|c| {
+            c.mcp_blocked.insert("notes".into(), vec!["append".into()]);
+        });
+        let r = a.run_tool(&conv, &route, append, &json!({}));
+        assert!(
+            r.contains("deny list") && asked.lock().unwrap().is_empty(),
+            "{r}"
+        );
+        let (tools, _, _) = a.tools_for("notes", &mut conv);
+        assert!(!tools.iter().any(|t| t["function"]["name"] == append));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        std::env::remove_var("TEMPO_FLEET_PORT");
+        std::env::remove_var("TEMPO_LAUNCH_HOME");
+        crate::fleet_tools::forget_view();
     }
 }

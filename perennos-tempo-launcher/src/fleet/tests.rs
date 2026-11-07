@@ -2,6 +2,7 @@ use super::msg::{encode, read_frame, Bad, Frame, Node};
 use super::serve::{self, Handle};
 use super::store::{self, Machine, Paths};
 use super::*;
+use ed25519_dalek::SigningKey;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -56,12 +57,20 @@ pub fn rig(name: &str, key: [u8; 32]) -> Rig {
 }
 
 /// Tell `a` about `b` (as a fleet machine on this computer's own address).
-pub fn know(a: &Rig, b_name: &str, b_port: u16) -> Machine {
+pub fn know(a: &Rig, b_name: &str, b_port: u16, id: &str) -> Machine {
     let mut m = Machine::new(b_name, "127.0.0.1", "both");
     m.port = b_port;
+    m.id = id.to_string();
     let mm = m.clone();
     store::update(&a.paths, |f| f.machines.push(mm)).unwrap();
     m
+}
+
+/// Each knows and pins the other: what pairing does. Returns `b` as `a` knows it.
+pub fn link(a: &Rig, b: &Rig) -> Machine {
+    let mb = know(a, &b.node.me, b.port, &b.node.identity_hex());
+    know(b, &a.node.me, a.port, &a.node.identity_hex());
+    mb
 }
 
 const KEY: [u8; 32] = [7; 32];
@@ -310,6 +319,7 @@ case "$*" in
   *"sh -s"*)
     input=$(cat)
     printf '%s\n--END--\n' "$input" >> "$d/stdin"
+    case "$input" in *install-key*) printf 'The fleet key is in place.\nidentity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';; esac
     case "$input" in *nproc*) printf 'os=Linux x86_64\ncpus=8\nram_kb=16777216\ngpu=NVIDIA Test GPU, 8192 MiB\ndisk_kb=104857600\nlaunch=tempo-launch 2.0.1\nollama=ollama version is 0.5.1\n';; esac;;
   *) echo "ran: $*";;
 esac
@@ -430,13 +440,12 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
         "{said}"
     );
     assert!(said.contains("Nothing was run"));
-    let before = lines_with(&dir, "stdin", "install-key").len();
     // a yes
     let (c, said) = out_of(|o| setup_cmd(&p, None, "setupbox", true, &mut |_| true, o));
     assert_eq!(c, 0, "{said}");
     let key = crypto::hex(&store::read_key(&p).unwrap());
     let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
-    assert!(stdin.matches("install-key --name setupbox").count() > before);
+    assert!(stdin.contains("install-key --name setupbox"));
     assert!(stdin.contains(&key), "the key goes in ssh's input");
     assert!(
         !std::fs::read_to_string(dir.join("log"))
@@ -445,6 +454,12 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
         "never on a command line"
     );
     assert!(said.contains("is set up and linked here"));
+    assert_eq!(
+        store::load(&p).machines[0].id,
+        "a".repeat(64),
+        "its identity was pinned"
+    );
+    assert!(!said.contains("identity="));
     assert!(store::load(&p).machines[0].enabled);
     let mode_ok = {
         #[cfg(unix)]
@@ -505,33 +520,70 @@ fn a_frame_round_trips_and_a_wrong_key_or_a_flipped_byte_is_refused() {
         eph: false,
         body: vec![0, 1, 2, 255, b'\n', 10],
     };
-    let wire = encode(&KEY, &f);
-    assert_eq!(read_frame(&mut &wire[..], &KEY).unwrap(), f);
+    let sk = SigningKey::from_bytes(&[5; 32]);
+    let vk = sk.verifying_key();
+    let pins = |n: &str| (n == "a").then_some(vk);
+    let wire = encode(&KEY, &sk, &f);
+    assert_eq!(read_frame(&mut &wire[..], &KEY, &pins).unwrap(), f);
     assert_eq!(
-        read_frame(&mut &wire[..], &[8; 32]),
+        read_frame(&mut &wire[..], &[8; 32], &pins),
         Err(Bad::Refused("wrong key"))
     );
     let mut bad = wire.clone();
     *bad.last_mut().unwrap() ^= 1;
     assert_eq!(
-        read_frame(&mut &bad[..], &KEY),
+        read_frame(&mut &bad[..], &KEY, &pins),
         Err(Bad::Refused("wrong key"))
     );
-    assert_eq!(read_frame(&mut &b""[..], &KEY), Err(Bad::Closed));
+    assert_eq!(read_frame(&mut &b""[..], &KEY, &pins), Err(Bad::Closed));
     // a length that is too big is refused before anything is read
     assert_eq!(
-        read_frame(&mut &[0xff, 0xff, 0xff, 0xff][..], &KEY),
+        read_frame(&mut &[0xff, 0xff, 0xff, 0xff][..], &KEY, &pins),
         Err(Bad::Refused("frame size"))
+    );
+    // the right fleet key, but a name nobody pinned, or an identity that is not the pinned one
+    assert_eq!(
+        read_frame(&mut &wire[..], &KEY, &|_| None),
+        Err(Bad::Refused("not a pinned computer"))
+    );
+    let other = SigningKey::from_bytes(&[6; 32]).verifying_key();
+    assert_eq!(
+        read_frame(&mut &wire[..], &KEY, &|_| Some(other)),
+        Err(Bad::Refused("wrong identity"))
     );
 }
 
+fn vk_of(hex: &str) -> ed25519_dalek::VerifyingKey {
+    let k = <[u8; 32]>::try_from(crypto::unhex(hex).unwrap().as_slice()).unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&k).unwrap()
+}
+
+fn raw_sk() -> SigningKey {
+    SigningKey::from_bytes(&[9; 32])
+}
+
 fn raw_frame(to: &str, key: &[u8; 32], ts: u64, nonce: &str, topic: &str, id: &str) -> Vec<u8> {
+    raw_frame_as("raw", &raw_sk(), to, key, ts, nonce, topic, id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn raw_frame_as(
+    from: &str,
+    sk: &SigningKey,
+    to: &str,
+    key: &[u8; 32],
+    ts: u64,
+    nonce: &str,
+    topic: &str,
+    id: &str,
+) -> Vec<u8> {
     encode(
         key,
+        sk,
         &Frame {
             kind: 'm',
             id: id.into(),
-            from: "raw".into(),
+            from: from.into(),
             to: to.into(),
             topic: topic.into(),
             ts,
@@ -543,44 +595,68 @@ fn raw_frame(to: &str, key: &[u8; 32], ts: u64, nonce: &str, topic: &str, id: &s
 }
 
 /// Send bytes on a new connection; whether an answer frame came back.
-fn answered(port: u16, wire: &[u8]) -> bool {
+fn answered(port: u16, wire: &[u8], who: &Rig) -> bool {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     s.write_all(wire).unwrap();
-    read_frame(&mut s, &KEY).is_ok()
+    let vk = vk_of(&who.node.identity_hex());
+    read_frame(&mut s, &KEY, &|_| Some(vk)).is_ok()
 }
 
 #[test]
 fn only_a_good_new_frame_for_this_node_is_answered() {
     let b = rig("recv", KEY);
+    // the raw sender is a pinned computer of b's fleet
+    let mut raw = Machine::new("raw", "127.0.0.1", "both");
+    raw.id = crypto::hex(raw_sk().verifying_key().as_bytes());
+    store::update(&b.paths, |f| f.machines.push(raw)).unwrap();
     let now = store::now_ms();
     assert!(answered(
         b.port,
-        &raw_frame("recv", &KEY, now, "n-ok", "note", "m1")
+        &raw_frame("recv", &KEY, now, "n-ok", "note", "m1"),
+        &b
     ));
     // the same frame again is a replay
     assert!(!answered(
         b.port,
-        &raw_frame("recv", &KEY, now, "n-ok", "note", "m1")
+        &raw_frame("recv", &KEY, now, "n-ok", "note", "m1"),
+        &b
     ));
     // a peer without the key is dropped without an answer
     assert!(!answered(
         b.port,
-        &raw_frame("recv", &[9; 32], now, "n-2", "note", "m2")
+        &raw_frame("recv", &[9; 32], now, "n-2", "note", "m2"),
+        &b
     ));
     // addressed to someone else
     assert!(!answered(
         b.port,
-        &raw_frame("other", &KEY, now, "n-3", "note", "m3")
+        &raw_frame("other", &KEY, now, "n-3", "note", "m3"),
+        &b
     ));
     // a clock far off
     assert!(!answered(
         b.port,
-        &raw_frame("recv", &KEY, now - 10 * 60_000, "n-4", "note", "m4")
+        &raw_frame("recv", &KEY, now - 10 * 60_000, "n-4", "note", "m4"),
+        &b
     ));
     assert!(!answered(
         b.port,
-        &raw_frame("recv", &KEY, now + 10 * 60_000, "n-5", "note", "m5")
+        &raw_frame("recv", &KEY, now + 10 * 60_000, "n-5", "note", "m5"),
+        &b
+    ));
+    // an impostor: the fleet key, the pinned name, somebody else's identity
+    let fake = SigningKey::from_bytes(&[10; 32]);
+    assert!(!answered(
+        b.port,
+        &raw_frame_as("raw", &fake, "recv", &KEY, now, "n-6", "note", "m6"),
+        &b
+    ));
+    // a computer nobody pinned, with the fleet key
+    assert!(!answered(
+        b.port,
+        &raw_frame_as("stranger", &fake, "recv", &KEY, now, "n-7", "note", "m7"),
+        &b
     ));
     // only the good one is in the inbox
     let ids: Vec<String> = b.node.inbox(None, 10).into_iter().map(|m| m.id).collect();
@@ -591,7 +667,7 @@ fn only_a_good_new_frame_for_this_node_is_answered() {
 fn a_message_reaches_the_other_node_over_one_reused_connection() {
     let a = rig("alpha", KEY);
     let b = rig("beta", KEY);
-    let to_b = know(&a, "beta", b.port);
+    let to_b = link(&a, &b);
     for i in 0..5 {
         assert_eq!(
             a.node.send(&to_b, "note", format!("hello {i}").as_bytes()),
@@ -620,7 +696,21 @@ fn a_message_reaches_the_other_node_over_one_reused_connection() {
 fn nothing_is_lost_when_the_peer_is_down_and_a_retry_is_never_a_second_message() {
     let a = rig("sender", KEY);
     let port = free_port();
-    let to_b = know(&a, "later", port);
+    let bpaths = paths("later");
+    store::update(&bpaths, |f| f.me = "later".into()).unwrap();
+    let bid = crypto::hex(
+        super::pair::identity(&bpaths)
+            .unwrap()
+            .verifying_key()
+            .as_bytes(),
+    );
+    let to_b = know(&a, "later", port, &bid);
+    store::update(&bpaths, |f| {
+        let mut m = Machine::new("sender", "127.0.0.1", "both");
+        m.id = a.node.identity_hex();
+        f.machines.push(m);
+    })
+    .unwrap();
     // the peer is down: the message is kept, tried, and scheduled again with backoff
     assert_eq!(a.node.send(&to_b, "note", b"for later"), Ok(false));
     assert_eq!(a.node.queued(Some("later")), 1);
@@ -640,8 +730,6 @@ fn nothing_is_lost_when_the_peer_is_down_and_a_retry_is_never_a_second_message()
     assert_eq!(a2.queued(Some("later")), 1);
 
     // the peer comes up on that port
-    let bpaths = self::paths("later");
-    store::update(&bpaths, |f| f.me = "later".into()).unwrap();
     let bnode = Node::open(&bpaths, KEY).unwrap();
     let _h = serve::listen(&bnode, &[SocketAddr::from(([127, 0, 0, 1], port))]).unwrap();
     a2.retry_now();
@@ -670,7 +758,7 @@ fn lock_first_outbox(a: &Rig) -> String {
 fn a_stale_connection_is_replaced_without_losing_the_message() {
     let a = rig("stale-a", KEY);
     let mut b = rig("stale-b", KEY);
-    let to_b = know(&a, "stale-b", b.port);
+    let to_b = link(&a, &b);
     assert_eq!(a.node.send(&to_b, "note", b"one"), Ok(true));
     // b goes away and comes back on the same port (a laptop that slept): a's open connection is dead
     b.handle.take().unwrap().stop();
@@ -686,9 +774,8 @@ fn heartbeats_update_fleet_json_and_the_fleet_page_reads_them() {
     let a = rig("hb-a", KEY);
     let b = rig("hb-b", KEY);
     // b's fleet knows a, and runs the real senders; a is only listening
-    let to_a = know(&b, "hb-a", a.port);
+    let to_a = link(&b, &a);
     let _ = to_a;
-    know(&a, "hb-b", b.port);
     let stop = serve::start(&b.node, &[SocketAddr::from(([127, 0, 0, 1], free_port()))]).unwrap();
     let end = std::time::Instant::now() + Duration::from_secs(10);
     let m = loop {
@@ -763,7 +850,7 @@ fn the_listener_is_never_on_all_addresses() {
 fn messenger_latency_and_throughput_on_this_computer() {
     let a = rig("perf-a", KEY);
     let b = rig("perf-b", KEY);
-    let to_b = know(&a, "perf-b", b.port);
+    let to_b = link(&a, &b);
     // latency: one message at a time, written to the outbox, sent, stored by the receiver, answered
     a.node.send(&to_b, "note", b"warm up").unwrap();
     let mut us: Vec<u64> = Vec::new();
@@ -850,4 +937,54 @@ fn a_proposal_is_applied_only_after_a_yes_and_resolves_labels_to_names() {
     )
     .is_err());
     assert!(write_proposal(&p, &parse("{}").unwrap(), "", 1).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn rotate_sends_the_new_key_over_ssh_then_switches_and_names_who_it_missed() {
+    let dir = fake_ssh();
+    let p = paths("rotate");
+    store::init_key(&p).unwrap();
+    let old = store::read_key(&p).unwrap();
+    store::update(&p, |f| {
+        f.machines
+            .push(Machine::new("rotbox", "10.0.0.41", "engine"));
+        f.machines
+            .push(Machine::new("lostbox", "10.0.0.33", "engine"));
+    })
+    .unwrap();
+    // a no changes nothing
+    let (c, _) = out_of(|o| rotate_cmd(&p, false, &mut |_| false, o));
+    assert_eq!((c, store::read_key(&p)), (0, Some(old)));
+    let (c, said) = out_of(|o| rotate_cmd(&p, true, &mut |_| true, o));
+    assert_eq!(c, 1, "one computer could not be reached: {said}");
+    let new = store::read_key(&p).unwrap();
+    assert_ne!(new, old);
+    assert_eq!(
+        std::fs::read(p.file("fleet.key.old")).unwrap(),
+        old.to_vec()
+    );
+    assert!(
+        said.contains("rotbox has the new key") && said.contains("lostbox could not be reached"),
+        "{said}"
+    );
+    assert!(said.contains("fleet setup lostbox"), "{said}");
+    let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
+    assert!(stdin.contains(&crypto::hex(&new)));
+    assert!(!std::fs::read_to_string(dir.join("log"))
+        .unwrap()
+        .contains(&crypto::hex(&new)));
+}
+
+#[test]
+fn a_running_messenger_picks_up_a_new_key_without_a_restart() {
+    let a = rig("rot-a", KEY);
+    assert_eq!(a.node.key(), KEY);
+    crypto::write_private(&a.paths.file("fleet.key"), &[3u8; 32]).unwrap();
+    // the file is looked at every two seconds
+    let end = std::time::Instant::now() + Duration::from_secs(6);
+    while a.node.key() != [3u8; 32] && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(a.node.key(), [3u8; 32]);
 }

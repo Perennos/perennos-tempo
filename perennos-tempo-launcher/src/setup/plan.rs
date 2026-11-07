@@ -589,6 +589,29 @@ fn choose_role(
     Some(make_pick(role, c, run, m, note))
 }
 
+/// When this computer is strong enough to play alone: the thinking model sits in its graphics
+/// card (or its Apple chip's memory) with room to spare, and the memory is big. Says so plainly,
+/// so nobody sets up a fleet they do not need.
+pub fn single_note(m: &Machine, p: &Plan) -> Option<String> {
+    let h = p.pick("heavy")?;
+    let need = h.gb.unwrap_or(0.0) * 1.3 + 2.0;
+    let ram = m.ram_total_gb.unwrap_or(0.0);
+    let room = match &m.gpu {
+        Gpu::Nvidia { total_gb, .. } if h.run == Run::Gpu && *total_gb >= need.max(16.0) => {
+            format!("its {total_gb:.0} GB graphics card")
+        }
+        Gpu::Apple { .. } if ram >= (need * 2.0).max(32.0) => "its shared memory".to_string(),
+        _ => return None,
+    };
+    (ram >= 32.0).then(|| {
+        format!(
+            "This computer is strong enough to play on its own: {room} holds {} ({:.1} GB) with room to spare, and it has {ram:.0} GB of memory. Stay a one-machine band. If that changes, adding a computer is one command away: tempo-launch fleet invite.",
+            h.model,
+            h.gb.unwrap_or(0.0)
+        )
+    })
+}
+
 pub fn summary(m: &Machine) -> Vec<String> {
     let mut s = vec![format!("{} {}, {} logical CPUs", m.os, m.arch, m.cpus)];
     s.push(match (m.ram_total_gb, m.ram_avail_gb) {

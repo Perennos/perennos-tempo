@@ -1,8 +1,9 @@
 //! `tempo-launch fleet serve`: the messenger's listener, its senders and its heartbeat.
 //!
 //! It listens only on this computer's private and tailnet addresses and on 127.0.0.1, never on
-//! 0.0.0.0. One port carries two things, told apart by the first bytes: signed frames, a plain
-//! HTTP GET (`/hello` to any private address; `/fleet.json` to this computer only).
+//! 0.0.0.0. One port carries three things, told apart by the first bytes: signed frames, a plain
+//! HTTP (`/hello` to any private address; `/fleet.json` and `POST /call` to this computer only) and
+//! pairing, which starts with `PAIR`.
 
 use super::msg::{lock, Node};
 use super::store::{self, now_s, Fleet, Paths};
@@ -15,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
-/// A machine that has not spoken for this long is shown as away.
-pub const AWAY_S: u64 = 30;
+/// A machine that has not spoken for this long (three heartbeats missed) is shown as away.
+pub const AWAY_S: u64 = 35;
 
 // ---- what this computer says about itself
 
@@ -53,20 +54,62 @@ fn loaded_models() -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Free graphics memory on an NVIDIA card, if there is one.
+fn vram_free() -> Option<f64> {
+    match crate::setup::probe::probe_gpu(&crate::setup::probe::RealHost) {
+        crate::setup::probe::Gpu::Nvidia { free_gb, .. } => Some((free_gb * 10.0).round() / 10.0),
+        _ => None,
+    }
+}
+
+/// The last measured speed of the model loaded now: one fixed short prompt, timed once, kept
+/// until the model (or Ollama's version) changes. Not measured while this computer is busy.
+static TPS: Mutex<Option<(String, f64)>> = Mutex::new(None);
+
+fn tps_now() -> Option<f64> {
+    let model = loaded_models().into_iter().next()?;
+    let port = crate::setup::apply::ollama_port();
+    let version = crate::http_get_at(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        &format!("127.0.0.1:{port}"),
+        "/api/version",
+        Duration::from_millis(600),
+    )
+    .and_then(|(_, b)| crate::json_str(&b, "version"))
+    .unwrap_or_default();
+    let key = format!("{model}@{version}");
+    if let Some((k, v)) = lock(&TPS).as_ref() {
+        if *k == key {
+            return Some(*v);
+        }
+    }
+    let idle = super::route::IN_FLIGHT.load(Ordering::SeqCst) == 0
+        && load_per_cpu().is_none_or(|l| l < 0.5);
+    if !idle {
+        return lock(&TPS).as_ref().map(|x| x.1);
+    }
+    let v = super::route::measure_tps(port, &model)?;
+    *lock(&TPS) = Some((key, v));
+    Some(v)
+}
+
 fn agent_up() -> bool {
     let a = SocketAddr::from((Ipv4Addr::LOCALHOST, crate::AGENT.port));
     TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok()
 }
 
 /// The heartbeat body: load, memory, the models loaded, the queue, and what this computer offers.
-pub fn health(node: &Node) -> J {
-    health_with(node.queued(None))
+pub fn health(node: &Node, with_tools: bool) -> J {
+    let tools = with_tools
+        .then(|| super::tools::advert(&node.paths, false))
+        .flatten();
+    health_with(node.queued(None), tools)
 }
 
-pub fn health_with(queued: usize) -> J {
+pub fn health_with(queued: usize, tools: Option<J>) -> J {
     let (total, free) = crate::setup::probe::probe_memory(&crate::setup::probe::RealHost);
     let r1 = |v: Option<f64>| v.map_or(J::Null, |x| J::n((x * 10.0).round() / 10.0));
-    let o = vec![
+    let mut o = vec![
         ("load".to_string(), load_per_cpu().map_or(J::Null, J::n)),
         (
             "cpus".into(),
@@ -77,9 +120,18 @@ pub fn health_with(queued: usize) -> J {
         ("models".into(), J::strings(&loaded_models())),
         ("queue".into(), J::n(queued as f64)),
         ("jobs".into(), J::Bool(agent_up())),
+        (
+            "in_flight".into(),
+            J::n(super::route::IN_FLIGHT.load(Ordering::SeqCst) as f64),
+        ),
+        ("vram_free_gb".into(), vram_free().map_or(J::Null, J::n)),
+        ("tps".into(), tps_now().map_or(J::Null, J::n)),
         ("ver".into(), J::s(crate::VERSION)),
         ("at".into(), J::n(now_s() as f64)),
     ];
+    if let Some(t) = tools {
+        o.push(("tools".into(), t));
+    }
     J::Obj(o)
 }
 
@@ -91,10 +143,15 @@ pub fn on_heartbeat(node: &Node, from: &str, body: &[u8]) {
     let _ = store::update(&node.paths, |f| {
         if let Some(m) = f.machines.iter_mut().find(|m| m.name == from) {
             m.last_seen = now_s();
-            m.tools = j.get("tools").cloned().unwrap_or(J::Null);
+            // the offer rides on every sixth heartbeat: between those the last one stands
+            if let Some(t) = j.get("tools") {
+                m.tools = t.clone();
+            } else if j.get("tools_none") == Some(&J::Bool(true)) {
+                m.tools = J::Null;
+            }
             let mut h = j;
             if let J::Obj(o) = &mut h {
-                o.retain(|(k, _)| k != "tools");
+                o.retain(|(k, _)| k != "tools" && k != "tools_none");
             }
             m.health = h;
         }
@@ -159,6 +216,15 @@ fn respond(s: &mut TcpStream, code: &str, body: &str) {
 
 /// A plain GET. `/hello` for a private address; `/fleet.json` for this computer only, and only
 /// with a Host header that names it (a web page cannot reach it by a name it controls).
+fn header(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_string())
+    })
+}
+
 fn http(node: &Arc<Node>, mut r: BufReader<TcpStream>, peer: SocketAddr, port: u16) {
     let mut head = String::new();
     let mut line = String::new();
@@ -172,20 +238,51 @@ fn http(node: &Arc<Node>, mut r: BufReader<TcpStream>, peer: SocketAddr, port: u
     }
     let first = head.lines().next().unwrap_or("");
     let path = first.split_whitespace().nth(1).unwrap_or("");
-    let host = head
-        .lines()
-        .find_map(|l| l.strip_prefix("Host:").or_else(|| l.strip_prefix("host:")))
-        .map(|h| h.trim().to_ascii_lowercase())
+    let post = first.starts_with("POST ");
+    let host = header(&head, "host")
+        .map(|h| h.to_ascii_lowercase())
         .unwrap_or_default();
+    let token = header(&head, "x-tempo-token").unwrap_or_default();
+    let want: usize = header(&head, "content-length")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; want.min(1 << 17)];
+    if post && want <= 1 << 17 {
+        let _ = std::io::Read::read_exact(&mut r, &mut body);
+    }
     let mut s = r.into_inner();
     let local = peer.ip().is_loopback()
         && [format!("127.0.0.1:{port}"), format!("localhost:{port}")].contains(&host);
+    if post {
+        // the agent's door to the fleet's tools: this computer, a Host that names it, and the token
+        let ok = local
+            && want <= 1 << 17
+            && super::crypto::same(
+                token.as_bytes(),
+                super::tools::local_token(&node.paths).as_bytes(),
+            );
+        if path == "/call" && ok {
+            let (code, out) = super::tools::http_call(node, &body);
+            respond(&mut s, code, &out);
+        } else {
+            respond(
+                &mut s,
+                "403 Forbidden",
+                "{\"error\":\"this computer only, with its token\"}",
+            );
+        }
+        return;
+    }
     match path {
         "/hello" if crate::private_ip(peer.ip()) => {
             let o = J::Obj(vec![
                 ("app".into(), J::s("tempo-fleet")),
                 ("name".into(), J::s(&node.me)),
                 ("v".into(), J::n(1.0)),
+                (
+                    "invite".into(),
+                    J::Bool(super::pair::invite_open(&node.paths)),
+                ),
             ]);
             respond(&mut s, "200 OK", &o.compact());
         }
@@ -212,7 +309,8 @@ pub fn conn(node: &Arc<Node>, s: TcpStream) {
         _ => return,
     };
     match &first {
-        b"GET " => http(node, r, peer, port),
+        b"GET " | b"POST" => http(node, r, peer, port),
+        b"PAIR" => super::pair::serve_pair(node, r, peer),
         _ => node.frames(r),
     }
 }
@@ -239,6 +337,7 @@ impl Drop for Handle {
 
 /// Listen on `addrs` and nothing else (what a test of the receiving side wants).
 pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
+    let _ = super::tools::local_token(&node.paths);
     let stop = Arc::new(AtomicBool::new(false));
     let mut bound = Vec::new();
     for a in addrs {
@@ -272,8 +371,14 @@ pub fn start(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
     {
         let (node, stop, hb) = (node.clone(), stop.clone(), hb.clone());
         std::thread::spawn(move || {
+            let mut tick = 0u64;
             while !stop.load(Ordering::SeqCst) {
-                let body = health(&node).compact().into_bytes();
+                let mut h = health(&node, tick.is_multiple_of(6));
+                if tick.is_multiple_of(6) && h.get("tools").is_none() {
+                    h.set("tools_none", J::Bool(true));
+                }
+                tick += 1;
+                let body = h.compact().into_bytes();
                 {
                     let mut g = lock(&hb);
                     *g = (g.0 + 1, body);
@@ -371,6 +476,10 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
     lock(&node.handlers).push(Arc::new(super::jobs::JobHandler(Arc::new(
         super::jobs::AgentRunner(p.clone()),
     ))));
+    lock(&node.handlers).push(Arc::new(super::tools::CallHandler::new(
+        p.clone(),
+        Arc::new(super::tools::RealRunner(p.clone())),
+    )));
     let addrs = listen_on(store::fleet_port());
     let h = match start(&node, &addrs) {
         Ok(h) => h,

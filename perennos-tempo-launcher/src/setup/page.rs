@@ -59,7 +59,8 @@ pub fn setup_page(p: &Plan, apply_command: &str) -> String {
         format!("<h2>Ollama</h2><ul>{}</ul>", li(r.lines()))
     });
     format!(
-        r#"{top}<h1>Set up Perennos Tempo for this computer</h1>
+        r#"{top}<p class="tt-kicker">Setup plan</p>
+<h1>Set up Perennos Tempo for <em>this computer</em></h1>
 <p>Tempo looked at this computer and your goals ({goals}) and chose the models below. Nothing has been fetched. {installed} of the chosen models are already installed.</p>
 <h2>This computer</h2><ul>{machine}</ul>
 <h2>What Tempo chose, and why</h2><ul>{picks}</ul>

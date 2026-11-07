@@ -556,6 +556,12 @@ fn gather_all(cwd: &Path, target: &Path) -> Result<Gathered, String> {
 /// Anything that can answer a system and user message with text. The real one is Ollama.
 pub trait Llm {
     fn ask(&self, system: &str, user: &str) -> Result<String, String>;
+    /// `ask`, for an answer that must follow `schema` (Ollama's `format`). A stand-in that
+    /// cannot constrain its answer keeps this default and the reply is checked as before.
+    fn ask_json(&self, system: &str, user: &str, schema: &Value) -> Result<String, String> {
+        let _ = schema;
+        self.ask(system, user)
+    }
     /// Where the model lives, for messages ("http://127.0.0.1:11434").
     fn describe(&self) -> String {
         String::new()
@@ -594,6 +600,20 @@ impl Llm for OllamaLlm<'_> {
     }
 
     fn ask(&self, system: &str, user: &str) -> Result<String, String> {
+        self.ask_with(system, user, None)
+    }
+
+    fn ask_json(&self, system: &str, user: &str, schema: &Value) -> Result<String, String> {
+        self.ask_with(system, user, Some(schema))
+    }
+}
+
+impl OllamaLlm<'_> {
+    fn ask_with(&self, system: &str, user: &str, schema: Option<&Value>) -> Result<String, String> {
+        let extra = ollama::Extra {
+            format: schema,
+            ..Default::default()
+        };
         let messages = [
             json!({"role": "system", "content": system}),
             json!({"role": "user", "content": user}),
@@ -607,7 +627,7 @@ impl Llm for OllamaLlm<'_> {
                         attempt as u32,
                     ));
                 }
-                match ollama::chat_pooled(
+                match ollama::chat_pooled_with(
                     self.cfg,
                     Some("soundcheck"),
                     None,
@@ -615,6 +635,7 @@ impl Llm for OllamaLlm<'_> {
                     &messages,
                     &[],
                     false,
+                    &extra,
                     &mut |_| {},
                 ) {
                     Ok(r) => {
@@ -654,6 +675,23 @@ Severity: critical = exploitable now or data loss; high = a real bug or vulnerab
 
 const FINDINGS_SCHEMA: &str = "Reply with ONE JSON object and nothing else, in exactly this shape (an empty list is a fine answer):
 {\"findings\":[{\"file\":\"path exactly as in the === FILE header\",\"line\":123,\"severity\":\"critical|high|medium|low\",\"category\":\"short-label\",\"problem\":\"one sentence\",\"scenario\":\"a concrete input or sequence of events that makes it fail\",\"fix\":\"a specific fix\"}]}";
+
+/// The same shapes as JSON Schemas, for engines that can hold a model to one.
+fn findings_format() -> Value {
+    let text = json!({"type": "string"});
+    json!({"type": "object", "required": ["findings"], "properties": {"findings": {"type": "array",
+        "items": {"type": "object",
+            "required": ["file", "line", "severity", "category", "problem", "scenario", "fix"],
+            "properties": {"file": text, "line": {"type": "integer"},
+                "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                "category": text, "problem": text, "scenario": text, "fix": text}}}}})
+}
+
+fn check_format() -> Value {
+    json!({"type": "object", "required": ["verdict", "reason"], "properties": {
+        "verdict": {"type": "string", "enum": ["confirmed", "refuted"]},
+        "reason": {"type": "string"}}})
+}
 
 const REFUTE_SCHEMA: &str = "Reply with ONE JSON object and nothing else: {\"verdict\":\"confirmed\" or \"refuted\",\"reason\":\"one or two sentences that cite the code\"}";
 
@@ -794,9 +832,9 @@ impl Listener<'_> {
         self.strikes >= 2
     }
 
-    fn ask(&mut self, system: &str, user: &str) -> Result<String, AskError> {
+    fn ask(&mut self, system: &str, user: &str, schema: &Value) -> Result<String, AskError> {
         self.calls += 1;
-        match self.llm.ask(system, user) {
+        match self.llm.ask_json(system, user, schema) {
             Ok(t) => {
                 self.strikes = 0;
                 Ok(t)
@@ -812,9 +850,10 @@ impl Listener<'_> {
         &mut self,
         system: &str,
         user: &str,
+        schema: &Value,
         parse: fn(&str) -> Result<T, String>,
     ) -> Result<T, AskError> {
-        let first = self.ask(system, user)?;
+        let first = self.ask(system, user, schema)?;
         let why = match parse(&first) {
             Ok(v) => {
                 self.useful += 1;
@@ -823,7 +862,7 @@ impl Listener<'_> {
             Err(why) => why,
         };
         let again = format!("{user}\n\nYour previous reply could not be used: {why}. Reply again with only the JSON object described in the instructions, and nothing else.");
-        let second = self.ask(system, &again)?;
+        let second = self.ask(system, &again, schema)?;
         let parsed = parse(&second).map_err(AskError::Invalid)?;
         self.useful += 1;
         Ok(parsed)
@@ -922,7 +961,12 @@ fn lens_pass(
         format!("The owner asks you to pay special attention to: {focus}\n\n")
     };
     let user = format!("{focus}Review this change.\n\n{}", fenced(&chunk.text));
-    let raw = l.ask_checked(&lens_system(lens), &user, parse_findings)?;
+    let raw = l.ask_checked(
+        &lens_system(lens),
+        &user,
+        &findings_format(),
+        parse_findings,
+    )?;
     Ok(raw
         .into_iter()
         .filter(|r| chunk.files.contains(&r.file)) // a file that is not in this piece is a guess
@@ -941,7 +985,7 @@ fn second_listen(l: &mut Listener, f: &Finding, at: &Listening) -> Result<Check,
         f.file, f.line, f.severity.name(), f.category, f.problem, f.scenario,
         fenced(&code), at.disk_excerpt(&f.file, f.line)
     );
-    l.ask_checked(&refute_system(), &user, parse_check)
+    l.ask_checked(&refute_system(), &user, &check_format(), parse_check)
 }
 
 /// Keep one finding per file, line and category: the worst, and a scanner's over a model's.
@@ -1621,7 +1665,7 @@ mod tests {
             strikes: 0,
             useful: 0,
         };
-        let got = l.ask_checked("sys", "user", parse_findings);
+        let got = l.ask_checked("sys", "user", &findings_format(), parse_findings);
         assert!(got.is_ok_and(|f| f.len() == 1));
         assert_eq!(l.calls, 2);
         // the second request says what was wrong with the first reply
@@ -1644,10 +1688,68 @@ mod tests {
             useful: 0,
         };
         assert!(matches!(
-            l.ask_checked("sys", "user", parse_findings),
+            l.ask_checked("sys", "user", &findings_format(), parse_findings),
             Err(AskError::Invalid(_))
         ));
         assert_eq!(l.calls, 2, "one retry and no more");
+    }
+
+    #[test]
+    fn lens_passes_and_the_second_listen_ask_for_a_json_schema() {
+        let good = reply(&[("a.py", 1, "low", "style", "meh")]);
+        let verdict = r#"{"verdict":"confirmed","reason":"yes"}"#;
+        let m = Mock::start(chat_script(vec![text_resp(&good), text_resp(verdict)]));
+        let cfg = cfg_for(&m);
+        let llm = OllamaLlm::new(&cfg, cfg.models.clone());
+        let mut l = Listener {
+            llm: &llm,
+            calls: 0,
+            strikes: 0,
+            useful: 0,
+        };
+        l.ask_checked("sys", "user", &findings_format(), parse_findings)
+            .ok()
+            .unwrap();
+        l.ask_checked("sys", "user", &check_format(), parse_check)
+            .ok()
+            .unwrap();
+        let b = m.bodies("/api/chat");
+        assert_eq!(b[0]["format"], findings_format());
+        assert_eq!(b[1]["format"], check_format());
+        assert_eq!(b[0]["format"]["properties"]["findings"]["type"], "array");
+        assert_eq!(
+            b[1]["format"]["properties"]["verdict"]["enum"][1],
+            "refuted"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_rejects_format_still_gets_the_soundcheck_question() {
+        let good = reply(&[("a.py", 1, "low", "style", "meh")]);
+        let m = Mock::start(chat_script(vec![
+            (
+                400,
+                "this model does not support structured output (format)".into(),
+            ),
+            text_resp(&good),
+        ]));
+        let cfg = cfg_for(&m);
+        let llm = OllamaLlm::new(&cfg, cfg.models.clone());
+        let mut l = Listener {
+            llm: &llm,
+            calls: 0,
+            strikes: 0,
+            useful: 0,
+        };
+        let got = l.ask_checked("sys", "user", &findings_format(), parse_findings);
+        assert!(got.is_ok_and(|f| f.len() == 1));
+        assert_eq!(
+            l.calls, 1,
+            "the fallback is the engine's, not a parse retry"
+        );
+        let b = m.bodies("/api/chat");
+        assert_eq!(b.len(), 2);
+        assert!(b[0].get("format").is_some() && b[1].get("format").is_none());
     }
 
     // ---- the second listen

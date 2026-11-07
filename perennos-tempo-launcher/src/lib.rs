@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod bank;
 pub mod brand;
 pub mod conductor;
 pub mod fleet;
@@ -102,9 +103,21 @@ usage: tempo-launch [command]
   fleet ssh NAME -- COMMAND | fleet check NAME | fleet setup NAME [--yes] | fleet hosts
                     reach one with your own ssh (BatchMode, nothing stored): run a command, look at it,
                     or set it up (shows the commands first, asks y/N)
-  fleet init | fleet serve [--quiet] | fleet send NAME \"TEXT\" | fleet inbox | fleet ping NAME
+  fleet invite | fleet join [--code CODE] [--controller ADDRESS] [--yes]
+                    add a computer in a minute: `invite` shows a short code on the main computer, `join`
+                    finds it from the new one and asks for the code (10 minutes, once, your network only)
+  fleet allow|deny comfy_image|mcp:SERVER/TOOL
+                    what this computer lets the rest of the fleet run (nothing until you say so)
+  fleet init | fleet rotate | fleet serve [--quiet] | fleet send NAME \"TEXT\" | fleet inbox | fleet ping NAME
                     the messenger between your computers: a fleet key, signed frames, a durable outbox
   fleet page        write and open the fleet page; fleet apply-proposal applies what your AI proposed
+  crate             The Crate, a bank of free tools (Blender, FFmpeg, Pandoc and more): which are here
+  crate show ID | check | add ID [--yes] [--enable] | remove ID [--yes]
+                    one tool in full, detect them all, set one up (shows the exact command, asks
+                    y/N, never runs sudo for you), or take one away
+  crate enable ID | disable ID | folders [add|remove DIR] | review SCRIPT
+                    let Tempo play a tool, on the folders you allow; approve a Blender script
+  crate mcp         the Crate's tools as an MCP server for the agent (turned-on tools only)
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1110,19 +1123,37 @@ fn ensure_exe(ctx: &Ctx, l: &Launch, exe: Option<PathBuf>, wait: bool) -> Result
 
 /// How to start Tempo's own Ollama on `port`, and its program: `ollama serve` with
 /// `OLLAMA_HOST=127.0.0.1:<port>` (this computer only). OLLAMA_MODELS is left alone, so models go
-/// where a normal Ollama keeps them. None when `setup` has not installed one.
+/// where a normal Ollama keeps them. It also gets the leaner settings in
+/// `setup::apply::ollama_tuning` (flash attention, a q8 cache, one request at a time), unless the
+/// environment or `ollama_env` in the agent's settings says otherwise. None when `setup` has not
+/// installed one.
 pub fn owned_ollama_launch(ctx: &Ctx, port: u16) -> Option<(Launch, PathBuf)> {
     let owned = setup::runtime::read_record(&ctx.home)?;
+    let settings = setup::apply::pinned_agent_settings()
+        .unwrap_or_else(|| setup::apply::agent_settings_path(&ctx.agent_data));
+    let settings = fs::read_to_string(settings)
+        .ok()
+        .and_then(|t| setup::json::parse(&t).ok());
+    let mut env = vec![(
+        "OLLAMA_HOST".to_string(),
+        PathBuf::from(format!("127.0.0.1:{port}")),
+    )];
+    env.extend(
+        setup::apply::ollama_tuning(
+            settings.as_ref(),
+            &|k| std::env::var(k).ok(),
+            cfg!(target_os = "macos"),
+        )
+        .into_iter()
+        .map(|(k, v)| (k, PathBuf::from(v))),
+    );
     let l = Launch {
         app: OLLAMA,
         port,
         args: vec!["serve".into()],
         dir: None,
         cwd: ctx.home.join("runtime"),
-        env: vec![(
-            "OLLAMA_HOST".into(),
-            PathBuf::from(format!("127.0.0.1:{port}")),
-        )],
+        env,
     };
     Some((l, owned.binary))
 }
@@ -1515,8 +1546,9 @@ pub fn problem_page(p: &Problem, tail: &str, when: u64) -> String {
         None => String::new(),
     };
     format!(
-        r#"{top}<h1>{title}</h1>
-<p>{what}</p>
+        r#"{top}<p class="tt-kicker">Notice</p>
+<h1>{title}</h1>
+<p class="lede">{what}</p>
 <ul>{tips}</ul>
 {log}
 <p class="small"><span class="dot"></span>Nothing was changed or lost. {when}</p>
@@ -1895,6 +1927,8 @@ pub enum Cmd {
     Conductor(conductor::ConductorCmd),
     /// `fleet ...`: the person's own computers.
     Fleet(fleet::FleetCmd),
+    /// `crate ...`: The Crate, a bank of free tools Tempo can set up and play.
+    Crate(bank::BankCmd),
     Help,
     Version,
 }
@@ -2033,6 +2067,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         }
         "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
         "fleet" => Cmd::Fleet(fleet::parse_args(&rest)?),
+        "crate" => Cmd::Crate(bank::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2100,6 +2135,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         }),
         Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
         Cmd::Fleet(f) => Ok(fleet::run(ctx, f)),
+        Cmd::Crate(c) => Ok(bank::run(ctx, c)),
         Cmd::Schedule {
             remove,
             print,
@@ -4763,11 +4799,16 @@ mod tests {
         assert_eq!(exe, bin);
         assert_eq!(l.args, vec!["serve"]);
         assert_eq!(l.port, 11434);
-        // OLLAMA_HOST on this computer only; OLLAMA_MODELS (and everything else) is not touched
+        // OLLAMA_HOST on this computer only, then the leaner settings; OLLAMA_MODELS (and
+        // everything else) is not touched
         assert_eq!(
-            l.env,
-            vec![("OLLAMA_HOST".to_string(), PathBuf::from("127.0.0.1:11434"))]
+            l.env[0],
+            ("OLLAMA_HOST".to_string(), PathBuf::from("127.0.0.1:11434"))
         );
+        assert!(l
+            .env
+            .iter()
+            .all(|(k, _)| k == "OLLAMA_HOST" || setup::apply::OLLAMA_TUNING.contains(&k.as_str())));
         assert_eq!(l.log_name(), "ollama");
         let (l, _) = owned_ollama_launch(&ctx, 11500).unwrap();
         assert_eq!(l.env[0].1, PathBuf::from("127.0.0.1:11500"));

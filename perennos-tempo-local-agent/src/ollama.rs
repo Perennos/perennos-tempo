@@ -2,7 +2,7 @@
 use crate::config::Config;
 use crate::util::{self, http_json, post_stream};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -74,7 +74,29 @@ pub fn chat_with(
     think: bool,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
-    chat_at(cfg, &cfg.ollama_url, model, messages, tools, think, on_text)
+    let extra = Extra::default();
+    chat_at(
+        cfg,
+        &cfg.ollama_url,
+        model,
+        messages,
+        tools,
+        think,
+        &extra,
+        on_text,
+    )
+}
+
+/// What a request adds to the usual ones.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Extra<'a> {
+    /// A JSON Schema the answer must follow (Ollama's `format`). An engine or model that
+    /// refuses it is asked again without, once, and not asked with it again.
+    pub format: Option<&'a Value>,
+    /// Instead of the config's `keep_alive` ("0": unload as soon as the answer is out).
+    pub keep_alive: Option<&'a str>,
+    /// The conversation, so its context size only ever steps up.
+    pub conv: Option<&'a str>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,14 +107,142 @@ fn chat_at(
     messages: &[Value],
     tools: &[Value],
     think: bool,
+    extra: &Extra,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
-    match chat_raw(cfg, engine, model, messages, tools, think, on_text) {
+    let mut extra = *extra;
+    if extra.format.is_some() && format_refused(engine, model) {
+        extra.format = None;
+    }
+    let mut go = |extra: &Extra| match chat_raw(
+        cfg, engine, model, messages, tools, think, extra, on_text,
+    ) {
         Err(e) if think && e.contains("does not support thinking") => {
-            chat_raw(cfg, engine, model, messages, tools, false, on_text)
+            chat_raw(cfg, engine, model, messages, tools, false, extra, on_text)
+        }
+        r => r,
+    };
+    match go(&extra) {
+        Err(e) if extra.format.is_some() && format_rejected(&e) => {
+            if let Ok(mut r) = refused().lock() {
+                r.insert((engine.to_string(), model.to_string()));
+            }
+            extra.format = None;
+            go(&extra)
         }
         r => r,
     }
+}
+
+fn refused() -> &'static Mutex<HashSet<(String, String)>> {
+    static R: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+fn format_refused(engine: &str, model: &str) -> bool {
+    refused()
+        .lock()
+        .is_ok_and(|r| r.contains(&(engine.to_string(), model.to_string())))
+}
+
+/// An engine's answer that it will not take a `format` (an old Ollama, or an OpenAI-style
+/// server that does not know the field, or a model that cannot do structured output).
+pub fn format_rejected(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    !unreachable(&e)
+        && ["format", "schema", "grammar", "structured"]
+            .iter()
+            .any(|k| e.contains(k))
+}
+
+/// The context sizes a conversation steps through.
+pub const CTX_STEPS: [u64; 4] = [4096, 8192, 16384, 32768];
+
+/// The context for a request needing about `need` tokens: the smallest step that holds it,
+/// never below `floor` (what the conversation already used: a new size makes Ollama read the
+/// whole prompt again) and never above `cap` (the config's, then the model's own). A cap that
+/// shrank wins over the floor, since the model cannot take more.
+pub fn ctx_step(need: u64, floor: u64, cap: u64) -> u64 {
+    let step = CTX_STEPS
+        .iter()
+        .copied()
+        .find(|s| *s >= need)
+        .unwrap_or(u64::MAX);
+    step.max(floor).min(cap.max(512))
+}
+
+fn ctx_seen() -> &'static Mutex<HashMap<String, u64>> {
+    static C: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+type Lens = Mutex<HashMap<(String, String), Option<u64>>>;
+
+fn model_lens() -> &'static Lens {
+    static L: OnceLock<Lens> = OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// The model's own context length (`/api/show`), asked once per engine and model.
+fn model_ctx_len(engine: &str, model: &str) -> Option<u64> {
+    let key = (engine.to_string(), model.to_string());
+    if let Some(v) = model_lens().lock().ok().and_then(|m| m.get(&key).copied()) {
+        return v;
+    }
+    let len = http_json(
+        &format!("{engine}/api/show"),
+        Some(&json!({"model": model})),
+        Duration::from_secs(5),
+    )
+    .ok()
+    .and_then(|v| {
+        v.get("model_info")?
+            .as_object()?
+            .iter()
+            .find(|(k, _)| k.ends_with(".context_length"))
+            .and_then(|(_, n)| n.as_u64())
+    });
+    if let Ok(mut m) = model_lens().lock() {
+        m.insert(key, len);
+    }
+    len
+}
+
+/// The `num_ctx` for this request: sized to the messages and tools plus room for the answer,
+/// held at the largest size the conversation has used.
+fn num_ctx_for_request(
+    cfg: &Config,
+    engine: &str,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    conv: Option<&str>,
+) -> u64 {
+    // about 3 bytes a token is a little pessimistic, which is the safe side
+    let bytes = Value::from(messages.to_vec()).to_string().len()
+        + Value::from(tools.to_vec()).to_string().len();
+    let need = bytes as u64 / 3 + 1024;
+    let mut cap = cfg.num_ctx_for(model);
+    let floor = conv
+        .and_then(|c| ctx_seen().lock().ok()?.get(c).copied())
+        .unwrap_or(0);
+    if need.max(floor) > CTX_STEPS[0] {
+        if let Some(n) = model_ctx_len(engine, model) {
+            cap = cap.min(n);
+        }
+    }
+    let n = if need > CTX_STEPS[3] {
+        cap // more than the last step: as much as the config allows
+    } else {
+        ctx_step(need, floor, cap)
+    };
+    if let (Some(c), Ok(mut m)) = (conv, ctx_seen().lock()) {
+        if m.len() > 512 {
+            m.clear();
+        }
+        m.insert(c.to_string(), n);
+    }
+    n
 }
 
 /// How long an engine that failed twice in a row is passed over before it is tried again.
@@ -235,6 +385,32 @@ pub fn chat_pooled(
     think: bool,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
+    let extra = Extra {
+        conv,
+        ..Extra::default()
+    };
+    chat_pooled_with(
+        cfg, conv, pin, model, messages, tools, think, &extra, on_text,
+    )
+}
+
+/// `chat_pooled` with a `format`, a different `keep_alive`, or both.
+#[allow(clippy::too_many_arguments)]
+pub fn chat_pooled_with(
+    cfg: &Config,
+    conv: Option<&str>,
+    pin: Option<&str>,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    think: bool,
+    extra: &Extra,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<ChatResult, String> {
+    let extra = Extra {
+        conv: extra.conv.or(conv),
+        ..*extra
+    };
     let order = engine_order(cfg, conv, pin);
     let pinned = pin.and_then(|p| {
         order
@@ -244,7 +420,16 @@ pub fn chat_pooled(
     let mut moved: Vec<String> = vec![];
     let mut last = String::from("no engine");
     for engine in &order {
-        match chat_at(cfg, engine, model, messages, tools, think, &mut *on_text) {
+        match chat_at(
+            cfg,
+            engine,
+            model,
+            messages,
+            tools,
+            think,
+            &extra,
+            &mut *on_text,
+        ) {
             Ok(mut r) => {
                 mark(engine, true);
                 if let (Some(c), Ok(mut a)) = (conv, affinity().lock()) {
@@ -289,10 +474,16 @@ fn chat_raw(
     messages: &[Value],
     tools: &[Value],
     think: bool,
+    extra: &Extra,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<ChatResult, String> {
-    let mut body = json!({"model": model, "messages": messages, "stream": true, "keep_alive": cfg.keep_alive,
-        "options": {"num_ctx": cfg.num_ctx_for(model), "temperature": cfg.temperature}});
+    let num_ctx = num_ctx_for_request(cfg, engine, model, messages, tools, extra.conv);
+    let mut body = json!({"model": model, "messages": messages, "stream": true,
+        "keep_alive": extra.keep_alive.unwrap_or(&cfg.keep_alive),
+        "options": {"num_ctx": num_ctx, "temperature": cfg.temperature}});
+    if let Some(f) = extra.format {
+        body["format"] = f.clone();
+    }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
@@ -532,7 +723,9 @@ mod tests {
         let b = &m.bodies("/api/chat")[0];
         assert_eq!(b["think"], false);
         assert_eq!(b["stream"], true);
-        assert_eq!(b["options"]["num_ctx"], 8192);
+        assert_eq!(b["options"]["num_ctx"], 4096, "a short chat starts small");
+        assert_eq!(b["keep_alive"], "60m");
+        assert!(b.get("format").is_none());
         assert!(b["tools"].is_array());
         let log = std::fs::read_to_string(c.logs_dir().join("timing.jsonl")).unwrap();
         assert!(log.contains("\"prompt_tok\":7"));
@@ -566,6 +759,201 @@ mod tests {
         let c = cfg_for(&m);
         let e = chat_once(&c, "m", &[], &[], &mut |_| {}).err().unwrap();
         assert!(e.contains("500") && e.contains("boom"));
+    }
+
+    fn say(text: &str) -> Vec<Value> {
+        vec![json!({"role": "user", "content": text})]
+    }
+
+    #[test]
+    fn the_context_steps_up_and_never_down() {
+        assert_eq!(ctx_step(100, 0, 32768), 4096);
+        assert_eq!(ctx_step(5000, 0, 32768), 8192);
+        assert_eq!(ctx_step(20000, 0, 32768), 32768);
+        assert_eq!(ctx_step(100, 16384, 32768), 16384, "held at what it was");
+        assert_eq!(ctx_step(20000, 0, 8192), 8192, "the config caps it");
+        assert_eq!(
+            ctx_step(100, 16384, 8192),
+            8192,
+            "a smaller cap wins over the floor"
+        );
+    }
+
+    #[test]
+    fn num_ctx_is_the_same_on_every_turn_of_a_conversation() {
+        let m = Mock::start(chat_script(vec![
+            text_resp("a"),
+            text_resp("b"),
+            text_resp("c"),
+            text_resp("d"),
+        ]));
+        let mut c = cfg_for(&m);
+        c.default_num_ctx = 32768;
+        let big = "word ".repeat(4000); // about 20 KB: wants 8192
+        let turns = [
+            ("hi", 4096),
+            (big.as_str(), 8192),
+            ("ok", 8192),
+            ("thanks", 8192),
+        ];
+        for (text, _) in turns {
+            chat_pooled(
+                &c,
+                Some("conv-steady"),
+                None,
+                "m-steady",
+                &say(text),
+                &[],
+                false,
+                &mut |_| {},
+            )
+            .unwrap();
+        }
+        let got: Vec<u64> = m
+            .bodies("/api/chat")
+            .iter()
+            .map(|b| b["options"]["num_ctx"].as_u64().unwrap())
+            .collect();
+        assert_eq!(got, turns.map(|t| t.1));
+        // another conversation starts small again
+        let m2 = Mock::start(chat_script(vec![text_resp("a")]));
+        let mut c2 = cfg_for(&m2);
+        c2.default_num_ctx = 32768;
+        chat_pooled(
+            &c2,
+            Some("conv-other"),
+            None,
+            "m-steady",
+            &say("hi"),
+            &[],
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(m2.bodies("/api/chat")[0]["options"]["num_ctx"], 4096);
+    }
+
+    #[test]
+    fn num_ctx_never_goes_past_the_models_own_length() {
+        let chat = std::sync::Mutex::new(vec![text_resp("a")].into_iter());
+        let m = Mock::start(move |r| match r.path.as_str() {
+            "/api/show" => (
+                200,
+                json!({"model_info": {"general.architecture": "x", "x.context_length": 6000}})
+                    .to_string(),
+            ),
+            _ => chat.lock().unwrap().next().unwrap_or((500, "out".into())),
+        });
+        let mut c = cfg_for(&m);
+        c.default_num_ctx = 32768;
+        let big = "word ".repeat(6000);
+        chat_pooled(
+            &c,
+            None,
+            None,
+            "m-short",
+            &say(&big),
+            &[],
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(m.bodies("/api/chat")[0]["options"]["num_ctx"], 6000);
+    }
+
+    #[test]
+    fn format_and_keep_alive_go_out_when_asked_for() {
+        let m = Mock::start(chat_script(vec![text_resp("{}")]));
+        let c = cfg_for(&m);
+        let schema = json!({"type": "object", "required": ["a"]});
+        let extra = Extra {
+            format: Some(&schema),
+            keep_alive: Some("0"),
+            conv: None,
+        };
+        chat_pooled_with(
+            &c,
+            None,
+            None,
+            "m-fmt",
+            &say("x"),
+            &[],
+            false,
+            &extra,
+            &mut |_| {},
+        )
+        .unwrap();
+        let b = &m.bodies("/api/chat")[0];
+        assert_eq!(b["format"], schema);
+        assert_eq!(b["keep_alive"], "0");
+    }
+
+    #[test]
+    fn an_engine_that_refuses_format_is_asked_again_without_it_once() {
+        let m = Mock::start(chat_script(vec![
+            (400, "json: cannot unmarshal object into Go struct field ChatRequest.format of type string".into()),
+            text_resp("fine"),
+            text_resp("fine again"),
+        ]));
+        let c = cfg_for(&m);
+        let schema = json!({"type": "object"});
+        let extra = Extra {
+            format: Some(&schema),
+            ..Extra::default()
+        };
+        let ask = || {
+            chat_pooled_with(
+                &c,
+                None,
+                None,
+                "m-refuse",
+                &say("x"),
+                &[],
+                false,
+                &extra,
+                &mut |_| {},
+            )
+        };
+        assert_eq!(ask().unwrap().message["content"], "fine");
+        assert_eq!(ask().unwrap().message["content"], "fine again");
+        let b = m.bodies("/api/chat");
+        assert_eq!(
+            b.len(),
+            3,
+            "one refusal, one retry, then no second try with format"
+        );
+        assert!(b[0].get("format").is_some());
+        assert!(b[1].get("format").is_none());
+        assert!(b[2].get("format").is_none());
+    }
+
+    #[test]
+    fn other_errors_do_not_pass_for_a_format_refusal() {
+        assert!(format_rejected("HTTP 400: invalid format"));
+        assert!(format_rejected("HTTP 500: failed to load grammar"));
+        assert!(!format_rejected("Connection refused (os error 111)"));
+        assert!(!format_rejected("HTTP 500: out of memory"));
+        let m = Mock::start(chat_script(vec![(500, "out of memory".into())]));
+        let schema = json!({});
+        let extra = Extra {
+            format: Some(&schema),
+            ..Extra::default()
+        };
+        let e = chat_pooled_with(
+            &cfg_for(&m),
+            None,
+            None,
+            "m-oom",
+            &say("x"),
+            &[],
+            false,
+            &extra,
+            &mut |_| {},
+        )
+        .err()
+        .unwrap();
+        assert!(e.contains("out of memory"));
+        assert_eq!(m.bodies("/api/chat").len(), 1);
     }
 
     #[test]
