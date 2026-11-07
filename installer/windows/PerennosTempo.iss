@@ -266,8 +266,6 @@ Filename: "{#Launch}"; Parameters: "setup --ollama --yes"; Flags: runhidden wait
 ; 3. box not ticked: only write the plan too, so the page exists. In both 2 and 3 the launcher opens
 ;    the plan at the first start; no model is downloaded.
 Filename: "{#Launch}"; Parameters: "setup --apply --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: OllamaAvailable; StatusMsg: "Downloading models for this computer. This can take a while..."
-Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: not OllamaAvailable; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
-Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: not setupmodels; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
 Filename: "{#Launch}"; Description: "Open Perennos Tempo"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
