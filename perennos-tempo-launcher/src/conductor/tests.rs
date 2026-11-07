@@ -905,6 +905,24 @@ fn guests_have_a_role_a_model_and_no_tools() {
 }
 
 #[test]
+fn a_json_answer_is_asked_for_with_a_schema_and_plain_talk_is_not() {
+    let srv = fake_agent(true);
+    let agent = Agent::new(srv.port, Some("test-key".into()));
+    let schema = "{\"type\":\"object\",\"required\":[\"name\"]}";
+    agent.say_json("", "r", "t", schema).unwrap();
+    agent.say("", "r", "t").unwrap();
+    let reqs = srv.requests();
+    let news: Vec<_> = reqs.iter().filter(|r| r.path == "/agent/new").collect();
+    assert_eq!(news.len(), 2);
+    let sent = news[0].json();
+    assert_eq!(
+        sent.get("format").and_then(|f| f.str("type")),
+        Some("object")
+    );
+    assert!(news[1].json().get("format").is_none());
+}
+
+#[test]
 fn an_agent_without_roles_a_wrong_key_and_an_error_turn_are_each_reported() {
     let old = fake_agent(false);
     assert!(!Agent::new(old.port, Some("test-key".into())).knows_roles());

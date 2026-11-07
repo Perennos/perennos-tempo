@@ -117,6 +117,8 @@ pub struct Conv {
     /// The engine (one of the configured Ollama URLs) this conversation was pinned to: it is
     /// tried first, and the usual order follows if it cannot be reached.
     pub engine: Option<String>,
+    /// A JSON Schema every answer of this conversation must follow (Ollama's `format`).
+    pub format: Option<Value>,
     /// The engine that answered the last request. Not saved: it is for whoever is waiting on
     /// the turn (the Conductor files it in its notes).
     pub served_by: Option<String>,
@@ -233,6 +235,7 @@ impl Conv {
             model: None,
             role: None,
             engine: None,
+            format: None,
             served_by: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
@@ -260,6 +263,7 @@ impl Conv {
                 .as_str()
                 .filter(|e| !e.trim().is_empty())
                 .map(str::to_string);
+            c.format = d["format"].is_object().then(|| d["format"].clone());
             let u = &d["usage"];
             c.usage = Usage {
                 requests: u["requests"].as_u64().unwrap_or(0),
@@ -293,7 +297,7 @@ impl Conv {
         if std::fs::write(
             &tmp,
             json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" },
-                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine,
+                "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine, "format": self.format,
                 "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
         .is_ok()

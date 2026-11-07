@@ -756,7 +756,15 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                 },
                 Some(_) => return refuse(&mut s, 400, "engine: a URL as text"),
             };
-            new_conv(sh, body["mode"] == "guest", model, role, engine, s)
+            // "format": a JSON Schema for the answers (the Conductor's band spec uses one)
+            let format = match body.get("format") {
+                None | Some(Value::Null) => None,
+                Some(f) if f.is_object() && f.to_string().len() <= 8192 => Some(f.clone()),
+                Some(_) => {
+                    return refuse(&mut s, 400, "format: a JSON Schema object, at most 8 KB")
+                }
+            };
+            new_conv(sh, body["mode"] == "guest", model, role, engine, format, s)
         }
 
         (true, "send") => {
@@ -961,6 +969,7 @@ fn new_conv(
     model: Option<String>,
     role: Option<String>,
     engine: Option<String>,
+    format: Option<Value>,
     mut s: TcpStream,
 ) {
     match Conv::open(&sh.cfg, None) {
@@ -969,7 +978,13 @@ fn new_conv(
             c.model = model;
             c.role = role;
             c.engine = engine;
-            if guest || c.model.is_some() || c.role.is_some() || c.engine.is_some() {
+            c.format = format;
+            if guest
+                || c.model.is_some()
+                || c.role.is_some()
+                || c.engine.is_some()
+                || c.format.is_some()
+            {
                 c.save();
             }
             lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
@@ -1471,6 +1486,29 @@ mod tests {
         )
         .unwrap();
         assert!(saved["engine"].is_null());
+    }
+
+    #[test]
+    fn a_conversation_can_be_opened_with_a_json_schema() {
+        let srv = server(vec![text_resp("{}")], |_, _| {});
+        let schema = json!({"type": "object", "required": ["name"]});
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "format": schema}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["format"], schema);
+        for bad in [json!("json"), json!(7), json!([1])] {
+            let (c, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "format": bad}));
+            assert_eq!(c, 400, "{v}");
+        }
     }
 
     #[test]

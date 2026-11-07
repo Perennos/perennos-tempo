@@ -121,6 +121,7 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 </div>
 </div>
 
+{ollama_tip}
 <h2>Let your AI help you set up</h2>
 <p>Add Tempo's setup helper to the AI you already use. It can read the scan and the plan above, talk you through the choice in step 2, and write a <em>proposal</em> for your settings. It cannot change anything: you apply a proposal yourself with <code>{apply_cmd}</code>, which shows what would change and asks y/N.</p>
 <h3>Claude Desktop</h3>
@@ -163,6 +164,8 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
         fits = fits,
         note = note,
         scan = scan,
+        ollama_tip = super::apply::ollama_tip(&m.ollama)
+            .map_or(String::new(), |t| format!("<p class=\"small\">{}</p>", html_escape(&t))),
         single = pre("tempo-launch setup --apply"),
         engine = pre(&format!(
             "Windows:       setx OLLAMA_HOST \"<engine address>:{OLLAMA_DEFAULT_PORT}\"\nMac or Linux:  OLLAMA_HOST=<engine address>:{OLLAMA_DEFAULT_PORT} ollama serve"
