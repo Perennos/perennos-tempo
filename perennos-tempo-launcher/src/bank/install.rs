@@ -822,7 +822,11 @@ mod tests {
         );
         let text = say(out);
         assert_eq!(code, 0);
-        assert!(text.contains("already here (14.1.0)"), "{text}");
+        assert!(text.contains("already here"), "{text}");
+        // the stand-in prints its version only where a shell script can run
+        if cfg!(unix) {
+            assert!(text.contains("already here (14.1.0)"), "{text}");
+        }
         assert!(pm.ran.borrow().is_empty());
         // ripgrep gives Tempo a tool, and --enable turned it on
         assert!(State::load(&ctx).enabled("ripgrep"));

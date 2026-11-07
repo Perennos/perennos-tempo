@@ -625,9 +625,11 @@ fn one_stop_ends_every_member_of_the_tree() {
     assert_eq!(h, Halt::Stopped);
     assert!(line.starts_with("Stopped by you."), "{line}");
     assert!(o.final_text.is_none());
-    // the 4 sections each had one answer in flight; none asked for a judge or the closer after
+    // The plan, then the 4 answers that start together. The stop lands while they're out, so a
+    // section whose answer came back a moment earlier may already be past the check and asking
+    // its judge: at most one call each for the other 3. Nothing past that, and never the closer.
     assert!(
-        chat.calls().len() <= 1 + 4 + 2,
+        chat.calls().len() <= 1 + 4 + 3,
         "calls: {}",
         chat.calls().len()
     );
