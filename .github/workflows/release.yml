@@ -94,7 +94,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Inno Setup
-        run: choco install innosetup --no-progress -y
+        run: choco install innosetup --version 6.7.1 --allow-downgrade --no-progress -y
       - name: Build the source-available installer
         shell: pwsh
         run: ./installer/windows/build.ps1 -Apps vault,studio,room
@@ -117,6 +117,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -138,6 +140,11 @@ jobs:
           cat SHA256SUMS.txt
           n=$(wc -l < SHA256SUMS.txt)
           [ "$n" -ge 4 ] || { echo "expected at least 4 files (Linux tarball and .deb, macOS tarball, Windows installer), got $n"; exit 1; }
+      - name: Build provenance (a download can be checked against this workflow)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "dist/*"
       - name: Draft release (not published)
         if: github.event_name == 'workflow_dispatch'
         env:
