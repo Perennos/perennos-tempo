@@ -407,7 +407,7 @@ def main(out):
             save("tempo-256.png", png_bytes(256, 256, images[-1][1]))
     here = os.path.dirname(os.path.abspath(__file__))
     for pct, (w, h) in LARGE.items():
-        # the README's lattice look, rendered from docs/brand (finish_wizard_art.py); drawn here if missing
+        # the README's lattice look, rendered from brand art sources kept privately (finish_wizard_art.py); drawn here if missing
         png = os.path.join(here, f"wizard-large-{pct}.png")
         if os.path.isfile(png):
             pw, ph, rows = png_rows(png)

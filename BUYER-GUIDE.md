@@ -1,19 +1,28 @@
-# Buyer guide: the core is free
+# Buyer guide: Perennos Tempo 2.0
 
-Perennos Tempo public core is a community source release under the PolyForm Shield License 1.0.0 for Perennos-authored core files: free to use, change and share, for yourself or your business, but not for building a competing product. There is no Perennos checkout, hosted service, subscription, support plan, or paid feature in this release.
+Perennos Tempo 2.0.1 is a set of small apps that run on your own computer and work with a local AI engine. Nothing is sent anywhere unless you connect it yourself. What the apps keep and what leaves your computer is in [PRIVACY.md](PRIVACY.md).
 
-## Who should evaluate it
+## What each app does
 
-The community core is for people who want to run a local text workflow on a computer they control and inspect its routing receipts. It includes desktop, headless API, and MCP entry points. Check the matching GitHub Release for the exact Windows environment and acceptance results; this single-user core does not include a shared office deployment.
+- **Tempo Agent**: the local AI agent. It reads and writes files, runs commands (asking you first), searches your notes and works through longer jobs, and it can use the other apps as tools.
+- **Tempo Vault**: your notes as plain Markdown files, compatible with Obsidian. Tempo learns from the folder you choose; nothing in it leaves the computer.
+- **Tempo Studio**: mixing and mastering, with REAPER when you ask for it.
+- **Tempo Room**: private chat rooms where Tempo answers when you write `@tempo`.
+- **tempo-launch**: the launcher. It starts the apps, shows which models fit your computer and your goals, and sets things up after you say yes.
+- **Tempo Soundcheck**: coming in 2.1.
 
-## Costs and prerequisites
+## What you need
 
-The source is free. The user supplies the computer, network, storage, and any selected model or provider. Model weights and runtimes are downloaded separately after setup consent; their terms belong to their publishers. An explicitly configured hosted provider may charge the user. The default profile has a zero hosted spend cap and does not select a provider automatically.
+- Windows 10 or 11 (x64), macOS on Apple silicon, or Linux on x86_64.
+- Memory: 16 GB of RAM is a comfortable start for a medium model; with 8 GB, expect to use small ones. A graphics card helps but is not required. `tempo-launch setup` shows which models fit your computer before it fetches anything.
+- Disk: the apps themselves are small (tens of megabytes). Ollama and each model you choose are extra; plan for several gigabytes of free space per model.
 
-The source catalog includes one default local engine at an indicated 2.5 GB, and setup also downloads about 1.7 GB of decision-head files, plus dependencies and Ollama. Python/Tk is bundled in the Windows EXE. These are estimates, not a promise of the final transfer size. Use the setup screen's current size and free-space plan.
+## Ollama comes with Tempo
 
-## What is not being sold
+If no Ollama is running on your computer, Tempo can fetch its own copy (about 1.4 GB). It does this only after you agree, and it checks the download against a pinned SHA-256 before anything is unpacked or run. If the check fails, setup stops. Models are downloaded separately, with your yes, and keep their publishers' terms.
 
-This release does not include private office packs, custom customer prompts, shared desks, approvals UX, a LAN office server, hosted accounts, or a service-level commitment. No purchase is offered and no customer demand or retention is established.
+## Licence and what is separate
 
-**Payer and first-payment path:** no one pays Perennos for this core; there is no payment path in this release. Users may pay third-party model or infrastructure vendors they choose. The cheapest useful validation is an owner-approved evaluation with a non-sensitive local task, a reviewed response and receipt, and a second voluntary use. That would establish only observed use, not general demand.
+The Perennos-authored files are source-available under the [PolyForm Shield License 1.0.0](LICENSE): you may use, change and share them, for yourself or your business, but not to provide a product that competes with Perennos Tempo. Third-party code, runtimes and model files keep their own terms ([NOTICE.md](NOTICE.md)).
+
+The paid Field and VECTIS are separate products with their own terms. They are not part of this download.

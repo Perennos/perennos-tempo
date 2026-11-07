@@ -469,7 +469,7 @@ def parse_model_reply(text):
 # ---------------------------------------------------------------- audit
 
 class ReceiptAudit:
-    """Writes metadata-only rows to the tempo_receipts hash chain (`ledger/receipts.jsonl`), the tempo_audit source."""
+    """Writes metadata-only rows to the tempo_receipts hash chain (`ledger/receipts.jsonl`)."""
 
     def __init__(self, path, append=None):
         self.path = path
