@@ -4,11 +4,16 @@ room's "[Perennos Tempo room #id] Speaker: text" line). With "stream": false (ho
 teammate calls it) the answer is one JSON reply; otherwise it streams (how the agent calls it).
 Every chat body is logged.
 
-Usage: python3 -I mock_chat.py PORT LOG_FILE PWNED_FILE (rehearse.py starts it)."""
+An owner conversation (an owner-only room) asks for OWNERTOOL: the model then wants to run one
+command that writes a file (RUN_DIR/owner-approved.txt, or owner-denied.txt when the text says
+DENY); once the tool's result is back it answers in words.
+
+Usage: python3 -I mock_chat.py PORT LOG_FILE PWNED_FILE [RUN_DIR] (rehearse.py starts it)."""
 import json, re, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT, LOG, PWNED = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+RUN_DIR = sys.argv[4] if len(sys.argv) > 4 else ""
 lock = threading.Lock()
 FAKE_KEY = "sk-" + "A" * 32  # an API-key-shaped string the room must redact
 
@@ -70,6 +75,15 @@ class H(BaseHTTPRequestHandler):
         first = (users[-1].get("content") or "").split("\n", 1)[0] if users else ""
         system = " ".join(m.get("content") or "" for m in body.get("messages", []) if m.get("role") == "system")
         pieces, delay, call = answer_for(first, system)
+        full = (users[-1].get("content") or "") if users else ""
+        if "OWNERTOOL" in full:
+            # the owner's own conversation (the request's text is on the lines after the header)
+            if body.get("messages") and body["messages"][-1].get("role") == "tool":
+                pieces, delay, call = ["Owner tool finished."], 0, None
+            else:
+                name = "owner-denied.txt" if "DENY" in full else "owner-approved.txt"
+                path = (RUN_DIR + "/" if RUN_DIR else "") + name
+                pieces, delay, call = [], 0, {"function": {"name": "run_command", "arguments": {"command": "echo owner-approved > " + path}}}
         if body.get("stream") is False:
             # one JSON reply, the way a direct chat (no streaming) is answered
             message = {"role": "assistant", "content": "".join(pieces)}

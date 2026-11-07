@@ -565,6 +565,24 @@ fn viewer(sh: &Shared, req: &Req) -> Viewer {
         .unwrap_or(Viewer::Guest)
 }
 
+/// The owner's own browser session at the machine: a loopback connection with no proxy in front
+/// and a live owner cookie. The control key (the CLI and MCP) is the owner too, but it is not
+/// this: owner-only messages, the tools switch and approvals belong to the signed-in session.
+fn owner_session(sh: &Shared, req: &Req) -> bool {
+    owner_session_id(sh, req).is_some()
+}
+
+/// Which owner session this is: the hash of its cookie (what the data folder keeps, never the
+/// cookie itself). An approval can be answered only by the session whose ask started the turn.
+fn owner_session_id(sh: &Shared, req: &Req) -> Option<String> {
+    if !req.at_machine() {
+        return None;
+    }
+    let t = req.cookie("tr_owner")?;
+    let live = sh.hub.lock().owner_session_ok(&t, unix_now());
+    live.then(|| crate::util::sha256_hex(&t))
+}
+
 /// May this viewer see `room`?
 fn sees(sh: &Shared, v: &Viewer, room: &str) -> bool {
     match v {
@@ -718,26 +736,46 @@ fn member_cookie(sh: &Shared) -> String {
     }
 }
 
-fn room_json(sh: &Shared, r: &crate::store::Room, members: usize) -> Value {
-    json!({
+/// A room as one viewer sees it. `private`: the owner's own session, which may see owner-only
+/// messages and the tools switch; anyone else gets neither (not even in the last-message preview
+/// or the count).
+fn room_json(
+    sh: &Shared,
+    st: &crate::store::Store,
+    r: &crate::store::Room,
+    members: usize,
+    private: bool,
+) -> Value {
+    let shown = |m: &&crate::store::Msg| private || !m.owner_only;
+    let mut j = json!({
         "id": r.id,
         "name": r.name,
         "mode": r.mode.as_str(),
         "personality": r.personality.as_str(),
-        "count": r.next.saturating_sub(1),
+        "count": if private { r.next.saturating_sub(1) } else { r.tail.iter().filter(shown).map(|m| m.id).max().unwrap_or(0) },
         // the last thing someone said (a join note only when nothing else is there)
         "last": r
             .tail
             .iter()
             .rev()
+            .filter(shown)
             .find(|m| m.kind != crate::store::Kind::System)
-            .or(r.tail.back())
-            .map(|m| m.to_json()),
+            .or(r.tail.iter().rev().find(shown))
+            .map(|m| sh.hub.msg_view(m)),
         "members": members,
         "team": r.team,
         "thinking": sh.hub.thinking(&r.id),
         "thinking_who": sh.hub.thinking_who(&r.id),
-    })
+    });
+    if private {
+        if let (Some(o), Some(t)) = (
+            j.as_object_mut(),
+            sh.hub.tools_state_in(st, &r.id).as_object(),
+        ) {
+            o.extend(t.clone());
+        }
+    }
+    j
 }
 
 fn route(
@@ -766,6 +804,10 @@ fn route(
             )
         }
         (false, "me") => {
+            let session = match v {
+                Viewer::Owner => owner_session_id(sh, req),
+                _ => None,
+            };
             let st = hub.lock();
             let off = local_offset_minutes(st.cfg.utc_offset.as_deref());
             let today = crate::util::date_of(unix_now(), off);
@@ -789,7 +831,7 @@ fn route(
                 Viewer::Guest => ("guest", None, String::new(), vec![]),
             };
             Ok(json!({
-                "role": role, "id": id, "name": name, "rooms": rooms,
+                "role": role, "id": id, "name": name, "rooms": rooms, "session": session,
                 "owner_name": st.cfg.owner_name,
                 "birthday": birthday,
                 "loopback": req.at_machine(),
@@ -802,6 +844,7 @@ fn route(
             if *v == Viewer::Guest {
                 return Err(fail(403, "Join a room with an invite first."));
             }
+            let private = owner_session(sh, req);
             let st = hub.lock();
             let list: Vec<Value> = st
                 .rooms
@@ -817,7 +860,7 @@ fn route(
                         .iter()
                         .filter(|m| m.rooms.contains(&r.id))
                         .count();
-                    room_json(sh, r, n)
+                    room_json(sh, &st, r, n, private)
                 })
                 .collect();
             Ok(json!({"rooms": list, "seq": hub.seq()}))
@@ -830,10 +873,19 @@ fn route(
             let limit = req.q("limit").parse().unwrap_or(60);
             let since = req.q("since").parse().ok();
             let before = req.q("before").parse().ok();
-            let msgs = hub.lock().messages(room, since, before, limit);
+            // owner-only messages go to the owner's own session and to no one else
+            let private = owner_session(sh, req);
+            let msgs = hub.lock().messages_for(room, since, before, limit, private);
+            // whether this viewer has anything older to page to (hidden messages do not count)
+            let more = msgs.first().is_some_and(|f| {
+                !hub.lock()
+                    .messages_for(room, None, Some(f.id), 1, private)
+                    .is_empty()
+            });
             Ok(json!({
                 "room": room,
-                "messages": msgs.iter().map(|m| m.to_json()).collect::<Vec<_>>(),
+                "more": more,
+                "messages": msgs.iter().map(|m| hub.msg_view(m)).collect::<Vec<_>>(),
                 "thinking": hub.thinking(room),
                 "thinking_who": hub.thinking_who(room),
                 "seq": hub.seq(),
@@ -971,6 +1023,8 @@ fn route(
                     format!("tr_member={t}; {}; Max-Age=31536000", member_cookie(sh)),
                 ));
             }
+            // a guest is in: the room's owner conversation is set aside before anything else
+            hub.settle_owner_rooms();
             hub.post_system(&room, &format!("{name} joined the room."));
             hub.emit(&room, "room", json!({"room": room}));
             Ok(json!({"ok": true, "room": room, "member": mid, "name": name}))
@@ -1019,8 +1073,9 @@ fn route(
             }
             let mut r = PostReq::new(room, who, text, via);
             r.reply_to = b["reply_to"].as_u64();
+            r.owner_session = owner_session_id(sh, req);
             match hub.post(r).map_err(from_refusal)? {
-                Posted::Msg(m) => Ok(json!({"ok": true, "msg": m.to_json()})),
+                Posted::Msg(m) => Ok(json!({"ok": true, "msg": hub.msg_view(&m)})),
                 Posted::Note(n) => Ok(json!({"ok": true, "note": n})),
             }
         }
@@ -1033,9 +1088,10 @@ fn route(
                 .create_room(body_str(b, "name"), mode, p)
                 .map_err(|e| fail(400, e))?;
             hub.emit(&id, "room", json!({"room": id}));
+            let private = owner_session(sh, req);
             let st = hub.lock();
             let r = st.room(&id).ok_or_else(|| fail(500, "lost the room"))?;
-            Ok(json!({"ok": true, "room": room_json(sh, r, 0)}))
+            Ok(json!({"ok": true, "room": room_json(sh, &st, r, 0, private)}))
         }
         (true, "update") => {
             need_owner(v)?;
@@ -1075,6 +1131,7 @@ fn route(
                     let name = st.member(mid).map(|m| m.name.clone()).unwrap_or_default();
                     (code, expires, name)
                 };
+                hub.settle_owner_rooms();
                 return Ok(json!({
                     "ok": true,
                     "code": code,
@@ -1090,6 +1147,9 @@ fn route(
                 .lock()
                 .new_invite(room, b["hours"].as_f64())
                 .map_err(|e| fail(400, e))?;
+            // an open invite is a guest to come: the room's owner conversation is set aside now
+            hub.settle_owner_rooms();
+            hub.emit(room, "room", json!({"room": room}));
             Ok(json!({
                 "ok": true,
                 "code": code,
@@ -1097,6 +1157,57 @@ fn route(
                 "expires": expires,
                 "local_only": sh.public.is_none(),
             }))
+        }
+        // ---- owner-only rooms (Room phase 2b). These three belong to the owner's own signed-in
+        // session at the machine: not the control key (the CLI and MCP), not a member, not a
+        // bridge, and nothing that came through a proxy.
+        (true, "tools") => {
+            need_owner(v)?;
+            if !owner_session(sh, req) {
+                return Err(fail(
+                    403,
+                    "Only the owner, signed in at the machine, can change that.",
+                ));
+            }
+            let on = b["on"] == true;
+            hub.set_tools(body_str(b, "room"), on)
+                .map(|state| {
+                    let mut o = json!({"ok": true});
+                    if let (Some(x), Some(y)) = (o.as_object_mut(), state.as_object()) {
+                        x.extend(y.clone());
+                    }
+                    o
+                })
+                .map_err(from_refusal)
+        }
+        (true, "revoke-invites") => {
+            need_owner(v)?;
+            if !owner_session(sh, req) {
+                return Err(fail(
+                    403,
+                    "Only the owner, signed in at the machine, can change that.",
+                ));
+            }
+            let n = hub
+                .revoke_invites(body_str(b, "room"))
+                .map_err(from_refusal)?;
+            Ok(json!({"ok": true, "revoked": n, "state": hub.tools_state(body_str(b, "room"))}))
+        }
+        (true, "approve") => {
+            // anything but the owner's own session at the machine: 403, the agent is not called
+            let no = || fail(403, "That approval cannot be answered from here.");
+            need_owner(v).map_err(|_| no())?;
+            let Some(session) = owner_session_id(sh, req) else {
+                return Err(no());
+            };
+            hub.approve(
+                body_str(b, "room"),
+                body_str(b, "id"),
+                b["ok"] == true,
+                &session,
+            )
+            .map(|_| json!({"ok": true}))
+            .map_err(from_refusal)
         }
         (true, "mute") => {
             need_owner(v)?;
@@ -1257,6 +1368,9 @@ fn events(sh: &Arc<Shared>, mut s: TcpStream, req: &Req) {
     if v == Viewer::Guest {
         return refuse(&mut s, 403, "Join a room with an invite first.");
     }
+    // owner-only events (messages written in owner mode, their approvals) go to the owner's own
+    // session only, and a stream that stops being that stops getting them
+    let mut private = owner_session(sh, req);
     // One person cannot take all the live streams.
     let who = match &v {
         Viewer::Member(id) => id.clone(),
@@ -1299,6 +1413,7 @@ fn events(sh: &Arc<Shared>, mut s: TcpStream, req: &Req) {
             if viewer(sh, req) == Viewer::Guest {
                 break;
             }
+            private = owner_session(sh, req);
             last_check = Instant::now();
         }
         let out = match sh.hub.wait_events(since, STREAM_RECHECK) {
@@ -1311,7 +1426,7 @@ fn events(sh: &Arc<Shared>, mut s: TcpStream, req: &Req) {
                 let mut out = String::new();
                 for e in evs {
                     since = since.max(e.seq);
-                    if sees(sh, &v, &e.room) {
+                    if sees(sh, &v, &e.room) && (private || !e.owner_only) {
                         out.push_str(&format!(
                             "id: {}\nevent: {}\ndata: {}\n\n",
                             e.seq, e.kind, e.data
@@ -1337,6 +1452,7 @@ fn events(sh: &Arc<Shared>, mut s: TcpStream, req: &Req) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridges::Outbound;
     use crate::hub::tests::hub_at;
     use crate::testutil::{dead_url, FakeAgent, Script};
 
@@ -2975,6 +3091,744 @@ mod tests {
             assert!(!all.contains(bad), "{bad}");
         }
         assert!(!all.contains("perennos tempo room tempo room"));
+        r.stop();
+        hub.shutdown();
+    }
+
+    // ---- owner-only rooms (Room phase 2b), over HTTP
+
+    /// Read the live stream as `cookie` from `since` until `marker` shows up (or 12 s pass).
+    fn sse_until(
+        a: SocketAddr,
+        cookie: &str,
+        since: u64,
+        marker: &'static str,
+    ) -> std::thread::JoinHandle<String> {
+        let cookie = cookie.to_string();
+        std::thread::spawn(move || {
+            let mut s = TcpStream::connect(a).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(12))).unwrap();
+            s.write_all(format!("GET /room/events?since={since} HTTP/1.1\r\nHost: {a}\r\nCookie: {cookie}\r\n\r\n").as_bytes()).unwrap();
+            let mut buf = vec![0u8; 8192];
+            let mut got = String::new();
+            let until = Instant::now() + Duration::from_secs(12);
+            while !got.contains(marker) && Instant::now() < until {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            got
+        })
+    }
+
+    fn wait_for_tempo(a: SocketAddr, owner: &str, room: &str, after: u64) -> Value {
+        let t0 = Instant::now();
+        loop {
+            let (_, j) = get(a, &format!("/room/messages?room={room}&limit=100"), owner);
+            if let Some(m) = j["messages"].as_array().and_then(|l| {
+                l.iter()
+                    .find(|m| m["kind"] == "tempo" && m["reply_to"] == after)
+            }) {
+                return m.clone();
+            }
+            assert!(t0.elapsed() < Duration::from_secs(15), "no answer: {j}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn tools_on(a: SocketAddr, owner: &str, room: &str) -> (u16, Value) {
+        let (c, _, j) = post(a, "/room/tools", owner, &json!({"room": room, "on": true}));
+        (c, j)
+    }
+
+    fn tools_of(hub: &Hub, room: &str) -> bool {
+        hub.lock().room(room).unwrap().tools
+    }
+
+    #[test]
+    fn only_the_owners_own_session_can_turn_tools_on_and_a_bridge_room_never_can() {
+        let (hub, _) = hub_at(&dead_url(), "srv-tools", json!({}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        hub.set_control_key("the-control-key");
+        // off by default, and the owner's room list says so
+        let (_, rooms) = get(a, "/room/rooms", &owner);
+        assert_eq!(rooms["rooms"][0]["tools"], false);
+        assert_eq!(rooms["rooms"][0]["tools_active"], false);
+        // a member (of this very room), a guest, a forged cookie, a proxied owner, the control
+        // key alone (the CLI and MCP): 403 and nothing changes
+        let (mia, _) = join_as(&hub, a, &owner, "family", "Mia");
+        let body = json!({"room": "family", "on": true}).to_string();
+        for (who, cookie, extra) in [
+            ("member", mia.clone(), String::new()),
+            ("guest", String::new(), String::new()),
+            (
+                "forged cookie",
+                "tr_owner=forged".to_string(),
+                String::new(),
+            ),
+            (
+                "proxied owner",
+                owner.clone(),
+                "X-Forwarded-For: 203.0.113.9\r\n".to_string(),
+            ),
+            (
+                "tailscale owner",
+                owner.clone(),
+                "Tailscale-User-Login: riley@example.com\r\n".to_string(),
+            ),
+            (
+                "control key",
+                String::new(),
+                "X-Tempo-Control: the-control-key\r\n".to_string(),
+            ),
+            (
+                "control key and a member cookie",
+                mia.clone(),
+                "X-Tempo-Control: the-control-key\r\n".to_string(),
+            ),
+        ] {
+            let (c, _, out) = with_headers(
+                a,
+                "POST",
+                "/room/tools",
+                &format!("Cookie: {cookie}\r\n{extra}"),
+                &body,
+            );
+            assert_eq!(c, 403, "{who}: {out}");
+            assert!(!tools_of(&hub, "family"), "{who} changed the switch");
+        }
+        // a different route does not carry it either
+        let (c, _, _) = post(
+            a,
+            "/room/update",
+            &owner,
+            &json!({"room": "family", "tools": true}),
+        );
+        assert_eq!(c, 200);
+        assert!(!tools_of(&hub, "family"), "/room/update must not set tools");
+        // the owner's own session can; with Mia in the room it is on but waiting
+        let (c, j) = tools_on(a, &owner, "family");
+        assert_eq!(c, 200, "{j}");
+        assert_eq!(
+            (&j["tools"], &j["tools_active"]),
+            (&json!(true), &json!(false))
+        );
+        assert!(j["tools_note"].as_str().unwrap().contains("waiting"), "{j}");
+        // the member sees no sign of it
+        let (_, rooms) = get(a, "/room/rooms", &mia);
+        assert!(
+            rooms["rooms"][0].get("tools").is_none()
+                && rooms["rooms"][0].get("tools_active").is_none()
+        );
+        r.stop();
+        hub.shutdown();
+
+        // a room a bridge reaches
+        let fake = crate::testutil::FakeHttp::start(|_| (200, vec![], "{}".into()));
+        let out = Outbound {
+            discord: Some(crate::bridges::DiscordConf {
+                token: "t".into(),
+                token_from: "TEST".into(),
+                channels: vec![("1".into(), "family".into())],
+                api: fake.url.clone(),
+                poll: Duration::from_secs(60),
+            }),
+            ..Default::default()
+        };
+        let (hub, _) = crate::hub::tests::hub_with(&dead_url(), "srv-tools-bridge", json!({}), out);
+        let r = start(hub.clone(), opts()).unwrap();
+        let owner = owner_cookie(&hub);
+        let (c, _, j) = post(
+            r.addr,
+            "/room/tools",
+            &owner,
+            &json!({"room": "family", "on": true}),
+        );
+        assert_eq!(c, 409, "{j}");
+        assert!(j["error"].as_str().unwrap().contains("never use tools"));
+        assert!(!tools_of(&hub, "family"));
+        let (_, rooms) = get(r.addr, "/room/rooms", &owner);
+        assert_eq!(rooms["rooms"][0]["bridged"], true);
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn a_member_is_never_served_what_was_said_in_owner_mode() {
+        let agent = FakeAgent::start(vec![
+            Script::Answer("PRIVATE-ANSWER about the gift".into()),
+            Script::Answer("a guest-side answer".into()),
+        ]);
+        let (hub, d) = hub_at(&agent.url(), "srv-private", json!({"owner_name": "Riley"}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        hub.set_control_key("ck");
+        let since0 = hub.seq();
+        assert_eq!(tools_on(a, &owner, "family").0, 200);
+        // the owner, alone, asks in owner mode
+        let (c, _, j) = post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "@tempo PRIVATE-QUESTION about the gift"}),
+        );
+        assert_eq!(c, 200, "{j}");
+        assert_eq!(j["msg"]["owner_only"], true);
+        let q = j["msg"]["id"].as_u64().unwrap();
+        let ans = wait_for_tempo(a, &owner, "family", q);
+        assert_eq!(ans["owner_only"], true);
+        assert_eq!(agent.mode_of(&agent.send_convs()[0]), "owner");
+        // the owner sees both, in history and in the room list
+        let (_, h) = get(a, "/room/messages?room=family&limit=100", &owner);
+        assert!(
+            h.to_string().contains("PRIVATE-QUESTION") && h.to_string().contains("PRIVATE-ANSWER")
+        );
+        // Sam joins afterwards (the invite alone already ends owner mode)
+        let (sam, sam_id) = join_as(&hub, a, &owner, "family", "Sam");
+        assert!(sam_id.starts_with("m_"));
+        let (_, _, pub_msg) = post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "a public line for Sam"}),
+        );
+        let public_id = pub_msg["msg"]["id"].as_u64().unwrap();
+        assert!(pub_msg["msg"].get("owner_only").is_none());
+        // history, newest and paged both ways, and the room list: nothing private
+        let big = public_id + 50;
+        for path in [
+            "/room/messages?room=family&limit=100".to_string(),
+            "/room/messages?room=family&limit=1".to_string(),
+            format!("/room/messages?room=family&before={big}&limit=100"),
+            "/room/messages?room=family&since=0&limit=100".to_string(),
+            "/room/rooms".to_string(),
+        ] {
+            let (c, j) = get(a, &path, &sam);
+            assert_eq!(c, 200, "{path}");
+            let text = j.to_string();
+            for secret in ["PRIVATE", "gift", "owner_only", "Approval"] {
+                assert!(!text.contains(secret), "{secret} in {path}: {text}");
+            }
+            assert!(
+                text.contains("public line for Sam")
+                    || path.contains("limit=1")
+                    || path.contains("before"),
+                "{path}: {text}"
+            );
+        }
+        // nothing older to page to (the hidden messages do not count, so no "earlier" button)
+        let (_, h) = get(a, "/room/messages?room=family&limit=100", &sam);
+        assert_eq!(h["more"], false, "{h}");
+        let (_, h) = get(a, "/room/messages?room=family&limit=100", &owner);
+        assert_eq!(h["more"], false, "{h}");
+        let (_, rooms) = get(a, "/room/rooms", &sam);
+        assert_eq!(
+            rooms["rooms"][0]["last"]["id"], public_id,
+            "the preview is the public line"
+        );
+        assert_eq!(rooms["rooms"][0]["count"], public_id);
+        // the owner's own session still has them (the room list included)
+        let (_, rooms) = get(a, "/room/rooms", &owner);
+        assert_eq!(rooms["rooms"][0]["count"], public_id);
+        // the control key alone (the CLI and MCP) is the owner, but not the signed-in session
+        let (c, _, body) = with_headers(
+            a,
+            "GET",
+            "/room/messages?room=family&limit=100",
+            "X-Tempo-Control: ck\r\n",
+            "",
+        );
+        assert_eq!(c, 200);
+        assert!(!body.contains("PRIVATE"), "{body}");
+        // a reply to a private message quotes nothing of it
+        let (_, _, rj) = post(
+            a,
+            "/room/post",
+            &sam,
+            &json!({"room": "family", "text": "what is that about?", "reply_to": ans["id"]}),
+        );
+        assert!(
+            rj["msg"].get("reply_text").is_none() && rj["msg"].get("reply_to").is_none(),
+            "{rj}"
+        );
+        // live: a stream that asks for everything since before the owner spoke is not sent it
+        let t = sse_until(a, &sam, since0, "SAM-MARKER");
+        std::thread::sleep(Duration::from_millis(200));
+        post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "SAM-MARKER"}),
+        );
+        let got = t.join().unwrap();
+        assert!(got.contains("SAM-MARKER"), "{got}");
+        for secret in ["PRIVATE", "gift", "owner_only"] {
+            assert!(!got.contains(secret), "{secret} in the stream: {got}");
+        }
+        // the owner's stream, from the same point, has them
+        let t = sse_until(a, &owner, since0, "OWNER-MARKER");
+        std::thread::sleep(Duration::from_millis(200));
+        post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "OWNER-MARKER"}),
+        );
+        let got = t.join().unwrap();
+        assert!(
+            got.contains("PRIVATE-QUESTION") && got.contains("PRIVATE-ANSWER"),
+            "{got}"
+        );
+        // Sam's own question to Tempo is a guest conversation and the prompt has none of it
+        let (_, _, qj) = post(
+            a,
+            "/room/post",
+            &sam,
+            &json!({"room": "family", "text": "@tempo tldr"}),
+        );
+        wait_for_tempo(a, &owner, "family", qj["msg"]["id"].as_u64().unwrap());
+        let prompt = agent.prompts().last().unwrap().clone();
+        assert!(
+            !prompt.contains("PRIVATE") && !prompt.contains("gift"),
+            "{prompt}"
+        );
+        assert_eq!(agent.mode_of(agent.send_convs().last().unwrap()), "guest");
+        // and the room's own file keeps it for the owner, flagged
+        let file = std::fs::read_to_string(d.join("messages").join("family.jsonl")).unwrap();
+        assert!(file.contains("\"owner_only\":true"));
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn a_stopped_owner_turn_is_told_to_the_owner_only_even_on_a_live_stream() {
+        let agent = FakeAgent::start(vec![Script::Answer("PRIVATE-ANSWER".into())]);
+        agent.slow_answers(30);
+        let (hub, _) = hub_at(&agent.url(), "srv-stopped", json!({}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        assert_eq!(tools_on(a, &owner, "family").0, 200);
+        let (_, _, j) = post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "@tempo a slow one"}),
+        );
+        assert_eq!(j["msg"]["owner_only"], true);
+        let t0 = Instant::now();
+        while agent.prompts().is_empty() {
+            assert!(t0.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Sam joins while it is in flight
+        let (sam, _) = join_as(&hub, a, &owner, "family", "Sam");
+        let since = hub.seq();
+        let ts = sse_until(a, &sam, since, "END-MARKER");
+        let to = sse_until(a, &owner, since, "END-MARKER");
+        let t0 = Instant::now();
+        while hub.thinking("family") {
+            assert!(t0.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "END-MARKER"}),
+        );
+        let (sg, og) = (ts.join().unwrap(), to.join().unwrap());
+        assert!(og.contains("Stopped."), "the owner is told: {og}");
+        assert!(!sg.contains("Stopped") && !sg.contains("PRIVATE"), "{sg}");
+        assert!(sg.contains("END-MARKER"));
+        let (_, h) = get(a, "/room/messages?room=family&limit=100", &sam);
+        assert!(!h.to_string().contains("Stopped") && !h.to_string().contains("PRIVATE-ANSWER"));
+        let (_, h) = get(a, "/room/messages?room=family&limit=100", &owner);
+        assert!(h.to_string().contains("Stopped."));
+        r.stop();
+        hub.shutdown();
+    }
+
+    fn confirm_ids(agent: &FakeAgent) -> Vec<(String, bool)> {
+        agent
+            .confirm_calls()
+            .iter()
+            .map(|c| (c["id"].as_str().unwrap().to_string(), c["ok"] == true))
+            .collect()
+    }
+
+    fn wait_card(a: SocketAddr, owner: &str, id: &str) -> Value {
+        let t0 = Instant::now();
+        loop {
+            let (_, j) = get(a, "/room/messages?room=family&limit=100", owner);
+            if let Some(m) = j["messages"]
+                .as_array()
+                .and_then(|l| l.iter().find(|m| m["approval"]["id"] == id))
+            {
+                return m.clone();
+            }
+            assert!(t0.elapsed() < Duration::from_secs(15), "no card {id}: {j}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn approve(a: SocketAddr, cookie: &str, extra: &str, room: &str, id: &str, ok: bool) -> u16 {
+        let body = json!({"room": room, "id": id, "ok": ok}).to_string();
+        with_headers(
+            a,
+            "POST",
+            "/room/approve",
+            &format!("Cookie: {cookie}\r\n{extra}"),
+            &body,
+        )
+        .0
+    }
+
+    #[test]
+    fn only_the_owner_at_the_machine_approves_and_every_other_path_is_a_403_with_no_agent_call() {
+        let agent = FakeAgent::start(vec![
+            Script::ConfirmId("c-1".into(), "Written.".into()),
+            Script::ConfirmId("c-2".into(), "Left alone.".into()),
+            Script::ConfirmId("c-3".into(), "never posted".into()),
+        ]);
+        let (hub, _) = hub_at(&agent.url(), "srv-approve", json!({}));
+        hub.lock()
+            .create_room("Other", Mode::Mention, Personality::Warm)
+            .unwrap();
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        hub.set_control_key("ck");
+        // Sam is a member of #other (not of #family: that would end owner mode there)
+        let (sam, _) = join_as(&hub, a, &owner, "other", "Sam");
+        assert_eq!(tools_on(a, &owner, "family").0, 200);
+        assert_eq!(tools_on(a, &owner, "other").0, 200);
+        let (_, _, j) = post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "@tempo write the file"}),
+        );
+        let q = j["msg"]["id"].as_u64().unwrap();
+        let card = wait_card(a, &owner, "c-1");
+        assert_eq!(card["approval"]["state"], "pending");
+        assert_eq!(card["approval"]["what"], "run a command");
+        assert_eq!(card["approval"]["detail"], "echo hi > notes.txt");
+        assert_eq!(card["owner_only"], true);
+        // the card is the owner's: a member is never served it (and cannot ask about its room)
+        let (c, _) = get(a, "/room/messages?room=family", &sam);
+        assert_eq!(c, 403);
+        // every way that is not the owner's own session at the machine
+        let none = String::new();
+        let proxied = "X-Forwarded-For: 203.0.113.9\r\n";
+        let attempts: Vec<(&str, u16)> = vec![
+            (
+                "a member of another room",
+                approve(a, &sam, "", "family", "c-1", true),
+            ),
+            (
+                "a member claiming the other room",
+                approve(a, &sam, "", "other", "c-1", true),
+            ),
+            ("a guest", approve(a, &none, "", "family", "c-1", true)),
+            (
+                "a forged cookie",
+                approve(a, "tr_owner=forged", "", "family", "c-1", true),
+            ),
+            (
+                "the owner from a proxy",
+                approve(a, &owner, proxied, "family", "c-1", true),
+            ),
+            (
+                "the owner behind Tailscale",
+                approve(
+                    a,
+                    &owner,
+                    "Tailscale-User-Login: x@y.z\r\n",
+                    "family",
+                    "c-1",
+                    true,
+                ),
+            ),
+            (
+                "the control key alone",
+                approve(a, &none, "X-Tempo-Control: ck\r\n", "family", "c-1", true),
+            ),
+            ("a wrong id", approve(a, &owner, "", "family", "c-9", true)),
+            ("an empty id", approve(a, &owner, "", "family", "", true)),
+            ("another room", approve(a, &owner, "", "other", "c-1", true)),
+            ("no room", approve(a, &owner, "", "nowhere", "c-1", true)),
+        ];
+        for (who, code) in attempts {
+            assert_eq!(code, 403, "{who}");
+        }
+        assert!(
+            agent.confirm_calls().is_empty(),
+            "the agent was called: {:?}",
+            agent.confirm_calls()
+        );
+        // the owner at the machine approves: exactly one call, ok:true
+        assert_eq!(approve(a, &owner, "", "family", "c-1", true), 200);
+        assert_eq!(confirm_ids(&agent), [("c-1".to_string(), true)]);
+        let ans = wait_for_tempo(a, &owner, "family", q);
+        assert_eq!(ans["text"], "Written.");
+        // a second tap does nothing
+        assert_eq!(approve(a, &owner, "", "family", "c-1", true), 403);
+        assert_eq!(confirm_ids(&agent).len(), 1);
+        // the card now says so
+        assert_eq!(wait_card(a, &owner, "c-1")["approval"]["state"], "approved");
+        // deny sends ok:false
+        let (_, _, j) = post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "@tempo and the risky one"}),
+        );
+        wait_card(a, &owner, "c-2");
+        assert_eq!(approve(a, &owner, "", "family", "c-2", false), 200);
+        // (a settled confirmation still in the event window is denied again: harmless)
+        let ids = confirm_ids(&agent);
+        assert_eq!(ids.iter().filter(|(_, ok)| *ok).count(), 1, "{ids:?}");
+        assert!(ids.contains(&("c-2".to_string(), false)), "{ids:?}");
+        wait_for_tempo(a, &owner, "family", j["msg"]["id"].as_u64().unwrap());
+        // a third waits; then someone joins the room: the owner's tap is a 403 and makes no call
+        post(
+            a,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "@tempo one more"}),
+        );
+        wait_card(a, &owner, "c-3");
+        let (_lee, _) = join_as(&hub, a, &owner, "family", "Lee");
+        let before = confirm_ids(&agent);
+        assert_eq!(approve(a, &owner, "", "family", "c-3", true), 403);
+        assert_eq!(confirm_ids(&agent), before, "the tap made no call");
+        assert!(
+            !confirm_ids(&agent)
+                .iter()
+                .any(|(id, ok)| id == "c-3" && *ok),
+            "{:?}",
+            confirm_ids(&agent)
+        );
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn the_owner_can_revoke_open_invites_and_nobody_else_can() {
+        let (hub, _) = hub_at(&dead_url(), "srv-revoke", json!({}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        let (_, _, inv) = post(a, "/room/invite", &owner, &json!({"room": "family"}));
+        let code = inv["code"].as_str().unwrap().to_string();
+        assert_eq!(tools_on(a, &owner, "family").1["invites"], 1);
+        let (c, _, _) = post(a, "/room/revoke-invites", "", &json!({"room": "family"}));
+        assert_eq!(c, 403);
+        let (c, _, j) = post(
+            a,
+            "/room/revoke-invites",
+            &owner,
+            &json!({"room": "family"}),
+        );
+        assert_eq!(
+            (c, &j["revoked"], &j["state"]["tools_active"]),
+            (200, &json!(1), &json!(true))
+        );
+        let (c, _, _) = post(a, "/room/join", "", &json!({"code": code, "name": "Late"}));
+        assert_eq!(c, 404, "a revoked code no longer opens the room");
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn the_app_words_the_tools_switch_and_the_approval_plainly() {
+        for must in [
+            "Tempo can use its tools here while you are the only one in this room",
+            "Approve on the computer running Perennos Tempo",
+            "Approval needed",
+            "Cancel open invites",
+        ] {
+            assert!(APP_JS.contains(must), "{must}");
+        }
+        // no pop-up windows for any of it, and the words the product avoids stay out
+        let tools = &APP_JS
+            [APP_JS.find("function toolsSection").unwrap()..APP_JS.find("// ---- Team:").unwrap()];
+        let card = &APP_JS[APP_JS.find("function fillApproval").unwrap()
+            ..APP_JS.find("function msgNode").unwrap()];
+        for part in [tools, card] {
+            for popup in ["confirm(", "alert(", "prompt(", "window.open"] {
+                assert!(!part.contains(popup), "{popup}");
+            }
+        }
+        let all = format!(
+            "{APP_JS}\n{INDEX_HTML}\n{APP_CSS}\n{}",
+            include_str!("../README.md")
+        )
+        .to_lowercase();
+        for bad in ["ledger", "claim"] {
+            assert!(!all.contains(bad), "{bad}");
+        }
+    }
+
+    /// An address of this machine that is not loopback (the way a phone on the tailnet or LAN
+    /// reaches Room): found without sending anything. `None` where the machine has none.
+    fn other_local_ip() -> Option<std::net::Ipv4Addr> {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        s.connect("192.0.2.1:9").ok()?;
+        match s.local_addr().ok()?.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_owner_cookie_on_a_non_loopback_connection_can_neither_turn_tools_on_nor_approve() {
+        let Some(ip) = other_local_ip() else {
+            eprintln!("(no non-loopback address on this machine: the real-peer check is skipped)");
+            return;
+        };
+        let agent = FakeAgent::start(vec![Script::ConfirmId("c-1".into(), "Written.".into())]);
+        let (hub, _) = hub_at(&agent.url(), "srv-nonloop", json!({}));
+        let r = match start(
+            hub.clone(),
+            ServeOpts {
+                bind: IpAddr::V4(ip),
+                port: 0,
+                ..ServeOpts::default()
+            },
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("(cannot listen on {ip}: {e}; the real-peer check is skipped)");
+                return;
+            }
+        };
+        let (far, near) = (
+            r.addr,
+            r.loopback.expect("the owner's own loopback listener"),
+        );
+        let owner = owner_cookie(&hub);
+        // at the machine (loopback) the cookie is the owner; from the other address it is nobody
+        assert_eq!(get(near, "/room/me", &owner).1["role"], "owner");
+        assert_eq!(get(far, "/room/me", &owner).1["role"], "guest");
+        assert_eq!(get(near, "/room/me", &owner).1["loopback"], true);
+        let (c, _, _) = post(
+            far,
+            "/room/tools",
+            &owner,
+            &json!({"room": "family", "on": true}),
+        );
+        assert_eq!(c, 403);
+        assert!(!tools_of(&hub, "family"));
+        assert_eq!(tools_on(near, &owner, "family").0, 200);
+        post(
+            near,
+            "/room/post",
+            &owner,
+            &json!({"room": "family", "text": "@tempo write it"}),
+        );
+        wait_card(near, &owner, "c-1");
+        let (c, _) = get(far, "/room/messages?room=family", &owner);
+        assert_eq!(
+            c, 403,
+            "the owner's cookie shows nothing from another address"
+        );
+        assert_eq!(approve(far, &owner, "", "family", "c-1", true), 403);
+        assert!(
+            agent.confirm_calls().is_empty(),
+            "{:?}",
+            agent.confirm_calls()
+        );
+        assert_eq!(approve(near, &owner, "", "family", "c-1", true), 200);
+        assert_eq!(confirm_ids(&agent), [("c-1".to_string(), true)]);
+        r.stop();
+        hub.shutdown();
+    }
+
+    #[test]
+    fn a_session_minted_with_the_control_key_cannot_approve_what_another_session_asked() {
+        let agent = FakeAgent::start(vec![Script::ConfirmId("c-1".into(), "Done.".into())]);
+        let (hub, _) = hub_at(&agent.url(), "srv-minted", json!({}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let first = owner_cookie(&hub);
+        hub.set_control_key("ck");
+        assert_eq!(tools_on(a, &first, "family").0, 200);
+        let (_, _, j) = post(
+            a,
+            "/room/post",
+            &first,
+            &json!({"room": "family", "text": "@tempo write it"}),
+        );
+        let q = j["msg"]["id"].as_u64().unwrap();
+        let card = wait_card(a, &first, "c-1");
+        // the card names the asking session, and /me tells a window whether it is that one
+        let (_, me1) = get(a, "/room/me", &first);
+        assert!(me1["session"].as_str().is_some_and(|s| s.len() == 64));
+        assert_eq!(card["approval"]["session"], me1["session"]);
+        // the control key (the launcher does this) makes an owner link; the link makes a session
+        let (c, _, body) = with_headers(
+            a,
+            "POST",
+            "/room/owner-link",
+            "X-Tempo-Control: ck\r\n",
+            "{}",
+        );
+        assert_eq!(c, 200, "{body}");
+        let link: Value = serde_json::from_str(&body).unwrap();
+        let token = link["link"]
+            .as_str()
+            .unwrap()
+            .split("#owner=")
+            .nth(1)
+            .unwrap()
+            .to_string();
+        let (c, head, _) = post(a, "/room/owner", "", &json!({"token": token}));
+        assert_eq!(c, 200);
+        let second = set_cookie(&head, "tr_owner")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let (_, me2) = get(a, "/room/me", &second);
+        assert_eq!(me2["role"], "owner");
+        assert_ne!(me2["session"], me1["session"]);
+        // the new session sees the card but cannot answer it: 403, the agent is never called
+        assert_eq!(wait_card(a, &second, "c-1")["approval"]["state"], "pending");
+        assert_eq!(approve(a, &second, "", "family", "c-1", true), 403);
+        assert_eq!(approve(a, &second, "", "family", "c-1", false), 403);
+        assert!(
+            agent.confirm_calls().is_empty(),
+            "{:?}",
+            agent.confirm_calls()
+        );
+        // revoking invites is the signed-in session's too, never the control key's
+        let (c, _, _) = with_headers(
+            a,
+            "POST",
+            "/room/revoke-invites",
+            "X-Tempo-Control: ck\r\nContent-Length: 0\r\n",
+            "",
+        );
+        assert_ne!(c, 200);
+        let (c, _, _) = with_headers(
+            a,
+            "POST",
+            "/room/revoke-invites",
+            "X-Tempo-Control: ck\r\n",
+            &json!({"room": "family"}).to_string(),
+        );
+        assert_eq!(c, 403);
+        // the asking session still can
+        assert_eq!(approve(a, &first, "", "family", "c-1", true), 200);
+        assert_eq!(confirm_ids(&agent), [("c-1".to_string(), true)]);
+        assert_eq!(wait_for_tempo(a, &first, "family", q)["text"], "Done.");
         r.stop();
         hub.shutdown();
     }

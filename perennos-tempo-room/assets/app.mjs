@@ -27,6 +27,7 @@ const S = {
   thinkers: new Map(),
   sugg: { items: [], i: 0, at: -1 },
   notes: 0,
+  more: new Map(),
 };
 
 async function api(path, body) {
@@ -315,7 +316,9 @@ function roomHeader(r) {
     ? 'Chat with ' + team[0].name
     : r.mode === 'always' ? (wide() ? 'Tempo answers every message' : 'answers all') : (wide() ? 'Mention @tempo to ask' : '@tempo to ask');
   const tail = !dm && team.length ? ' · with ' + team.map((t) => t.name).join(', ') : '';
-  $('chat-meta').textContent = how + ' · ' + (dm ? '' : r.personality + ' · ') + people + (people === 1 ? ' person' : ' people') + tail;
+  // the owner sees whether Tempo works with its tools here (only while nobody else is)
+  const tools = r.tools_active ? ' · tools on' : r.tools ? ' · tools waiting' : '';
+  $('chat-meta').textContent = how + ' · ' + (dm ? '' : r.personality + ' · ') + people + (people === 1 ? ' person' : ' people') + tail + tools;
   $('room-title').textContent = '#' + r.id;
   $('room-sep').hidden = false;
   $('room-crumb').hidden = false;
@@ -341,6 +344,7 @@ async function openRoom(id, push) {
   autosize();
   const j = await api('messages?room=' + enc(id) + '&limit=60');
   S.msgs.set(id, j.messages);
+  S.more.set(id, j.more !== false);
   if (j.thinking) {
     if (!S.thinking.has(id)) S.thinking.set(id, Date.now());
     S.thinkers.set(id, j.thinking_who || []);
@@ -405,13 +409,91 @@ function fillText(node, text) {
   addMentions(node, text.slice(last));
 }
 
+// Whether this device can answer an approval: the owner's own session at the machine.
+const canApprove = () => !!S.me && S.me.role === 'owner' && S.me.loopback === true;
+
+const APPROVAL_END = {
+  approved: 'Approved.',
+  denied: 'Denied.',
+  'timed out': 'Timed out.',
+  'no answer': 'Denied: no answer in 5 minutes.',
+  unsure: 'Could not reach Tempo; it may have been answered there.',
+  gone: 'No longer waiting.',
+};
+
+// An approval card (owner only): what Tempo wants to do, and who may answer.
+function fillApproval(d, m) {
+  const a = m.approval;
+  d.replaceChildren();
+  d.classList.toggle('pending', a.state === 'pending');
+  const hd = el('div', 'hd');
+  hd.append(el('span', 'mark', 'tempo'), el('span', 'via', 'only you'));
+  const time = el('time', 'time', clock(m.t));
+  time.title = new Date(m.t * 1000).toLocaleString();
+  hd.append(time);
+  d.append(hd);
+  d.append(el('div', 'lbl', 'Approval needed'));
+  d.append(el('div', 'what', a.what));
+  if (a.detail) d.append(el('pre', 'detail', a.detail));
+  if (a.state === 'pending') {
+    // only the window (owner session) whose ask started this turn can answer it
+    const mine = !!a.session && !!S.me && S.me.session === a.session;
+    if (canApprove() && !mine) {
+      d.append(el('p', 'hint', 'Approve in the window you asked from'));
+    } else if (canApprove()) {
+      const row = el('div', 'row');
+      const yes = el('button', 'btn go', 'Approve');
+      const no = el('button', 'btn', 'Deny');
+      for (const [b, ok] of [[yes, true], [no, false]]) {
+        b.type = 'button';
+        b.addEventListener('click', async () => {
+          yes.disabled = true;
+          no.disabled = true;
+          try {
+            await api('approve', { room: m.room, id: a.id, ok });
+          } catch (e) {
+            toast(e.message, 6000);
+            yes.disabled = false;
+            no.disabled = false;
+          }
+        });
+      }
+      row.append(yes, no);
+      d.append(row);
+    } else {
+      d.append(el('p', 'hint', 'Approve on the computer running Perennos Tempo'));
+    }
+  } else {
+    d.append(el('p', 'hint ended', APPROVAL_END[a.state] || 'No longer waiting.'));
+  }
+}
+
+function approvalNode(m) {
+  const d = el('div', 'msg approval private');
+  d.dataset.id = String(m.id);
+  d.dataset.approval = m.approval.id;
+  fillApproval(d, m);
+  return d;
+}
+
+// The agent's own words arrive as an event: the card changes in place.
+function setApproval(room, id, state) {
+  const m = (S.msgs.get(room) || []).find((x) => x.approval && x.approval.id === id);
+  if (!m) return;
+  m.approval.state = state;
+  const n = room === S.room ? $('msgs').querySelector('.msg[data-approval="' + id + '"]') : null;
+  if (n) fillApproval(n, m);
+}
+
 function msgNode(m, prev) {
+  if (m.approval) return approvalNode(m);
   const cls = ['msg'];
   if (m.kind === 'tempo') cls.push('tempo');
   if (m.kind === 'teammate') cls.push('team');
   if (m.kind === 'system') cls.push('system');
   if (isMine(m)) cls.push('mine');
   if (m.local) cls.push('local');
+  if (m.owner_only) cls.push('private');
   const cont = prev && prev.kind !== 'system' && m.kind !== 'system' && prev.from === m.from && m.t - prev.t < 300 && !m.reply_name && !m.local;
   if (cont) cls.push('cont');
   const d = el('div', cls.join(' '));
@@ -428,7 +510,7 @@ function msgNode(m, prev) {
   } else hd.append(el('span', 'who', m.name));
   if (m.via === 'discord' || m.via === 'telegram' || m.via === 'whatsapp') hd.append(el('span', 'via', m.via));
   if (m.via === 'mcp' && m.kind === 'tempo') hd.append(el('span', 'via', 'via agent'));
-  if (m.local) hd.append(el('span', 'via', 'only you'));
+  if (m.local || m.owner_only) hd.append(el('span', 'via', 'only you'));
   const time = el('time', 'time', clock(m.t));
   time.title = new Date(m.t * 1000).toLocaleString();
   hd.append(time);
@@ -482,7 +564,9 @@ function renderMsgs(stick) {
   const box = $('msgs');
   const list = S.msgs.get(S.room) || [];
   box.replaceChildren();
-  if (list.length && list[0].id > 1) {
+  // older messages to page to: the server says (it leaves out what this person may not see)
+  const more = S.more.has(S.room) ? S.more.get(S.room) : list.length && list[0].id > 1;
+  if (list.length && more) {
     const more = el('button', 'btn sm more', 'Earlier messages');
     more.type = 'button';
     more.addEventListener('click', loadEarlier);
@@ -509,6 +593,7 @@ async function loadEarlier() {
   const before = box.scrollHeight - box.scrollTop;
   const j = await api('messages?room=' + enc(S.room) + '&before=' + list[0].id + '&limit=60');
   S.msgs.set(S.room, j.messages.concat(list));
+  S.more.set(S.room, j.more !== false && j.messages.length > 0);
   renderMsgs(false);
   box.scrollTop = box.scrollHeight - before;
 }
@@ -583,6 +668,11 @@ function connect() {
     }
     renderThinking();
     renderRoomsSoon();
+  });
+  es.addEventListener('approval', (e) => {
+    S.seq = Math.max(S.seq, Number(e.lastEventId) || 0);
+    const d = JSON.parse(e.data);
+    setApproval(d.room, d.id, d.state);
   });
   es.addEventListener('room', (e) => {
     S.seq = Math.max(S.seq, Number(e.lastEventId) || 0);
@@ -799,10 +889,12 @@ function closeButton() {
 }
 
 async function openPeople() {
+  const owner = S.me.role === 'owner';
+  // the tools line is worked out by the server from who can read the room right now
+  if (owner) await loadRooms().catch(() => {});
   const r = roomOf(S.room);
   await loadPeople(S.room);
   const p = S.people.get(S.room) || { members: [], owner_name: '', team: [] };
-  const owner = S.me.role === 'owner';
   let team = [];
   if (owner) {
     try { team = (await api('team')).team; } catch (e) { toast(e.message); }
@@ -851,6 +943,7 @@ async function openPeople() {
     }
     box.append(list);
     if (owner) {
+      toolsSection(box, r);
       teamSection(box, r, team);
       box.append(el('p', 'lbl sec', "Tempo's tone here"));
       const tone = el('div', 'seg-row');
@@ -890,6 +983,45 @@ async function openPeople() {
     end.append(closeButton());
     box.append(end);
   });
+}
+
+// ---- Tools: Tempo works with its tools while the owner is alone in the room (owner only)
+
+function toolsSection(box, r) {
+  box.append(el('p', 'lbl sec', 'Tools'));
+  const label = el('label', 'switch');
+  const input = el('input');
+  input.type = 'checkbox';
+  input.id = 'tools-switch';
+  input.setAttribute('role', 'switch');
+  input.checked = !!r.tools;
+  input.disabled = !!r.bridged;
+  label.append(input, el('span', null, 'Tempo can use its tools here while you are the only one in this room'));
+  input.addEventListener('change', async () => {
+    input.disabled = true;
+    try {
+      await api('tools', { room: r.id, on: input.checked });
+      await loadRooms();
+    } catch (e) {
+      toast(e.message, 6000);
+    }
+    openPeople();
+  });
+  box.append(label);
+  box.append(el('p', 'hint tools-note', r.tools_note || (r.tools ? 'Tools are on.' : 'Tools are off.')));
+  if (r.tools && r.invites > 0) {
+    const row = el('div', 'row');
+    const b = el('button', 'btn sm', 'Cancel open invites');
+    b.type = 'button';
+    b.title = 'An open invite means someone could still join, so Tempo answers as it does for guests until it is used or cancelled';
+    b.addEventListener('click', async () => {
+      try { await api('revoke-invites', { room: r.id }); await loadRooms(); } catch (e) { toast(e.message, 6000); }
+      openPeople();
+    });
+    row.append(b);
+    box.append(row);
+  }
+  box.append(el('p', 'hint small', 'With tools on, Tempo can read and change things on this machine for you, and asks you here before it changes anything. Only you see what is said then, and you approve on the computer running Perennos Tempo. The moment anyone joins, is invited, or a chat app is linked to this room, Tempo goes back to answering as it does for guests.'));
 }
 
 // ---- Team: named AI members the owner sets up (owner only)

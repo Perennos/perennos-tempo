@@ -161,16 +161,21 @@ pub fn call(ctx: &Ctx, name: &str, a: &Value) -> Result<String, String> {
                 st.rooms
                     .iter()
                     .map(|r| {
-                        let last = r
-                            .tail
-                            .back()
-                            .map(|m| format!(", last {}", line(m, off)))
+                        // the agent is not the owner at the keyboard: owner-only messages stay out
+                        let last = st
+                            .last_visible(r, false)
+                            .map(|m| format!(", last {}", line(&m, off)))
                             .unwrap_or_else(|| ", no messages yet".into());
                         format!(
                             "- #{} ({}): {} messages, Tempo answers {}{last}",
                             r.id,
                             r.name,
-                            r.next.saturating_sub(1),
+                            r.tail
+                                .iter()
+                                .filter(|m| !m.owner_only)
+                                .map(|m| m.id)
+                                .max()
+                                .unwrap_or(0),
                             if r.mode == crate::store::Mode::Always {
                                 "every message"
                             } else {
@@ -188,7 +193,7 @@ pub fn call(ctx: &Ctx, name: &str, a: &Value) -> Result<String, String> {
                 .find_room(q)
                 .ok_or_else(|| format!("no room {q} (try room_list)"))?;
             let limit = a["limit"].as_u64().unwrap_or(20).clamp(1, 200) as usize;
-            let msgs = st.messages(&r.id, None, None, limit);
+            let msgs = st.messages_for(&r.id, None, None, limit, false);
             if msgs.is_empty() {
                 return Ok(format!("#{} is empty so far", r.id));
             }
@@ -412,6 +417,35 @@ mod tests {
             .collect();
         assert_eq!(lines[0]["error"]["code"], -32700);
         assert_eq!(lines[1]["id"], 9);
+    }
+
+    #[test]
+    fn the_agent_is_never_shown_what_was_said_in_owner_mode() {
+        let d = tmpdir("mcp-private");
+        let mut st = Store::open(&d).unwrap();
+        st.create_room("Family", Mode::Mention, Personality::Warm)
+            .unwrap();
+        let mut put = |from: &str, kind: Kind, text: &str, private: bool| {
+            let mut m = Msg::new("family", from, "Riley", kind, "app", text);
+            m.owner_only = private;
+            st.append(m).unwrap();
+        };
+        put("owner", Kind::User, "a public hello", false);
+        put("owner", Kind::User, "PRIVATE-QUESTION", true);
+        put("tempo", Kind::Tempo, "PRIVATE-ANSWER", true);
+        drop(st);
+        let ctx = Ctx { dir: d };
+        let list = call(&ctx, "room_list", &json!({})).unwrap();
+        assert!(
+            list.contains("a public hello") && !list.contains("PRIVATE"),
+            "{list}"
+        );
+        assert!(list.contains("1 messages"), "{list}");
+        let read = call(&ctx, "room_read", &json!({"room": "family", "limit": 20})).unwrap();
+        assert!(
+            read.contains("a public hello") && !read.contains("PRIVATE"),
+            "{read}"
+        );
     }
 
     #[test]
