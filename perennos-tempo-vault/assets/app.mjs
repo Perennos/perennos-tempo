@@ -645,7 +645,7 @@ function renderInsp() {
 }
 
 // ------------------------------------------------------------------ Ask Tempo (the agent on this computer)
-const ASK = { conv: store.get('askConv', null), since: 0, el: null, log: null, input: null, cur: null, timer: 0, online: null, seen: new Set() };
+const ASK = { conv: store.get('askConv', null), since: 0, el: null, log: null, input: null, cur: null, timer: 0, online: null, label: '', seen: new Set() };
 const ASK_CHIPS = [['Summarize', 'Summarize this note in five lines.'], ['Links', 'Which notes in my vault should this note link to? Name them as [[links]].'], ['Tasks', 'Turn the open points in this note into a task list.'], ['Related', 'What else in my vault is related to this note, and how?']];
 function renderAsk(body) {
   if (!ASK.el) {
@@ -664,12 +664,23 @@ function renderAsk(body) {
   body.replaceChildren(ASK.el);
 }
 const ASK_NO_KEY = 'To ask Tempo here, open the vault from Perennos Tempo (the Start menu, or "tempo-launch open vault"): that brings Tempo\'s key to this tab.';
+const ASK_OLD_KEY = 'Tempo did not accept the key this tab has (it may have restarted with a new one). Open the vault again from Perennos Tempo to bring the current key.';
+// The agent names its models only to a caller with its key, so a list means the key works.
+function askLabel(hl) {
+  const models = hl && Array.isArray(hl.models) ? hl.models : null;
+  if (models && models.length) return `on · ${models.length} model${models.length === 1 ? '' : 's'}`;
+  return !models && agentKey() ? 'on · key not accepted' : 'on';
+}
 async function askHealth() {
   try {
     const hl = await api('agent/health');
     ASK.online = true;
-    ASK.state.textContent = hl && hl.models ? `on · ${hl.models.length} model${hl.models.length === 1 ? '' : 's'}` : 'on';
-    if (!agentKey() && !ASK.log.childElementCount) ASK.log.append(h('p', { class: 'hint' }, ASK_NO_KEY));
+    ASK.label = askLabel(hl);
+    ASK.state.textContent = ASK.label;
+    if (!ASK.log.childElementCount) {
+      if (!agentKey()) ASK.log.append(h('p', { class: 'hint' }, ASK_NO_KEY));
+      else if (!(hl && Array.isArray(hl.models))) ASK.log.append(h('p', { class: 'hint' }, ASK_OLD_KEY));
+    }
   }
   catch (e) {
     ASK.online = false;
@@ -704,7 +715,7 @@ async function askPoll(once) {
   try { r = await api(`agent/events?conv=${enc(ASK.conv)}&since=${ASK.since}`); } catch (e) { ASK.state.textContent = 'off'; return; }
   for (const ev of r.events || []) { ASK.since++; askEvent(ev); }
   if (r.busy) { ASK.state.textContent = 'thinking…'; ASK.timer = setTimeout(askPoll, once ? 900 : 420); }
-  else { ASK.state.textContent = ASK.online === false ? 'off' : 'on'; ASK.cur = null; }
+  else { ASK.state.textContent = ASK.online === false ? 'off' : ASK.label || 'on'; ASK.cur = null; }
   ASK.log.scrollTop = ASK.log.scrollHeight;
 }
 function askEvent(ev) {

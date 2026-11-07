@@ -279,11 +279,12 @@ pub mod tests {
         p
     }
 
-    /// The recorded calls, each as its argument list.
+    /// The recorded calls, each as its argument list. The fake writes one argument at a time,
+    /// so only calls whose end mark is written count (a call still being written is not one).
     pub fn calls(dir: &Path) -> Vec<Vec<String>> {
-        std::fs::read_to_string(dir.join("calls.log"))
-            .unwrap_or_default()
-            .split("\x1e\n")
+        let log = std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+        let done = log.rfind("\x1e\n").map_or("", |i| &log[..i + 2]);
+        done.split("\x1e\n")
             .filter(|c| !c.is_empty())
             .map(|c| {
                 c.split('\x1f')
@@ -298,6 +299,20 @@ pub mod tests {
         let mut m = Msg::new("family", "x", name, kind, via, text);
         m.t = t;
         m
+    }
+
+    #[test]
+    fn a_call_still_being_written_is_not_a_call() {
+        let d = crate::util::testdir::tmpdir("vault-calls");
+        std::fs::write(
+            d.join("calls.log"),
+            "append\x1fA.md\x1e\nappend\x1fRooms/family/2026-11-07.md\x1fbody\x1f--heading\x1f",
+        )
+        .unwrap();
+        assert_eq!(
+            calls(&d),
+            vec![vec!["append".to_string(), "A.md".to_string()]]
+        );
     }
 
     #[test]
