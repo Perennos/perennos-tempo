@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub struct RealWorld {
+    paths: crate::fleet::store::Paths,
+    node: std::sync::Mutex<Option<std::sync::Arc<crate::fleet::msg::Node>>>,
     settings: Option<J>,
     roots: Vec<PathBuf>,
     ffmpeg: Option<PathBuf>,
@@ -31,6 +33,8 @@ impl RealWorld {
         let ffmpeg =
             crate::bank::catalog::find(&tools, "ffmpeg").and_then(|t| locate(ctx, &Sys::real(), t));
         RealWorld {
+            paths: crate::fleet::store::Paths::of(ctx),
+            node: std::sync::Mutex::new(None),
             settings,
             roots,
             ffmpeg,
@@ -51,11 +55,18 @@ impl RealWorld {
             .unwrap_or_else(|| "http://127.0.0.1:8188".into())
     }
 
-    fn comfy_port(&self) -> u16 {
-        std::env::var("TEMPO_STAGE_COMFY_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(8188)
+    /// This computer's messenger, opened once. Answers come back to the running `fleet serve`,
+    /// which keeps them where this one reads them.
+    fn node(&self) -> Result<std::sync::Arc<crate::fleet::msg::Node>, String> {
+        let mut g = crate::fleet::msg::lock(&self.node);
+        if let Some(n) = g.as_ref() {
+            return Ok(n.clone());
+        }
+        let key = crate::fleet::store::read_key(&self.paths)
+            .ok_or("there is no fleet key yet: `tempo-launch fleet init`")?;
+        let n = crate::fleet::msg::Node::open(&self.paths, key)?;
+        *g = Some(n.clone());
+        Ok(n)
     }
 }
 
@@ -181,7 +192,7 @@ impl World for RealWorld {
             Duration::from_secs(2),
         ) {
             Ok((200, body)) => parse(&body)
-                .map(|j| route::from_fleet(&j, id, self.comfy_port()))
+                .map(|j| route::from_fleet(&j, id))
                 .unwrap_or_default(),
             _ => vec![],
         }
@@ -234,6 +245,33 @@ impl World for RealWorld {
 
     fn roots(&self) -> Option<Vec<PathBuf>> {
         Some(self.roots.clone())
+    }
+
+    fn send_inputs(
+        &self,
+        machine: &str,
+        files: &[(String, PathBuf)],
+    ) -> Result<Vec<(String, crate::fleet::blob::Sent)>, String> {
+        crate::fleet::stage::send_inputs(&*self.node()?, machine, files)
+    }
+
+    fn remote_take(
+        &self,
+        machine: &str,
+        workflow: &str,
+        inputs: &[(String, crate::fleet::stage::Input)],
+        pedals: &[(String, String)],
+        seed: i64,
+    ) -> Result<crate::fleet::stage::Done, String> {
+        crate::fleet::stage::call(
+            &*self.node()?,
+            machine,
+            workflow,
+            inputs,
+            pedals,
+            Some(seed),
+            Duration::from_secs(3 * 3600 + 600),
+        )
     }
 }
 

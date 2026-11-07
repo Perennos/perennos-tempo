@@ -5,6 +5,7 @@
 //! `setup` reach them with the person's own ssh, and `serve`, `send`, `inbox` and `ping` are the
 //! messenger between them: signed, durable, fast. See docs/TEMPO-SETUP.md ("Tempo Fleet").
 
+pub mod blob;
 pub mod crypto;
 pub mod jobs;
 pub mod mdns;
@@ -16,11 +17,14 @@ pub mod scan;
 pub mod serve;
 pub mod service;
 pub mod ssh;
+pub mod stage;
 pub mod store;
 pub mod tools;
 
 #[cfg(test)]
 mod band_tests;
+#[cfg(test)]
+mod blob_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -140,6 +144,8 @@ pub enum FleetCmd {
         yes: bool,
     },
     Allow(Vec<String>, bool),
+    /// The most one file may be in a blob stream, in GiB; None shows it.
+    Cap(Option<f64>),
     Rotate {
         yes: bool,
     },
@@ -251,11 +257,21 @@ pub fn parse_args(rest: &[&str]) -> Result<FleetCmd, String> {
             let list: Vec<String> = rest[1..].iter().map(|s| s.to_string()).collect();
             if list.is_empty() || list.iter().any(|e| !tools::allow_entry_ok(e)) {
                 return Err(format!(
-                    "fleet {w} takes comfy_image, mcp:SERVER/TOOL or mcp:SERVER/*"
+                    "fleet {w} takes comfy_image, stage, mcp:SERVER/TOOL or mcp:SERVER/*"
                 ));
             }
             FleetCmd::Allow(list, w == "allow")
         }
+        Some("cap") => match &rest[1..] {
+            [] => FleetCmd::Cap(None),
+            [n] => FleetCmd::Cap(Some(
+                n.parse::<f64>()
+                    .ok()
+                    .filter(|g| (0.001..=1024.0).contains(g))
+                    .ok_or("fleet cap takes a number of GiB, like 4 or 8")?,
+            )),
+            _ => return Err("fleet cap takes one number of GiB, or nothing to show it".into()),
+        },
         Some("rotate") => match &rest[1..] {
             [] => FleetCmd::Rotate { yes: false },
             ["--yes"] => FleetCmd::Rotate { yes: true },
@@ -1586,6 +1602,35 @@ pub fn allow_cmd(p: &Paths, list: &[String], on: bool, out: &mut dyn Write) -> i
     }
 }
 
+fn gib_words(bytes: u64) -> String {
+    let g = bytes as f64 / store::GIB as f64;
+    if g.fract() == 0.0 {
+        format!("{g:.0} GiB")
+    } else {
+        format!("{g:.2} GiB")
+    }
+}
+
+/// `fleet cap [GIB]`: the most one file may be when it crosses between computers (a clip going
+/// to another computer's Stage, or a render coming back). Each computer keeps its own: the
+/// receiver turns away a bigger file, so raise it on both ends.
+pub fn cap_cmd(p: &Paths, gib: Option<f64>, out: &mut dyn Write) -> i32 {
+    if let Some(g) = gib {
+        if let Err(e) = store::update(p, |f| f.blob_cap = (g * store::GIB as f64) as u64) {
+            eprintln!("tempo-launch: fleet: {e}");
+            return 1;
+        }
+    }
+    let cap = store::load(p).blob_cap();
+    let _ = writeln!(
+        out,
+        "A file may be {} between computers here ({} unless you change it: `tempo-launch fleet cap GIB`). Each computer keeps its own number; the one that takes the file turns away a bigger one.",
+        gib_words(cap),
+        gib_words(store::DEFAULT_BLOB_CAP),
+    );
+    0
+}
+
 /// `fleet rotate`: a new fleet key. It goes to each computer over your ssh first, then this
 /// computer switches. A computer it cannot reach keeps the old key and drops out of the
 /// conversation until `fleet setup NAME` (or a new `fleet invite`) gives it the new one.
@@ -1772,6 +1817,7 @@ pub fn run(ctx: &Ctx, cmd: FleetCmd) -> i32 {
             &mut real_exec,
         ),
         FleetCmd::Allow(list, on) => allow_cmd(&p, &list, on, &mut out),
+        FleetCmd::Cap(g) => cap_cmd(&p, g, &mut out),
         FleetCmd::Rotate { yes } => rotate_cmd(&p, yes, &mut ask, &mut out),
         FleetCmd::InstallKey { name, peers } => {
             let mut s = String::new();

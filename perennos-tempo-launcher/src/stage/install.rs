@@ -19,6 +19,9 @@ pub struct Host<'a> {
     pub pm: &'a dyn Pm,
     pub os: &'a str,
     pub sc: &'a dyn Soundcheck,
+    /// The owner's Hugging Face token, if they have one: for gated models only, and only ever
+    /// sent to huggingface.co (see `hf.rs`).
+    pub token: Option<&'a super::hf::Token>,
 }
 
 /// What the owner sees and says. `ask` shows a question and gives back the line they typed.
@@ -187,7 +190,14 @@ fn put_in_place(from: &Path, to: &Path) -> Result<(), String> {
 
 // ---- the plan
 
-fn show_plan(cat: &Catalog, wf: &Workflow, opts: &AddOpts, comfy: &Path, out: &mut dyn Write) {
+fn show_plan(
+    cat: &Catalog,
+    wf: &Workflow,
+    opts: &AddOpts,
+    comfy: &Path,
+    host_token: bool,
+    out: &mut dyn Write,
+) {
     let _ = cat;
     let _ = writeln!(out, "{} ({})", wf.title, wf.id);
     let _ = writeln!(out, "  {}", wf.what);
@@ -229,8 +239,11 @@ fn show_plan(cat: &Catalog, wf: &Workflow, opts: &AddOpts, comfy: &Path, out: &m
         let size = m.gb.map_or("size unknown".to_string(), gb);
         let how = if there {
             "already there".to_string()
+        } else if m.gated && host_token {
+            "gated: its licence is shown first, then fetched with your Hugging Face token"
+                .to_string()
         } else if m.gated {
-            "you fetch this one: its licence needs your yes on the model's page".to_string()
+            "gated: its licence needs your yes on the model's page (set HF_TOKEN and Stage fetches it)".to_string()
         } else {
             "fetched".to_string()
         };
@@ -274,6 +287,7 @@ fn show_plan(cat: &Catalog, wf: &Workflow, opts: &AddOpts, comfy: &Path, out: &m
 }
 
 /// Fetch one file with `download`, into `dest`, only if its SHA-256 is right.
+#[allow(clippy::too_many_arguments)]
 fn fetch_checked(
     host: &Host,
     ctx: &Ctx,
@@ -282,6 +296,7 @@ fn fetch_checked(
     bytes: u64,
     want: Option<&str>,
     now: u64,
+    token: Option<&super::hf::Token>,
 ) -> Result<String, String> {
     let fetch = host
         .pm
@@ -298,9 +313,13 @@ fn fetch_checked(
     if part.exists() {
         to_trash(&ctx.home, &part, now)?;
     }
-    fetch
-        .download(url, &part, download_limit_secs(bytes), &mut |_| {})
-        .map_err(|e| format!("Could not fetch {url}: {e}"))?;
+    let secs = download_limit_secs(bytes);
+    match token {
+        // a gated model: hop by hop, the token only where it belongs
+        Some(t) => super::hf::fetch(&*fetch, url, Some(t), &part, secs, &mut |_| {}),
+        None => fetch.download(url, &part, secs, &mut |_| {}),
+    }
+    .map_err(|e| format!("Could not fetch {url}: {e}"))?;
     let got = file_sha256(&part, &mut |_| {})
         .map_err(|e| format!("could not read {}: {e}", part.display()))?;
     if let Some(w) = want {
@@ -393,7 +412,7 @@ fn add_node(
         to_trash(&ctx.home, &archive, now)?;
     }
     io.say(&format!("Fetching {} at {} ...", n.name, &n.commit[..8]));
-    fetch_checked(host, ctx, &url, &archive, 50 << 20, None, now)?;
+    fetch_checked(host, ctx, &url, &archive, 50 << 20, None, now, None)?;
     host.pm.run(&untar_argv(host.os, &archive, &work))?;
     let root = pack_root(&work, n)?;
     // the look
@@ -487,7 +506,7 @@ pub fn add(
             return 1;
         }
     }
-    show_plan(cat, wf, opts, &comfy, io.out);
+    show_plan(cat, wf, opts, &comfy, host.token.is_some(), io.out);
     // a graph from upstream with a paid node in it is refused before anything is fetched
     if !wf.api_nodes.is_empty() && !st.cloud_ok(id) {
         io.say(&format!(
@@ -517,6 +536,7 @@ pub fn add(
         wf.file_bytes.max(1 << 20),
         Some(&wf.file_sha256),
         now,
+        None,
     ) {
         io.say(&e);
         return 1;
@@ -567,14 +587,27 @@ pub fn add(
         if dest.exists() {
             continue;
         }
+        // a gated model: the licence and the word "gated" first; then, with the owner's token and
+        // a yes of their own (`--yes` never accepts a licence for them), the fetch
+        let mut token = None;
         if m.gated {
-            by_hand.push(format!(
-                "{}  ->  {}  (accept the licence at {})",
-                m.name,
-                dest.display(),
-                m.url.split("/resolve/").next().unwrap_or(&m.url)
+            io.say(&format!(
+                "\n{}",
+                super::hf::gated_notice(&m.name, &m.licence, &m.url, host.token.is_some())
             ));
-            continue;
+            let go = host.token.is_some()
+                && super::hf::is_hf(&m.url)
+                && io.yes_no("Fetch it with your token? You have read the licence and accepted it on the page. [y/N] ");
+            if !go {
+                by_hand.push(format!(
+                    "{}  ->  {}  (accept the licence at {})",
+                    m.name,
+                    dest.display(),
+                    super::hf::page_of(&m.url)
+                ));
+                continue;
+            }
+            token = host.token;
         }
         io.say(&format!(
             "Fetching {} ({}) ...",
@@ -582,7 +615,16 @@ pub fn add(
             m.gb.map_or("size unknown".into(), gb)
         ));
         let bytes = m.gb.map_or(4_000_000_000, |g| (g * 1e9) as u64);
-        match fetch_checked(host, ctx, &m.url, &dest, bytes, m.sha256.as_deref(), now) {
+        match fetch_checked(
+            host,
+            ctx,
+            &m.url,
+            &dest,
+            bytes,
+            m.sha256.as_deref(),
+            now,
+            token,
+        ) {
             Ok(sha) => {
                 if m.sha256.is_some() {
                     io.say("SHA-256 matches the pin.");
@@ -762,7 +804,12 @@ pub mod tests {
 
     /// A fetcher with a shelf of pretend files by address; a tar.gz it hands out is a marker the
     /// fake `tar` below turns into a folder.
-    pub struct Shelf(pub Mutex<Vec<(String, Vec<u8>)>>, pub Mutex<Vec<String>>);
+    pub struct Shelf(
+        pub Mutex<Vec<(String, Vec<u8>)>>,
+        pub Mutex<Vec<String>>,
+        /// Every hop of a gated fetch: the address, and the bearer token that went with it.
+        pub Mutex<Vec<(String, Option<String>)>>,
+    );
 
     impl Fetch for Shelf {
         fn get(&self, _: &str, _: Option<&str>, _: bool) -> Fetched {
@@ -775,6 +822,49 @@ pub mod tests {
             _: u64,
             _: &mut dyn FnMut(u64),
         ) -> Result<(), String> {
+            self.1.lock().unwrap().push(url.to_string());
+            let shelf = self.0.lock().unwrap();
+            let (_, body) = shelf
+                .iter()
+                .find(|(u, _)| u == url)
+                .ok_or_else(|| format!("404 {url}"))?;
+            std::fs::write(part, body).map_err(|e| e.to_string())
+        }
+        /// huggingface.co hands a gated file over from another server, and only to a token.
+        fn probe(
+            &self,
+            url: &str,
+            bearer: Option<&str>,
+        ) -> Result<crate::setup::registry::Probe, String> {
+            use crate::setup::registry::Probe;
+            self.2
+                .lock()
+                .unwrap()
+                .push((url.to_string(), bearer.map(String::from)));
+            Ok(if url.starts_with("https://huggingface.co/") {
+                if bearer.is_some() {
+                    Probe::Moved(
+                        "https://cdn-lfs.huggingface.co/x/y/gated.safetensors?sig=1".into(),
+                    )
+                } else {
+                    Probe::Denied(401)
+                }
+            } else {
+                Probe::Here
+            })
+        }
+        fn download_hop(
+            &self,
+            url: &str,
+            part: &Path,
+            _: u64,
+            _: &mut dyn FnMut(u64),
+            bearer: Option<&str>,
+        ) -> Result<(), String> {
+            self.2
+                .lock()
+                .unwrap()
+                .push((format!("GET {url}"), bearer.map(String::from)));
             self.1.lock().unwrap().push(url.to_string());
             let shelf = self.0.lock().unwrap();
             let (_, body) = shelf
@@ -871,6 +961,11 @@ pub mod tests {
                 ),
             ]),
             Mutex::new(vec![]),
+            Mutex::new(vec![]),
+        ));
+        shelf.0.lock().unwrap().push((
+            "https://cdn-lfs.huggingface.co/x/y/gated.safetensors?sig=1".into(),
+            b"gated-weights".to_vec(),
         ));
         (cat, shelf)
     }
@@ -904,6 +999,7 @@ pub mod tests {
             pm,
             os: "linux",
             sc,
+            token: None,
         };
         let code = add(
             ctx,
@@ -949,7 +1045,7 @@ pub mod tests {
         assert!(
             out.contains("Not added")
                 && out.contains("small.safetensors")
-                && out.contains("you fetch this one"),
+                && out.contains("gated: its licence needs your yes"),
             "{out}"
         );
         assert!(
@@ -979,6 +1075,152 @@ pub mod tests {
         let wf = cat.find("paint-edit-photo").unwrap();
         let m = missing(&ctx, wf, &st, &[]);
         assert_eq!(m, ["model gated.safetensors is not in models/vae"], "{m:?}");
+    }
+
+    /// Like `run_add`, with an owner who has a Hugging Face token.
+    fn run_add_with_token(
+        ctx: &Ctx,
+        pm: &FakePm,
+        cat: &Catalog,
+        opts: AddOpts,
+        answers: &[&str],
+        token: &crate::stage::hf::Token,
+    ) -> (i32, String) {
+        let sc = FakeSoundcheck(Ok(vec![]));
+        let mut out = Vec::new();
+        let mut it = answers
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter();
+        let mut ask = |_: &str| it.next().unwrap_or_default();
+        let host = Host {
+            pm,
+            os: "linux",
+            sc: &sc,
+            token: Some(token),
+        };
+        let code = add(
+            ctx,
+            &host,
+            cat,
+            "paint-edit-photo",
+            &opts,
+            1_700_000_000,
+            &mut Io {
+                out: &mut out,
+                ask: &mut ask,
+            },
+        );
+        (code, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn a_gated_model_shows_its_licence_then_is_fetched_with_the_token_only_after_a_yes_of_its_own()
+    {
+        let tok = crate::stage::hf::tests::fake_token();
+        let t = crate::stage::hf::Token::new(&tok).unwrap();
+        let (ctx, comfy, cat, pm) = setup("add-gated", false, "");
+        // `--yes` covers the plan, not the licence: the second question gets "n"
+        let (code, out) = run_add_with_token(
+            &ctx,
+            &pm,
+            &cat,
+            AddOpts {
+                yes: true,
+                with: vec![],
+            },
+            &["n"],
+            &t,
+        );
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("gated.safetensors is gated")
+                && out.contains("Its licence:")
+                && out.contains("Stage found your Hugging Face token")
+                && out.contains("Added, with these files left for you"),
+            "{out}"
+        );
+        assert!(
+            pm.shelf.2.lock().unwrap().is_empty(),
+            "nothing was asked of Hugging Face"
+        );
+        assert!(!comfy.join("models/vae/gated.safetensors").exists());
+        // the token never reaches the output, whatever the answer
+        assert!(!out.contains(&tok));
+        // a fresh home, and this time the owner says yes to the licence question
+        let (ctx, comfy, cat, pm) = setup("add-gated-yes", false, "");
+        let (code, out) = run_add_with_token(
+            &ctx,
+            &pm,
+            &cat,
+            AddOpts {
+                yes: true,
+                with: vec![],
+            },
+            &["y"],
+            &t,
+        );
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            std::fs::read(comfy.join("models/vae/gated.safetensors")).unwrap(),
+            b"gated-weights"
+        );
+        assert!(!out.contains(&tok), "{out}");
+        let hops = pm.shelf.2.lock().unwrap().clone();
+        // huggingface.co got the token; the server it handed the file over from did not
+        let hf: Vec<_> = hops
+            .iter()
+            .filter(|(u, _)| u.contains("//huggingface.co/"))
+            .collect();
+        let cdn: Vec<_> = hops.iter().filter(|(u, _)| u.contains("cdn-lfs")).collect();
+        assert!(
+            !hf.is_empty() && hf.iter().all(|(_, b)| b.as_deref() == Some(tok.as_str())),
+            "{hops:?}"
+        );
+        assert!(
+            !cdn.is_empty() && cdn.iter().all(|(_, b)| b.is_none()),
+            "{hops:?}"
+        );
+        // no token on file anywhere under the home: the state, the logs, the trash
+        fn all_text(d: &Path, out: &mut String) {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    all_text(&p, out);
+                } else if let Ok(t) = std::fs::read_to_string(&p) {
+                    out.push_str(&t);
+                }
+            }
+        }
+        let mut on_disk = String::new();
+        all_text(&ctx.home, &mut on_disk);
+        assert!(!on_disk.contains(&tok), "the token was written down");
+    }
+
+    #[test]
+    fn without_a_token_a_gated_model_is_left_for_the_owner_and_the_licence_is_still_shown() {
+        let (ctx, _comfy, cat, pm) = setup("add-gated-none", false, "");
+        let sc = FakeSoundcheck(Ok(vec![]));
+        let (code, out) = run_add(
+            &ctx,
+            &pm,
+            &sc,
+            &cat,
+            AddOpts {
+                yes: true,
+                with: vec![],
+            },
+            &[],
+        );
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("is gated")
+                && out.contains("HF_TOKEN")
+                && out.contains("accept the licence at"),
+            "{out}"
+        );
+        assert!(pm.shelf.2.lock().unwrap().is_empty());
     }
 
     #[test]

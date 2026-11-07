@@ -478,7 +478,7 @@ pub fn log_call(p: &Paths, line: &str) {
     }
 }
 
-fn safe_name(n: &str) -> String {
+pub(super) fn safe_name(n: &str) -> String {
     let base = n.rsplit(['/', '\\']).next().unwrap_or("file");
     let s: String = base
         .chars()
@@ -630,7 +630,7 @@ pub struct CallOut {
     pub node: String,
 }
 
-fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
+pub(super) fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
         return first;

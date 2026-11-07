@@ -7,10 +7,12 @@
 pub mod catalog;
 pub mod comfy;
 pub mod guard;
+pub mod hf;
 pub mod http;
 pub mod install;
 pub mod mcp;
 pub mod pedals;
+pub mod remote;
 pub mod route;
 pub mod run;
 pub mod state;
@@ -495,6 +497,7 @@ pub fn run_with(
                 on: spec.on,
                 seed: spec.seed,
                 guarded: false,
+                ..RunOpts::default()
             };
             match play(ctx, world, cat, &id, &opts) {
                 Ok(o) => {
@@ -639,10 +642,12 @@ pub fn run(ctx: &crate::Ctx, cmd: StageCmd) -> i32 {
         exe: ctx.find("tempo-local-agent"),
         limit: std::time::Duration::from_secs(180),
     };
+    let token = hf::token_from_env();
     let host = Host {
         pm: &pm,
         os: std::env::consts::OS,
         sc: &sc,
+        token: token.as_ref(),
     };
     let world = world::RealWorld::new(ctx);
     run_with(

@@ -1,6 +1,6 @@
 //! A small HTTP client for ComfyUI (std only). ComfyUI has no password, so Stage only talks to
-//! it on a private or tailnet address (the same rule the Fleet uses) and never follows a
-//! redirect, so nothing Stage sends can leave the private network.
+//! the one on this computer, at 127.0.0.1, and never follows a redirect. Another computer's
+//! ComfyUI is never reached from here: a run for it goes through the Fleet messenger.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -16,22 +16,27 @@ pub struct Http {
 }
 
 impl Http {
-    /// `http://host[:port]` on an allowed private address.
+    /// `http://host[:port]` on this computer (127.0.0.1, ::1 or localhost).
     pub fn parse(base: &str) -> Result<Http, String> {
         let (https, host, port) = crate::parse_remote_url(base)?;
         if https {
-            return Err("ComfyUI is reached over http on your own network; an https address is not used here".into());
+            return Err(
+                "ComfyUI is reached over http on this computer; an https address is not used here"
+                    .into(),
+            );
         }
-        Ok(Http { host, port })
+        let h = Http { host, port };
+        h.addr()?;
+        Ok(h)
     }
 
     fn addr(&self) -> Result<SocketAddr, String> {
         let mut all = (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(|e| format!("could not find {} ({e})", self.host))?;
-        all.find(|a| crate::private_ip(a.ip())).ok_or_else(|| {
+        all.find(|a| a.ip().is_loopback()).ok_or_else(|| {
             format!(
-                "{} does not point at a private address, so Stage will not send anything there",
+                "{} is not this computer. Stage only talks to the ComfyUI on 127.0.0.1; a run for another computer goes through the Fleet (`tempo-launch fleet allow stage` there), and nothing needs ComfyUI to listen on the network.",
                 self.host
             )
         })
@@ -209,13 +214,16 @@ mod tests {
     }
 
     #[test]
-    fn only_private_http_addresses_are_used() {
+    fn only_this_computer_is_reached() {
         assert!(Http::parse("http://127.0.0.1:8188").is_ok());
-        assert!(Http::parse("http://10.0.0.5:8188").is_ok());
-        assert!(Http::parse("https://10.0.0.5:8188").is_err());
-        assert!(Http::parse("http://8.8.8.8:8188")
-            .unwrap_err()
-            .contains("not a tailnet or private"));
+        assert!(Http::parse("http://localhost:8188").is_ok());
+        // not another computer on the network, not even a private one
+        for other in ["http://10.0.0.5:8188", "http://192.168.0.7:8188"] {
+            let e = Http::parse(other).unwrap_err();
+            assert!(e.contains("Fleet") && e.contains("127.0.0.1"), "{e}");
+        }
+        assert!(Http::parse("https://127.0.0.1:8188").is_err());
+        assert!(Http::parse("http://8.8.8.8:8188").is_err());
     }
 
     #[test]

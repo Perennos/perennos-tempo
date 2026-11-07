@@ -209,6 +209,10 @@ pub struct FakeWorld {
     pub fleet: Vec<Machine>,
     pub roots: Option<Vec<PathBuf>>,
     pub lease: Mutex<Vec<&'static str>>,
+    /// This computer's messenger, when the run may use the Fleet.
+    pub node: Option<Arc<crate::fleet::msg::Node>>,
+    /// How many times a ComfyUI was asked for by address (a Fleet machine never is).
+    pub comfy_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl World for FakeWorld {
@@ -225,6 +229,7 @@ impl World for FakeWorld {
         self.fleet.clone()
     }
     fn comfy(&self, base: &str) -> Result<Box<dyn Comfy>, String> {
+        self.comfy_calls.fetch_add(1, Ordering::SeqCst);
         let mut c = HttpComfy::new(base)?;
         c.poll = Duration::from_millis(5);
         Ok(Box::new(c))
@@ -242,6 +247,33 @@ impl World for FakeWorld {
     fn roots(&self) -> Option<Vec<PathBuf>> {
         self.roots.clone()
     }
+    fn send_inputs(
+        &self,
+        machine: &str,
+        files: &[(String, PathBuf)],
+    ) -> Result<Vec<(String, crate::fleet::blob::Sent)>, String> {
+        let n = self.node.as_ref().ok_or("no messenger in this world")?;
+        crate::fleet::stage::send_inputs(n, machine, files)
+    }
+    fn remote_take(
+        &self,
+        machine: &str,
+        workflow: &str,
+        inputs: &[(String, crate::fleet::stage::Input)],
+        pedals: &[(String, String)],
+        seed: i64,
+    ) -> Result<crate::fleet::stage::Done, String> {
+        let n = self.node.as_ref().ok_or("no messenger in this world")?;
+        crate::fleet::stage::call(
+            n,
+            machine,
+            workflow,
+            inputs,
+            pedals,
+            Some(seed),
+            Duration::from_secs(60),
+        )
+    }
 }
 
 pub fn world(local: Option<Machine>, fleet: Vec<Machine>) -> FakeWorld {
@@ -250,6 +282,91 @@ pub fn world(local: Option<Machine>, fleet: Vec<Machine>) -> FakeWorld {
         fleet,
         roots: None,
         lease: Mutex::new(vec![]),
+        node: None,
+        comfy_calls: Default::default(),
+    }
+}
+
+// ---- another computer, through the Fleet messenger
+
+const KEY: [u8; 32] = [7; 32];
+
+/// What the other computer does when asked: its own Stage, its own home, its own ComfyUI.
+struct StudioRunner {
+    home: PathBuf,
+    world: Arc<FakeWorld>,
+    cat: Catalog,
+}
+
+impl crate::fleet::stage::StageRunner for StudioRunner {
+    fn ready(&self, workflow: &str) -> bool {
+        State::load(&ctx_in(&self.home)).enabled(workflow)
+    }
+    fn play(&self, p: &crate::fleet::stage::Play) -> Result<crate::fleet::stage::Played, String> {
+        super::remote::play_for_fleet(&ctx_in(&self.home), &*self.world, &self.cat, p)
+    }
+}
+
+/// Two messenger nodes on this computer: `a` plays the run, `studio` is another computer with
+/// its own home, its own ComfyUI (a fake on 127.0.0.1, behind the messenger and nowhere else)
+/// and its own GPU lease.
+pub struct Studio {
+    pub a: crate::fleet::tests::Rig,
+    pub b: crate::fleet::tests::Rig,
+    pub ctx_b: Ctx,
+    pub world_b: Arc<FakeWorld>,
+}
+
+impl Studio {
+    pub fn new(tag: &str, fake: &FakeComfy, gpu: f64, allow: bool, cat: &Catalog) -> Studio {
+        use crate::fleet::{blob, stage as fs, store, tests as ft};
+        let a = ft::rig(&format!("lead-{tag}"), KEY);
+        let b = ft::rig("studio", KEY);
+        ft::link(&a, &b);
+        if allow {
+            store::update(&b.paths, |f| f.allow.push("stage".into())).unwrap();
+        }
+        blob::attach(&a.node);
+        blob::attach(&b.node);
+        let (ctx_b, _, _) = ready(&format!("{tag}-studio"));
+        let world_b = Arc::new(world(
+            Some(fake.machine("this computer", true, gpu)),
+            vec![],
+        ));
+        crate::fleet::msg::lock(&b.node.handlers).push(Arc::new(fs::StageHandler::new(
+            b.paths.clone(),
+            Arc::new(StudioRunner {
+                home: ctx_b.home.clone(),
+                world: world_b.clone(),
+                cat: cat.clone(),
+            }),
+        )));
+        Studio {
+            a,
+            b,
+            ctx_b,
+            world_b,
+        }
+    }
+
+    /// The studio as the lead computer's Fleet view reports it.
+    pub fn machine(&self, gpu: f64) -> Machine {
+        Machine {
+            name: "studio".into(),
+            local: false,
+            base: String::new(),
+            gpu_gb: gpu,
+            free_gb: gpu,
+            busy: 0.0,
+        }
+    }
+
+    /// A world for the lead computer: it may use the Fleet, and has `local` if given.
+    pub fn lead(&self, local: Option<Machine>, gpu: f64) -> FakeWorld {
+        FakeWorld {
+            node: Some(self.a.node.clone()),
+            ..world(local, vec![self.machine(gpu)])
+        }
     }
 }
 
@@ -405,10 +522,8 @@ fn a_machine_with_too_little_graphics_memory_is_not_used() {
     let (ctx, cat, d) = ready("run-route");
     let small = FakeComfy::start(8.0);
     let big = FakeComfy::start(16.0);
-    let w = world(
-        Some(small.machine("this computer", true, 8.0)),
-        vec![big.machine("studio", false, 16.0)],
-    );
+    let studio = Studio::new("route", &big, 16.0, true, &cat);
+    let w = studio.lead(Some(small.machine("this computer", true, 8.0)), 16.0);
     let out = play(&ctx, &w, &cat, "paint-edit-photo", &opts(&d, &[])).unwrap();
     assert!(
         out.status.starts_with("Edited on the studio box, "),
@@ -438,10 +553,8 @@ fn takes_are_spread_over_the_fleets_cards_and_the_one_that_passes_the_check_wins
     let b = FakeComfy::start(16.0);
     // the studio box makes a broken file
     b.st.lock().unwrap().body = vec![b'x'; 5000];
-    let w = world(
-        Some(a.machine("this computer", true, 24.0)),
-        vec![b.machine("studio", false, 16.0)],
-    );
+    let studio = Studio::new("takes", &b, 16.0, true, &cat);
+    let w = studio.lead(Some(a.machine("this computer", true, 24.0)), 16.0);
     let mut o = opts(&d, &[]);
     o.takes = 2;
     let out = play(&ctx, &w, &cat, "paint-edit-photo", &o).unwrap();
@@ -589,10 +702,8 @@ fn a_machine_that_lacks_a_node_class_sits_out() {
     let a = FakeComfy::start(24.0);
     let b = FakeComfy::start(24.0);
     a.st.lock().unwrap().unknown_classes = vec!["KSampler".into()];
-    let w = world(
-        Some(a.machine("this computer", true, 24.0)),
-        vec![b.machine("studio", false, 24.0)],
-    );
+    let studio = Studio::new("missingnode", &b, 24.0, true, &cat);
+    let w = studio.lead(Some(a.machine("this computer", true, 24.0)), 24.0);
     let mut o = opts(&d, &[]);
     o.takes = 2;
     let out = play(&ctx, &w, &cat, "paint-edit-photo", &o).unwrap();
@@ -972,6 +1083,7 @@ fn go(
         pm: &pm,
         os: "linux",
         sc: &sc,
+        token: None,
     };
     let mut out = Vec::new();
     let mut it = answers
@@ -1113,4 +1225,124 @@ fn the_fleet_heartbeat_can_say_which_workflows_are_ready() {
     st.set("paint-edit-photo", vec![("enabled", J::Bool(false))]);
     st.save(&ctx).unwrap();
     assert!(!super::any_on(&ctx));
+}
+
+// ---- a remote run: through the Fleet messenger, never at the other computer's ComfyUI
+
+#[test]
+fn a_remote_run_goes_through_the_messenger_to_a_comfyui_that_answers_only_on_127_0_0_1() {
+    let (ctx, cat, d) = ready("rm-ok");
+    let fake = FakeComfy::start(24.0);
+    // the lead computer has no ComfyUI at all; the studio's is a fake on 127.0.0.1
+    assert!(fake.base().starts_with("http://127.0.0.1:"));
+    let studio = Studio::new("rm-ok", &fake, 24.0, true, &cat);
+    let w = studio.lead(None, 24.0);
+    let (pic, _) = pics(&d);
+    let mut o = opts(&d, &[("strength", "20")]);
+    o.inputs[0].1 = pic.to_string_lossy().into_owned();
+    let out = play(&ctx, &w, &cat, "paint-edit-photo", &o).unwrap();
+    assert!(
+        out.status.starts_with("Edited on the studio box, "),
+        "{}",
+        out.status
+    );
+    // the studio's own ComfyUI took the files and the graph
+    let f = fake.st.lock().unwrap();
+    assert_eq!(f.prompts.len(), 1);
+    assert_eq!(f.uploads.len(), 2, "{:?}", f.uploads);
+    drop(f);
+    // and the lead never asked for a ComfyUI by address
+    assert_eq!(w.comfy_calls.load(Ordering::SeqCst), 0);
+    // the result is in the lead's workbench, with a proof that says where it was made
+    let t = &out.takes[0];
+    assert_eq!(t.machine, "studio");
+    let bench = super::run::workbench(&ctx);
+    assert!(t.files[0].starts_with(&bench) && t.files[0].is_file());
+    let side =
+        parse(&std::fs::read_to_string(format!("{}.stage.json", t.files[0].display())).unwrap())
+            .unwrap();
+    assert_eq!(side.get("machine").unwrap().str("name"), Some("studio"));
+    assert_eq!(
+        side.get("machine").unwrap().str("via"),
+        Some("fleet messenger")
+    );
+    assert_eq!(
+        side.get("output").unwrap().str("sha256").unwrap(),
+        crate::setup::sha256::sha256_hex(&std::fs::read(&t.files[0]).unwrap())
+    );
+    // the input's hash in the proof is the hash of the file that was sent
+    let ins = side.arr("inputs");
+    assert!(ins.iter().any(|i| i.str("sha256")
+        == Some(&crate::setup::sha256::sha256_hex(
+            &std::fs::read(&pic).unwrap()
+        ))));
+    // the studio ran it under its own lease, and kept no takes file or "again" memory of its own
+    assert_eq!(*studio.world_b.lease.lock().unwrap(), vec!["begin", "end"]);
+    assert!(
+        w.lease.lock().unwrap().is_empty(),
+        "the lead never took its own card"
+    );
+    assert!(!crate::conductor::takes_file::path(&studio.ctx_b).exists());
+    assert!(State::load(&studio.ctx_b)
+        .last_run("paint-edit-photo")
+        .is_none());
+    // the lead's takes file has the take, as for any other
+    let lines = crate::conductor::takes_file::read_all(&crate::conductor::takes_file::path(&ctx));
+    assert_eq!(lines.len(), 1);
+    // the copies that crossed are gone from the way: the input went to the studio's trash
+    assert!(std::fs::read_dir(studio.b.paths.home.join("trash")).is_ok_and(|d| d.count() >= 1));
+}
+
+#[test]
+fn a_remote_run_needs_the_other_owner_to_have_allowed_stage_and_the_workflow_on() {
+    let (ctx, cat, d) = ready("rm-deny");
+    let fake = FakeComfy::start(24.0);
+    let studio = Studio::new("rm-deny", &fake, 24.0, false, &cat);
+    let w = studio.lead(None, 24.0);
+    let e = play(&ctx, &w, &cat, "paint-edit-photo", &opts(&d, &[])).unwrap_err();
+    assert!(
+        e.contains("fleet allow stage") && e.contains("studio"),
+        "{e}"
+    );
+    assert!(fake.st.lock().unwrap().prompts.is_empty());
+    // allowed, but the workflow is off there
+    crate::fleet::store::update(&studio.b.paths, |f| f.allow.push("stage".into())).unwrap();
+    let mut st = State::load(&studio.ctx_b);
+    st.set("paint-edit-photo", vec![("enabled", J::Bool(false))]);
+    st.save(&studio.ctx_b).unwrap();
+    let e = play(&ctx, &w, &cat, "paint-edit-photo", &opts(&d, &[])).unwrap_err();
+    assert!(e.contains("not added and on"), "{e}");
+    assert!(fake.st.lock().unwrap().prompts.is_empty());
+}
+
+#[test]
+fn a_computer_without_the_models_can_still_play_on_the_studio() {
+    let (ctx, cat, d) = ready("rm-thin");
+    // the lead has the workflow file but lacks a model: it cannot play it itself
+    let mut cat2 = cat.clone();
+    cat2.workflows[0].models.push(super::catalog::Model {
+        name: "absent.safetensors".into(),
+        dir: "vae".into(),
+        licence: "MIT".into(),
+        gb: Some(1.0),
+        url: "https://example.invalid/x".into(),
+        gated: false,
+        sha256: None,
+        verified: false,
+        only_for: None,
+    });
+    let fake = FakeComfy::start(24.0);
+    let studio = Studio::new("rm-thin", &fake, 24.0, true, &cat);
+    let local = FakeComfy::start(24.0);
+    let w = studio.lead(Some(local.machine("this computer", true, 24.0)), 24.0);
+    let out = play(&ctx, &w, &cat2, "paint-edit-photo", &opts(&d, &[])).unwrap();
+    assert_eq!(out.takes[0].machine, "studio");
+    assert!(local.st.lock().unwrap().prompts.is_empty());
+    // with no studio either, it says what is missing and where to get it played
+    let alone = world(Some(local.machine("this computer", true, 24.0)), vec![]);
+    let e = play(&ctx, &alone, &cat2, "paint-edit-photo", &opts(&d, &[])).unwrap_err();
+    assert!(
+        e.contains("absent.safetensors") && e.contains("Fleet"),
+        "{e}"
+    );
 }

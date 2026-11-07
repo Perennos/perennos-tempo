@@ -201,8 +201,41 @@ pub enum Fetched {
 
 /// One HTTPS GET. `follow`: follow redirects (https only), needed for licence blobs, which the
 /// registry hands to its storage host; manifests never follow one.
+/// What one request to an address answered, when it is not followed anywhere.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Probe {
+    /// 200: the file is here, at this address.
+    Here,
+    /// 301, 302, 303, 307 or 308, with where it points (an absolute address).
+    Moved(String),
+    /// 401 or 403: a login or a licence is wanted.
+    Denied(u16),
+    NotFound,
+    Other(u16),
+}
+
 pub trait Fetch: Send + Sync {
     fn get(&self, url: &str, accept: Option<&str>, follow: bool) -> Fetched;
+
+    /// One request (a HEAD) that never follows a redirect, with a bearer token in the
+    /// `Authorization` header when one is given. For callers that must decide, hop by hop, who
+    /// gets to see a token.
+    fn probe(&self, _url: &str, _bearer: Option<&str>) -> Result<Probe, String> {
+        Err("this fetcher cannot look at one address at a time".into())
+    }
+
+    /// `download`, but at exactly this address (a redirect is an error, never followed) and
+    /// with a bearer token when one is given.
+    fn download_hop(
+        &self,
+        _url: &str,
+        _part: &Path,
+        _max_secs: u64,
+        _progress: &mut dyn FnMut(u64),
+        _bearer: Option<&str>,
+    ) -> Result<(), String> {
+        Err("this fetcher cannot fetch from one address at a time".into())
+    }
 
     /// Download a big file (an https address) into `part`, carrying on from what is already in
     /// it when the server allows. `max_secs` is the most it may take. `progress` is told, about
@@ -272,9 +305,139 @@ impl Fetch for Curl {
         if !url.starts_with("https://") {
             return Err("only https addresses are fetched".into());
         }
+        self.run_download(
+            curl_download_args(max_secs, part, url),
+            None,
+            part,
+            progress,
+        )
+    }
+
+    fn probe(&self, url: &str, bearer: Option<&str>) -> Result<Probe, String> {
+        if !url.starts_with("https://") {
+            return Err("only https addresses are fetched".into());
+        }
+        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let mut args: Vec<String> = [
+            "-sS",
+            "-I",
+            "--proto",
+            "=https",
+            "--max-redirs",
+            "0",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "60",
+            "-o",
+            null,
+            "-w",
+            "%{http_code} %{redirect_url}",
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+        if bearer.is_some() {
+            args.extend(["-K".into(), "-".into()]);
+        }
+        args.push(url.to_string());
+        let out = self.run_capture(&args, bearer)?;
+        let (code, to) = out.trim().split_once(' ').unwrap_or((out.trim(), ""));
+        Ok(match code.parse::<u16>().unwrap_or(0) {
+            200 | 206 => Probe::Here,
+            301 | 302 | 303 | 307 | 308 if to.starts_with("https://") => Probe::Moved(to.into()),
+            301 | 302 | 303 | 307 | 308 => {
+                return Err(
+                    "the address moved somewhere that is not https, so it was not followed".into(),
+                )
+            }
+            c @ (401 | 403) => Probe::Denied(c),
+            404 => Probe::NotFound,
+            c => Probe::Other(c),
+        })
+    }
+
+    fn download_hop(
+        &self,
+        url: &str,
+        part: &Path,
+        max_secs: u64,
+        progress: &mut dyn FnMut(u64),
+        bearer: Option<&str>,
+    ) -> Result<(), String> {
+        if !url.starts_with("https://") {
+            return Err("only https addresses are fetched".into());
+        }
+        // the same as `download`, without `--location`: a redirect is an error here
+        let mut args: Vec<String> = curl_download_args(max_secs, part, url)
+            .into_iter()
+            .filter(|a| a != "--location")
+            .collect();
+        let at = args.iter().position(|a| a == "--max-redirs").unwrap_or(0);
+        if args.get(at + 1).is_some() {
+            args[at + 1] = "0".into();
+        }
+        if bearer.is_some() {
+            // the token goes in on stdin as a config line: never on a command line, where any
+            // program on this computer could read it
+            args.insert(0, "-".into());
+            args.insert(0, "-K".into());
+        }
+        self.run_download(args, bearer, part, progress)
+    }
+}
+
+impl Curl {
+    /// curl, with `bearer` (if any) given as a config line on stdin; what it printed.
+    fn run_capture(&self, args: &[String], bearer: Option<&str>) -> Result<String, String> {
         let mut cmd = std::process::Command::new(&self.program);
-        cmd.args(curl_download_args(max_secs, part, url))
-            .stdin(std::process::Stdio::null())
+        cmd.args(args)
+            .stdin(if bearer.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("could not start curl: {e}"))?;
+        if let (Some(t), Some(mut si)) = (bearer, child.stdin.take()) {
+            let _ = std::io::Write::write_all(&mut si, bearer_config(t).as_bytes());
+        }
+        let o = child
+            .wait_with_output()
+            .map_err(|e| format!("could not wait for curl: {e}"))?;
+        if !o.status.success() {
+            let said = String::from_utf8_lossy(&o.stderr);
+            return Err(format!(
+                "curl stopped ({}): {}",
+                o.status,
+                said.lines().next().unwrap_or("").trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+    }
+
+    fn run_download(
+        &self,
+        args: Vec<String>,
+        bearer: Option<&str>,
+        part: &Path,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<(), String> {
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(args)
+            .stdin(if bearer.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
         #[cfg(windows)]
@@ -285,6 +448,9 @@ impl Fetch for Curl {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("could not start curl: {e}"))?;
+        if let (Some(t), Some(mut si)) = (bearer, child.stdin.take()) {
+            let _ = std::io::Write::write_all(&mut si, bearer_config(t).as_bytes());
+        }
         // curl only writes short error lines to stderr; read them aside so it never blocks
         let mut err = child.stderr.take();
         let reader = std::thread::spawn(move || {
@@ -317,6 +483,16 @@ impl Fetch for Curl {
         };
         Err(format!("curl stopped ({status}){said}"))
     }
+}
+
+/// The one line of curl config that carries a token. A token with a quote, a backslash or a
+/// line break in it is never written (the caller checked; this is the second lock).
+fn bearer_config(token: &str) -> String {
+    let t: String = token
+        .chars()
+        .filter(|c| c.is_ascii_graphic() && *c != '"' && *c != '\\')
+        .collect();
+    format!("header = \"Authorization: Bearer {t}\"\n")
 }
 
 /// curl's arguments for one big download: https only (also after a redirect), carry on from a

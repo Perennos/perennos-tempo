@@ -487,6 +487,7 @@ mod tests {
                 ),
             ],
             allow: vec![],
+            blob_cap: 0,
         };
         let nodes = fleet_nodes(&f, &[]);
         assert_eq!(
@@ -532,6 +533,7 @@ mod tests {
                 ),
             ],
             allow: vec![],
+            blob_cap: 0,
         };
         let mut f = f;
         f.machines[1].ssh = J::Null; // never ran `fleet check`
@@ -745,6 +747,7 @@ mod tests {
                 r#"{"os":"Linux x86_64","gpu":"","cpus":8,"ram_gb":16}"#,
             )],
             allow: vec![],
+            blob_cap: 0,
         };
         let nodes = fleet_nodes(&f, &[]);
         assert_eq!(

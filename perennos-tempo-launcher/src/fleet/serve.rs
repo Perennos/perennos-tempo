@@ -480,6 +480,11 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
         p.clone(),
         Arc::new(super::tools::RealRunner(p.clone())),
     )));
+    super::blob::attach(&node);
+    lock(&node.handlers).push(Arc::new(super::stage::StageHandler::new(
+        p.clone(),
+        Arc::new(crate::stage::remote::RealRunner),
+    )));
     let addrs = listen_on(store::fleet_port());
     let h = match start(&node, &addrs) {
         Ok(h) => h,

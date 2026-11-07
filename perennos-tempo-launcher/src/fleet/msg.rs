@@ -204,6 +204,12 @@ impl Guard {
 /// What a topic's receiver does with a message that is new. Heartbeats never reach it.
 pub trait Handler: Send + Sync {
     fn on(&self, node: &Arc<Node>, from: &str, topic: &str, id: &str, body: &[u8]);
+
+    /// A first look, before the message is written to the inbox. Return true to take it: it is
+    /// then never stored (the pieces of a big file go straight to disk, not into SQLite).
+    fn raw(&self, _node: &Arc<Node>, _from: &str, _topic: &str, _body: &[u8]) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -574,6 +580,24 @@ impl Node {
             .is_ok_and(|d| d == 0)
     }
 
+    /// Send `items` (topic and body) as one batch of frames on the peer's connection and wait until each is
+    /// acknowledged, without writing any of them to the outbox (the pieces of a big file: the
+    /// sender keeps the file, so it can send a piece again). Nothing is kept if it fails.
+    pub fn send_direct(&self, m: &Machine, items: &[(&str, &[u8])]) -> Result<(), String> {
+        let frames: Vec<Frame> = items
+            .iter()
+            .map(|(topic, b)| {
+                let mut f = self.frame('m', &m.name, topic, &self.next_id(), b);
+                f.eph = true;
+                f
+            })
+            .collect();
+        match self.exchange(m, &frames, 'a') {
+            (_, None) => Ok(()),
+            (_, Some(e)) => Err(e),
+        }
+    }
+
     /// Send and forget (a heartbeat): nothing is written to the outbox.
     pub fn ephemeral(&self, m: &Machine, topic: &str, body: &[u8]) -> Result<(), String> {
         let mut f = self.frame('m', &m.name, topic, &self.next_id(), body);
@@ -680,8 +704,11 @@ impl Node {
             super::serve::on_heartbeat(self, &f.from, &f.body);
             return;
         }
+        let hs: Vec<Arc<dyn Handler>> = lock(&self.handlers).clone();
+        if hs.iter().any(|h| h.raw(self, &f.from, &f.topic, &f.body)) {
+            return;
+        }
         if self.store(&f.from, &f.id, &f.topic, f.created, &f.body) {
-            let hs: Vec<Arc<dyn Handler>> = lock(&self.handlers).clone();
             for h in hs {
                 h.on(self, &f.from, &f.topic, &f.id, &f.body);
             }

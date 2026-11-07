@@ -194,9 +194,23 @@ pub struct Fleet {
     /// What this computer lets the rest of the fleet run here (`comfy_image`, `mcp:server/tool`,
     /// `mcp:server/*`). Empty: nothing.
     pub allow: Vec<String>,
+    /// The most bytes one file may be, sent or taken, in one blob stream. 0 means the default.
+    pub blob_cap: u64,
 }
 
+pub const GIB: u64 = 1 << 30;
+/// What one transfer may be unless the owner says otherwise (`tempo-launch fleet cap GIB`).
+pub const DEFAULT_BLOB_CAP: u64 = 4 * GIB;
+
 impl Fleet {
+    pub fn blob_cap(&self) -> u64 {
+        if self.blob_cap == 0 {
+            DEFAULT_BLOB_CAP
+        } else {
+            self.blob_cap
+        }
+    }
+
     pub fn find(&self, key: &str) -> Option<usize> {
         let k = key.trim().to_ascii_lowercase();
         self.machines
@@ -214,21 +228,32 @@ impl Fleet {
     }
 
     pub fn to_j(&self) -> J {
-        J::Obj(vec![
-            ("version".into(), J::n(1.0)),
+        let mut o = vec![
+            ("version".to_string(), J::n(1.0)),
             ("self".into(), J::s(&self.me)),
             ("allow".into(), J::strings(&self.allow)),
-            (
-                "machines".into(),
-                J::Arr(self.machines.iter().map(Machine::to_j).collect()),
-            ),
-        ])
+        ];
+        if self.blob_cap != 0 {
+            o.push((
+                "blob_cap_gib".into(),
+                J::n(self.blob_cap as f64 / GIB as f64),
+            ));
+        }
+        o.push((
+            "machines".into(),
+            J::Arr(self.machines.iter().map(Machine::to_j).collect()),
+        ));
+        J::Obj(o)
     }
 
     pub fn from_j(j: &J) -> Fleet {
         Fleet {
             me: j.str("self").map(clean_name).unwrap_or_default(),
             allow: j.strs("allow"),
+            blob_cap: j
+                .f64("blob_cap_gib")
+                .filter(|g| *g > 0.0)
+                .map_or(0, |g| (g * GIB as f64) as u64),
             machines: j
                 .arr("machines")
                 .iter()

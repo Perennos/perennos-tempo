@@ -1,6 +1,7 @@
 //! Which machine plays a workflow. A run goes to one machine whole (a model is never split
 //! across two). The candidates are this computer's ComfyUI and the Fleet machines that say
-//! they have ComfyUI up (and Stage's workflow ready); one with less graphics memory than the
+//! they have ComfyUI up (and Stage's workflow ready), reached through the Fleet messenger and
+//! never at their ComfyUI's own port; one with less graphics memory than the
 //! workflow's lowest tier is not a candidate. Of those that fit, the best tier wins, then the
 //! most free memory, then the shortest line, and this computer wins a tie (no network).
 
@@ -11,7 +12,8 @@ use crate::setup::json::J;
 pub struct Machine {
     pub name: String,
     pub local: bool,
-    /// Where its ComfyUI answers.
+    /// Where this computer's own ComfyUI answers (127.0.0.1). Empty for a Fleet machine: its
+    /// ComfyUI is never reached from here, the Fleet messenger carries the run there.
     pub base: String,
     pub gpu_gb: f64,
     pub free_gb: f64,
@@ -33,7 +35,7 @@ pub fn local(base: &str, gpu_gb: f64, free_gb: f64) -> Machine {
 
 /// The Fleet machines that are up with ComfyUI, from `fleet.json` as the messenger tells it.
 /// `ready` limits them to those that list this workflow as set up (when they say anything).
-pub fn from_fleet(v: &J, id: &str, comfy_port: u16) -> Vec<Machine> {
+pub fn from_fleet(v: &J, id: &str) -> Vec<Machine> {
     v.arr("machines")
         .iter()
         .filter(|m| m.bool("up") == Some(true))
@@ -47,10 +49,9 @@ pub fn from_fleet(v: &J, id: &str, comfy_port: u16) -> Vec<Machine> {
                 }
             }
             let name = m.str("name")?.to_string();
-            let addr = m.str("addr")?;
             let gpu = c.f64("gpu_gb").unwrap_or(0.0);
             Some(Machine {
-                base: format!("http://{addr}:{comfy_port}"),
+                base: String::new(),
                 gpu_gb: gpu,
                 free_gb: c.f64("vram_free_gb").unwrap_or(gpu),
                 busy: m
@@ -210,11 +211,12 @@ mod tests {
               {"name":"nocomfy","addr":"10.0.0.11","up":true,"tools":{}}]}"#,
         )
         .unwrap();
-        let got = from_fleet(&v, "re-angle-video", 8188);
+        let got = from_fleet(&v, "re-angle-video");
         let names: Vec<&str> = got.iter().map(|m| m.name.as_str()).collect();
         // `old` lists no workflows at all, so it is not ruled out; `other` lists some and not this
         assert_eq!(names, ["studio", "old"]);
-        assert_eq!(got[0].base, "http://10.0.0.7:8188");
+        // no ComfyUI address for another computer: the Fleet messenger is the only way there
+        assert!(got.iter().all(|m| m.base.is_empty() && !m.local));
         assert_eq!(got[0].busy, 1.0);
     }
 }

@@ -123,6 +123,7 @@ usage: tempo-launch [command]
                     finds it from the new one and asks for the code (10 minutes, once, your network only)
   fleet allow|deny comfy_image|stage|mcp:SERVER/TOOL
                     what this computer lets the rest of the fleet run (nothing until you say so)
+  fleet cap [GIB]   the most one file may be between computers (4 GiB unless you say so)
   fleet init | fleet rotate | fleet serve [--quiet] | fleet send NAME \"TEXT\" | fleet inbox | fleet ping NAME
                     the messenger between your computers: a fleet key, signed frames, a durable outbox
   fleet page        write and open the fleet page; fleet apply-proposal applies what your AI proposed

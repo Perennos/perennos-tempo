@@ -39,6 +39,15 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
+# the sealing of a 65 MiB test file through 260 frames: slow at opt-level 0 too
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
 [profile.dev.package.libsqlite3-sys]
 opt-level = 2
 

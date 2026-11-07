@@ -14,6 +14,7 @@ use super::pedals::{self, Request};
 use super::route::{self, Machine};
 use super::state::State;
 use crate::conductor::takes_file;
+use crate::fleet::stage as fstage;
 use crate::setup::json::{parse, J};
 use crate::setup::sha256::sha256_hex;
 use crate::{file_stamp, stamp, Ctx};
@@ -53,6 +54,28 @@ pub trait World: Sync {
     fn roots(&self) -> Option<Vec<PathBuf>> {
         None
     }
+    /// Send the input files of a run to a Fleet machine through the messenger, once.
+    fn send_inputs(
+        &self,
+        machine: &str,
+        files: &[(String, PathBuf)],
+    ) -> Result<Vec<(String, crate::fleet::blob::Sent)>, String> {
+        let _ = (machine, files);
+        Err("this computer is not part of a Fleet".into())
+    }
+    /// Play one take on a Fleet machine, through the messenger: that machine runs it against its
+    /// own ComfyUI. What it made comes back as checked files.
+    fn remote_take(
+        &self,
+        machine: &str,
+        workflow: &str,
+        inputs: &[(String, fstage::Input)],
+        pedals: &[(String, String)],
+        seed: i64,
+    ) -> Result<fstage::Done, String> {
+        let _ = (machine, workflow, inputs, pedals, seed);
+        Err("this computer is not part of a Fleet".into())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -68,6 +91,14 @@ pub struct RunOpts {
     pub seed: Option<i64>,
     /// An AI asked: inputs must sit in the folders the owner allowed.
     pub guarded: bool,
+    /// Played for another computer's Stage: no takes file, no Vault note, nothing remembered
+    /// for `--again` (the computer that asked keeps those).
+    pub quiet: bool,
+    /// This computer's name in the Fleet, written in the proof beside each file.
+    pub label: Option<String>,
+    /// The band and the part this run plays for (the Conductor's shot list).
+    pub band: Option<String>,
+    pub part: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +329,10 @@ fn append_log(path: &Path, j: &J) {
     }
 }
 
+/// A machine a take will play on, its tier, and its ComfyUI (none for a Fleet machine: the
+/// messenger carries the run there).
+type Used = (Machine, Tier, Option<Box<dyn Comfy>>);
+
 /// What one take needs to run on its machine, plain data so a thread can carry it.
 struct Job {
     take: u32,
@@ -306,6 +341,8 @@ struct Job {
     tier: Tier,
     /// Input name to the value ComfyUI holds for it (an uploaded file's name, or the text).
     inputs: Vec<(String, String)>,
+    /// The same, for a Fleet machine: texts, and the files already sent there.
+    remote: Vec<(String, fstage::Input)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -483,6 +520,162 @@ fn play_take(
     })
 }
 
+/// One take on another computer: it ran the workflow against its own ComfyUI, and what it
+/// made came back sealed, signed and SHA-256 checked. Here it is placed in the workbench the
+/// same way a local take is, checked, and given its proof (the other computer's own, with the
+/// parts that are about this file changed).
+#[allow(clippy::too_many_arguments)]
+fn play_remote_take(
+    world: &dyn World,
+    wf: &Workflow,
+    job: &Job,
+    pedals: &[(String, String)],
+    prov: &Provenance,
+    bench: &Path,
+    log: &Path,
+    tag: &str,
+    cmd_again: &str,
+) -> Result<TakeResult, String> {
+    let started = Instant::now();
+    let mut pedals = pedals.to_vec();
+    if wf.pedal("seed").is_some() {
+        pedals.retain(|(k, _)| k != "seed");
+        pedals.push(("seed".into(), job.seed.to_string()));
+    }
+    let done = world.remote_take(&job.machine.name, &wf.id, &job.remote, &pedals, job.seed)?;
+    // the outputs, each followed by its proof, in the order they were made
+    let mut files = vec![];
+    let mut first_check = Check {
+        ok: None,
+        note: String::new(),
+    };
+    let mut i = 0usize;
+    let mut pairs: Vec<(&fstage::Got, Option<&fstage::Got>)> = vec![];
+    for g in &done.files {
+        if g.role == "output" {
+            pairs.push((g, None));
+        } else if let Some(last) = pairs.last_mut() {
+            last.1 = Some(g);
+        }
+    }
+    if pairs.is_empty() {
+        return Err(format!(
+            "{} finished but sent back no file",
+            job.machine.name
+        ));
+    }
+    for (g, side) in pairs {
+        let stem = format!(
+            "{}-{}-take{}-seed{}{}",
+            wf.id,
+            tag,
+            job.take,
+            job.seed,
+            if i > 0 {
+                format!("-part{}", i + 1)
+            } else {
+                String::new()
+            }
+        );
+        let (reserved, path) = new_file(bench, &stem, &ext_of(&g.name))?;
+        drop(reserved);
+        std::fs::rename(&g.path, &path)
+            .or_else(|_| std::fs::copy(&g.path, &path).map(|_| ()))
+            .map_err(|e| format!("could not keep {}: {e}", path.display()))?;
+        let sha = crate::setup::sha256::file_sha256(&path, &mut |_| {})
+            .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let kind = wf.outputs.first().map_or("video", |o| o.kind.as_str());
+        let c = world.check(&path, kind);
+        if i == 0 {
+            first_check = c.clone();
+        }
+        let mut side_j = side
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(&p.path).ok())
+            .and_then(|t| parse(&t).ok())
+            .unwrap_or_else(|| prov.base.clone());
+        side_j.set("take", J::n(job.take as f64));
+        side_j.set("seed", J::n(job.seed as f64));
+        side_j.set(
+            "machine",
+            J::Obj(vec![
+                ("name".into(), J::s(&job.machine.name)),
+                ("gpu_gb".into(), s_n(job.machine.gpu_gb)),
+                ("via".into(), J::s("fleet messenger")),
+            ]),
+        );
+        side_j.set(
+            "seconds",
+            J::n((started.elapsed().as_secs_f64() * 10.0).round() / 10.0),
+        );
+        side_j.set(
+            "output",
+            J::Obj(vec![
+                (
+                    "file".into(),
+                    J::s(
+                        &path
+                            .file_name()
+                            .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+                    ),
+                ),
+                ("sha256".into(), J::s(&sha)),
+                ("bytes".into(), J::n(bytes as f64)),
+            ]),
+        );
+        side_j.set(
+            "check",
+            J::Obj(vec![
+                ("ok".into(), c.ok.map_or(J::Null, J::Bool)),
+                ("note".into(), J::s(&c.note)),
+            ]),
+        );
+        side_j.set("make_it_again", J::s(cmd_again));
+        let (mut sf, sp) = new_file(
+            bench,
+            &format!(
+                "{}.stage",
+                path.file_name()
+                    .map_or(String::new(), |n| n.to_string_lossy().into_owned())
+            ),
+            "json",
+        )?;
+        sf.write_all(side_j.pretty().as_bytes())
+            .map_err(|e| format!("could not write {}: {e}", sp.display()))?;
+        files.push(path);
+        i += 1;
+    }
+    let secs = (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    append_log(
+        log,
+        &J::Obj(vec![
+            ("take".into(), J::n(job.take as f64)),
+            ("seed".into(), J::n(job.seed as f64)),
+            ("machine".into(), J::s(&job.machine.name)),
+            ("local".into(), J::Bool(false)),
+            ("secs".into(), J::n(secs)),
+            ("cached".into(), J::n(done.cached as f64)),
+            (
+                "files".into(),
+                J::Arr(files.iter().map(|p| J::s(&p.to_string_lossy())).collect()),
+            ),
+            ("ok".into(), first_check.ok.map_or(J::Null, J::Bool)),
+            ("note".into(), J::s(&first_check.note)),
+        ]),
+    );
+    Ok(TakeResult {
+        take: job.take,
+        seed: job.seed,
+        machine: job.machine.name.clone(),
+        secs,
+        cached: done.cached,
+        files,
+        check: first_check,
+        resumed: false,
+    })
+}
+
 fn input_value(
     ctx_world: &dyn World,
     wf: &Workflow,
@@ -552,12 +745,13 @@ pub fn play(
     }
     let with = saved_with(&st, id);
     let lacks = missing(ctx, wf, &st, &with);
-    if !lacks.is_empty() {
+    // the graph must be here and unchanged; models and nodes may live only on the other computer
+    if let Some(l) = lacks.iter().find(|l| l.contains("workflow file")) {
         return Err(format!(
-            "{id} is not ready: {}. `tempo-launch stage check {id}` says more.",
-            lacks.join("; ")
+            "{id} is not ready: {l}. `tempo-launch stage check {id}` says more."
         ));
     }
+    let local_ready = lacks.is_empty();
     // --again: the last run, with this one's changes on top
     let (mut inputs, mut pedal_list, mut base_seed) =
         (opts.inputs.clone(), opts.pedals.clone(), opts.seed);
@@ -645,14 +839,27 @@ pub fn play(
     let takes = opts.takes.clamp(1, 12);
     // machines
     let mut boxes: Vec<Machine> = vec![];
-    if let Some(l) = world.local() {
-        boxes.push(l);
-    } else if world.start_local() {
+    if local_ready {
         if let Some(l) = world.local() {
             boxes.push(l);
+        } else if world.start_local() {
+            if let Some(l) = world.local() {
+                boxes.push(l);
+            }
         }
     }
     boxes.extend(world.fleet(id));
+    if let Some(label) = &opts.label {
+        for m in boxes.iter_mut().filter(|m| m.local) {
+            m.name = label.clone();
+        }
+    }
+    if boxes.is_empty() && !local_ready {
+        return Err(format!(
+            "{id} is not ready here: {}. `tempo-launch stage check {id}` says more, and a Fleet computer that has it can play it for you (`tempo-launch fleet allow stage` there).",
+            lacks.join("; ")
+        ));
+    }
     if let Some(on) = &opts.on {
         boxes.retain(|m| m.name == *on || (m.local && (on == "here" || on == "this computer")));
         if boxes.is_empty() {
@@ -679,8 +886,14 @@ pub fn play(
     }
     let mut notes: Vec<String> = vec![];
     // each machine we will use: can it run these nodes, and may it?
-    let mut used: Vec<(Machine, Tier, Box<dyn Comfy>)> = vec![];
+    let mut used: Vec<Used> = vec![];
     for (m, t) in ranked.iter().take(takes as usize) {
+        if !m.local {
+            // another computer: its own messenger checks its nodes and its own rules, and plays it
+            // against its own ComfyUI, which is never reached from here
+            used.push(((*m).clone(), (*t).clone(), None));
+            continue;
+        }
         let c = match world.comfy(&m.base) {
             Ok(c) => c,
             Err(e) => {
@@ -718,7 +931,7 @@ pub fn play(
                 }
             }
         }
-        used.push(((*m).clone(), (*t).clone(), c));
+        used.push(((*m).clone(), (*t).clone(), Some(c)));
     }
     if used.is_empty() {
         return Err(format!("no machine could play {id}: {}", notes.join(" ")));
@@ -768,22 +981,40 @@ pub fn play(
     if !todo.is_empty() {
         // upload the inputs to each machine that will play a take
         let mut stored: Vec<Vec<(String, String)>> = vec![];
+        let mut sent: Vec<Vec<(String, fstage::Input)>> = vec![];
         let need: Vec<usize> = todo
             .iter()
             .map(|n| ((*n - 1) as usize) % used.len())
             .collect();
         for (mi, (m, _, c)) in used.iter().enumerate() {
             let mut names = vec![];
+            let mut away = vec![];
             if need.contains(&mi) {
-                for (k, p, bytes, sha) in &files {
-                    let nm = format!("stage_{}_{}", &sha[..12], safe_name(&p.to_string_lossy()));
-                    let kept = c
-                        .upload(&nm, bytes)
-                        .map_err(|e| format!("{}: {e}", m.name))?;
-                    names.push((k.clone(), kept));
+                if let Some(c) = c {
+                    for (k, p, bytes, sha) in &files {
+                        let nm =
+                            format!("stage_{}_{}", &sha[..12], safe_name(&p.to_string_lossy()));
+                        let kept = c
+                            .upload(&nm, bytes)
+                            .map_err(|e| format!("{}: {e}", m.name))?;
+                        names.push((k.clone(), kept));
+                    }
+                } else {
+                    // a Fleet machine: the files go once, as checked blob streams
+                    let list: Vec<(String, PathBuf)> = files
+                        .iter()
+                        .map(|(k, p, _, _)| (k.clone(), p.clone()))
+                        .collect();
+                    for (k, s) in world
+                        .send_inputs(&m.name, &list)
+                        .map_err(|e| format!("{}: {e}", m.name))?
+                    {
+                        away.push((k, fstage::Input::Sent(s)));
+                    }
                 }
             }
             stored.push(names);
+            sent.push(away);
         }
         let text_inputs: Vec<(String, String)> = inputs
             .iter()
@@ -804,6 +1035,11 @@ pub fn play(
                 let mi = ((*n - 1) as usize) % used.len();
                 let mut ins = text_inputs.clone();
                 ins.extend(stored[mi].clone());
+                let mut remote: Vec<(String, fstage::Input)> = text_inputs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), fstage::Input::Text(v.clone())))
+                    .collect();
+                remote.extend(sent[mi].clone());
                 (
                     mi,
                     Job {
@@ -812,6 +1048,7 @@ pub fn play(
                         machine: used[mi].0.clone(),
                         tier: used[mi].1.clone(),
                         inputs: ins,
+                        remote,
                     },
                 )
             })
@@ -824,16 +1061,19 @@ pub fn play(
                         .filter(|(m, _)| *m == mi)
                         .map(|(_, j)| j)
                         .collect();
-                    let c: &dyn Comfy = &*used[mi].2;
+                    let c: Option<&dyn Comfy> = used[mi].2.as_deref();
                     let (prov, bench, log, tag, cmd_again, graph, checked) =
                         (&prov, &bench, &log, &tag, &cmd_again, &graph, &checked);
                     sc.spawn(move || {
                         mine.into_iter()
-                            .map(|j| {
-                                play_take(
+                            .map(|j| match c {
+                                Some(c) => play_take(
                                     world, c, cat, wf, graph, j, checked, prov, bench, log, tag,
                                     cmd_again,
-                                )
+                                ),
+                                None => play_remote_take(
+                                    world, wf, j, checked, prov, bench, log, tag, cmd_again,
+                                ),
                             })
                             .collect::<Vec<_>>()
                     })
@@ -872,8 +1112,8 @@ pub fn play(
         .map(|t| takes_file::Take {
             id: format!("stage-{key}-{}", t.take),
             run: format!("stage-{key}"),
-            band: None,
-            part: Some("stage".into()),
+            band: opts.band.clone(),
+            part: Some(opts.part.clone().unwrap_or_else(|| "stage".into())),
             task: format!(
                 "{id}: {}",
                 inputs
@@ -906,7 +1146,7 @@ pub fn play(
         .filter(|(_, t)| !t.resumed)
         .map(|(l, _)| l.clone())
         .collect();
-    if !fresh.is_empty() {
+    if !fresh.is_empty() && !opts.quiet {
         let _ = takes_file::append(&takes_file::path(ctx), &fresh);
     }
     let winner = lines.iter().position(|l| l.winner);
@@ -966,28 +1206,30 @@ pub fn play(
         status.push_str(&t);
     }
     // what Tempo remembers: for --again and for "make it golden hour"
-    st.set_last_run(
-        id,
-        J::Obj(vec![
-            ("inputs".into(), pairs_j(&inputs)),
-            (
-                "pedals".into(),
-                pairs_j(
-                    &checked
-                        .iter()
-                        .filter(|(k, _)| k != "seed")
-                        .cloned()
-                        .collect::<Vec<_>>(),
+    if !opts.quiet {
+        st.set_last_run(
+            id,
+            J::Obj(vec![
+                ("inputs".into(), pairs_j(&inputs)),
+                (
+                    "pedals".into(),
+                    pairs_j(
+                        &checked
+                            .iter()
+                            .filter(|(k, _)| k != "seed")
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ),
                 ),
-            ),
-            ("seed".into(), J::n(seed0 as f64)),
-            ("takes".into(), J::n(takes as f64)),
-            ("at".into(), J::s(&ts)),
-        ]),
-    );
-    st.set_last_workflow(id);
-    let _ = st.save(ctx);
-    if let Some(w) = winner {
+                ("seed".into(), J::n(seed0 as f64)),
+                ("takes".into(), J::n(takes as f64)),
+                ("at".into(), J::s(&ts)),
+            ]),
+        );
+        st.set_last_workflow(id);
+        let _ = st.save(ctx);
+    }
+    if let Some(w) = winner.filter(|_| !opts.quiet) {
         vault_note(ctx, wf, &made[w], &checked, &key, world.now());
     }
     Ok(Outcome {
