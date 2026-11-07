@@ -1,0 +1,25 @@
+{
+  "_about": "Settings for the Python harness (tempo_agent.py). Copy to agent-config.json in TEMPO_AGENT_HOME (default: this folder). It is git-ignored: keep real paths, hosts and names there, never in the repository. Every key is optional; ~ expands to your home folder. The Rust tempo-local-agent has its own config file: see perennos-tempo-local-agent/config.example.json.",
+  "ollama_url": "http://127.0.0.1:11434",
+  "heavy_models": ["qwen3:14b", "qwen3:8b"],
+  "fast_models": ["qwen3:4b"],
+  "num_ctx": {"qwen3:14b": 8192},
+  "owner": "Sam",
+  "owner_note": "Sam runs a small design studio.",
+  "write_roots": ["~/tempo-work"],
+  "scratch_dir": "~/tempo-work/scratch",
+  "local_host": "local",
+  "hosts": {
+    "gpu-box": {"urls": ["http://gpu-box.local:11434"], "models": ["house-model"]}
+  },
+  "protected_names": ["house-model"],
+  "rag_files": ["~/notes/ABOUT-ME.md"],
+  "rag_globs": [["~/notes/memory/*.md", 400]],
+  "current_files": [["~/notes/NOW.md", 40]],
+  "knowledge_pack": "",
+  "embed_model": "embeddinggemma",
+  "gpu_lease_script": "",
+  "comfy_output_dir": "",
+  "claude_json": "~/.claude.json",
+  "mcp_project_dirs": ["~/projects/my-project"]
+}
