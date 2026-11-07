@@ -21,12 +21,11 @@ PolyForm Shield, which is not an OSI-approved open-source licence.
 | --- | --- |
 | `AppxManifest.xml` | The package's manifest, as a template (it has placeholders; the build fills them) |
 | `Assets/` | Every picture the manifest names, at every size, as PNG, drawn from the Perennos mark |
-| `make_assets.py` | Draws `Assets/`, `../store/art/` and the program icons (Pillow). Run again only if the mark changes |
+| `make_assets.py` | Draws `Assets/`, `../store/art/` and the Room and Studio program icons (Pillow). Run again only if the mark changes |
 | `check_manifest.py` | Checks the manifest and the pictures without Windows |
 | `build-msix.ps1` | Builds the package. `-Store` or `-SignWithMyCertificate` |
 | `new-perennos-cert.ps1` | Makes your free certificate (once, on your main machine) |
 | `trust-perennos-cert.ps1` | Makes a machine trust it (once per machine, needs administrator) |
-| `icons/` | Icons for the agent and Vault, to be placed in those crates (see the report) |
 
 What the package contains: the programs in `bin\` (the launcher, the agent, and whichever of Vault, Studio, Room, and in
 the full edition the Field and the `tempo` command are in the build), the legal texts, the pictures and the manifest.

@@ -167,13 +167,6 @@ def make_all():
         with open(out, "wb") as fh:
             fh.write(art.ico_bytes([(s, art.draw_mark(s, accent)) for s in sizes]))
         report.append((out, None))
-    # icons for the agent and Tempo Vault (each crate keeps its own copy for its build.rs)
-    for name, accent in (("tempo-local-agent.ico", art.ORANGE), ("tempo-vault.ico", art.ACCENTS["tempo-vault"])):
-        out = os.path.join(HERE, "icons", name)
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with open(out, "wb") as fh:
-            fh.write(art.ico_bytes([(sz, art.draw_mark(sz, accent)) for sz in sizes]))
-        report.append((out, None))
     return report
 
 

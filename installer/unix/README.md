@@ -123,10 +123,8 @@ There is no paid signing here, and none is needed for your own machines.
   maintainer scripts; the desktop and icon caches refresh through the system's own triggers.
 - **Homebrew**: `homebrew/perennos-tempo.rb` is a DRAFT formula for the source-available edition. Not published;
   it needs a tap repository (free) and a real tag's url and sha256.
-- **CI**: `ci/release.yml` is a DRAFT GitHub Actions workflow (tests, source-available tarballs, a smoke test, artifacts)
-  for ubuntu-latest, ubuntu-24.04-arm, macos-14 and macos-13. It is in this folder, not in `.github/`, so nothing runs
-  here. It belongs in the public repository, where Actions is free. This is the way to get a real macOS and ARM
-  Linux test without owning one. (GitHub retired `macos-13`; use `macos-15-intel` if that job will not start.)
+- **CI**: the release builds and tests run from `.github/workflows/release.yml`, on GitHub's own macOS and ARM
+  Linux runners.
 
 ## Icons
 

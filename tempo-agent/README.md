@@ -13,4 +13,4 @@ The Memory pane reads `GET /agent/memory`, `/agent/memory/file?src=` (indexed fi
 Private data (memory files, the retrieval index, conversations, workflows) is never committed; it is built locally at run time.
 Machine settings (folders, hosts, memory files, owner) come from a local, git-ignored `agent-config.json`; see `agent-config.example.json`.
 
-The Rust port is the crate `perennos-tempo-local-agent/` at the repository root; `tempo agent` runs it. [RUST-PORT.md](RUST-PORT.md) says what is ported, how to build and test it, and what is left.
+The Rust port is the crate `perennos-tempo-local-agent/` at the repository root; `tempo agent` runs it. Its [README](../perennos-tempo-local-agent/README.md) says how to build, test and run it, and how it relates to the Python harness in this folder (`tempo_agent.py`, `mcphost.py`).
