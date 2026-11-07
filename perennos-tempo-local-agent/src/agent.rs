@@ -234,7 +234,7 @@ const INIT: &str = "Look at the folder {dir}: list it, glob for the build files,
 
 const COMPACT_SYSTEM: &str = "You summarize a conversation between an owner and their local agent so the agent can carry on without the full history. Keep: the goal; decisions made; facts learned (file paths, commands, results, errors); what is done; what is left; the next step. Plain text, under 300 words, no preamble.";
 
-const HELP_TEXT: &str = "Commands:
+pub(crate) const HELP_TEXT: &str = "Commands:
 /cd <folder>       work in another folder (commands, relative paths and AGENTS.md come from there)
 /mode [name]       default (asks before changes), accept-edits (file edits go ahead), plan (read and plan only)
 /plan [task]       plan mode; with a task, plan it
@@ -514,6 +514,9 @@ impl Agent {
         let mut host = self.env.mcp.borrow_mut();
         host.retry_failed();
         let mut sel: Vec<Offered> = host.select(text, builtins.len(), cfg.tool_cap);
+        // GUARD: a tool whose definition changed since it was pinned, or reads like instructions
+        // to the model, is offered only after the owner approves it (see mcp.rs)
+        sel = host.vet(sel, &|what, detail| self.env.ask(what, detail).is_ok());
         if cfg.prefix_stable {
             // Sticky and sorted: tools offered earlier in this conversation stay offered (the tool
             // block sits before the history in the prompt, so any change would void the cache);
@@ -588,9 +591,16 @@ impl Agent {
         let key = conv.path.to_string_lossy().into_owned();
         let pin = conv.engine.clone();
         let pin = pin.as_deref();
+        // a conversation that was opened with a JSON Schema answers in that shape
+        let format = conv.format.clone();
+        let extra = ollama::Extra {
+            format: format.as_ref(),
+            conv: Some(&key),
+            ..Default::default()
+        };
         loop {
             let model = models[*idx].clone();
-            let mut last = match ollama::chat_pooled(
+            let mut last = match ollama::chat_pooled_with(
                 cfg,
                 Some(&key),
                 pin,
@@ -598,6 +608,7 @@ impl Agent {
                 messages,
                 tools,
                 think,
+                &extra,
                 &mut |t| hold.push(t, sink),
             ) {
                 Ok(r) => return Ok(r),
@@ -617,7 +628,7 @@ impl Agent {
                 conv.emit("status", &msg);
                 sink.status(&msg);
                 std::thread::sleep(backoff(cfg.retry_delay_ms, attempt as u32));
-                match ollama::chat_pooled(
+                match ollama::chat_pooled_with(
                     cfg,
                     Some(&key),
                     pin,
@@ -625,6 +636,7 @@ impl Agent {
                     messages,
                     tools,
                     think,
+                    &extra,
                     &mut |t| hold.push(t, sink),
                 ) {
                     Ok(r) => return Ok(r),
@@ -686,11 +698,15 @@ impl Agent {
             if let Err(no) = asked {
                 no
             } else {
-                self.env
+                let r = self
+                    .env
                     .mcp
                     .borrow_mut()
                     .call(srv, tn, args)
-                    .unwrap_or_else(|e| format!("ERROR: {e}"))
+                    .unwrap_or_else(|e| format!("ERROR: {e}"));
+                // GUARD: what an unmarked server says is untrusted text (see tools.rs)
+                self.env.note_mcp_result(conv, srv);
+                r
             }
         } else {
             format!("unknown tool {name}")
@@ -1114,6 +1130,12 @@ impl Agent {
         let (mut tools, mut route, mut n_mcp) = (vec![], HashMap::new(), 0);
         if lane == Lane::Heavy && !conv.guest {
             (tools, route, n_mcp) = self.tools_for(text, conv);
+            // GUARD: a second server that took another's tool name was refused; say so
+            let refused = self.env.mcp.borrow_mut().take_refusals();
+            for m in refused {
+                conv.emit("status", &m);
+                sink.status(&m);
+            }
         }
         let mut models: Vec<String> = if lane == Lane::Heavy || self.cfg().fast_models.is_empty() {
             self.heavy_models(conv)
@@ -1248,6 +1270,11 @@ impl Agent {
                     continue;
                 }
                 let r = self.run_tool(conv, &route, &name, &args);
+                // GUARD: the first time this turn takes in something untrusted, say so once
+                if let Some(m) = self.env.take_taint_notice(conv) {
+                    conv.emit("status", m);
+                    sink.status(m);
+                }
                 // after a call that may change things, earlier reads are stale: let them run again
                 if CHANGES.contains(&name.as_str())
                     || name == "run_command"
@@ -1888,6 +1915,43 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(last["content"], "unknown tool nope_tool");
+    }
+
+    #[test]
+    fn num_ctx_stays_put_across_the_turns_of_a_conversation() {
+        let m = Mock::start(chat_script(vec![
+            text_resp("one"),
+            text_resp("two"),
+            text_resp("three"),
+        ]));
+        let (mut a, mut conv) = agent(&m, |c| c.default_num_ctx = 32768);
+        for q in ["hello", "and a longer follow-up question", "thanks"] {
+            a.turn(&mut conv, q, &mut VecSink::default()).unwrap();
+        }
+        let ctx: Vec<u64> = m
+            .bodies("/api/chat")
+            .iter()
+            .map(|b| b["options"]["num_ctx"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ctx.len(), 3);
+        assert!(ctx.iter().all(|n| *n == ctx[0]), "{ctx:?}");
+        assert!(m
+            .bodies("/api/chat")
+            .iter()
+            .all(|b| b["keep_alive"] == "60m"));
+    }
+
+    #[test]
+    fn a_conversation_opened_with_a_schema_asks_for_it_every_turn() {
+        let m = Mock::start(chat_script(vec![text_resp("{}"), text_resp("{}")]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        let schema = json!({"type": "object", "required": ["name"]});
+        conv.format = Some(schema.clone());
+        a.turn(&mut conv, "one", &mut VecSink::default()).unwrap();
+        a.turn(&mut conv, "two", &mut VecSink::default()).unwrap();
+        for b in m.bodies("/api/chat") {
+            assert_eq!(b["format"], schema);
+        }
     }
 
     #[test]

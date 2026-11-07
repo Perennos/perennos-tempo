@@ -121,6 +121,7 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 </div>
 </div>
 
+{ollama_tip}
 <h2>Let your AI help you set up</h2>
 <p>Add Tempo's setup helper to the AI you already use. It can read the scan and the plan above, talk you through the choice in step 2, and write a <em>proposal</em> for your settings. It cannot change anything: you apply a proposal yourself with <code>{apply_cmd}</code>, which shows what would change and asks y/N.</p>
 <h3>Claude Desktop</h3>
@@ -155,14 +156,22 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 {band_run}
 <p>Your own AI can design a band with you too: the setup helper from step 3 has <code>conductor_templates</code> (read-only) and <code>conductor_propose</code>, and you set a proposal up yourself with <code>tempo-launch conductor apply-proposal</code>.</p>
 
+{crate_section}
 <p class="small">The longer plan, with sizes and licences, is in <code>setup.html</code> in the Tempo folder (<code>tempo-launch setup</code> shows it in the terminal). This page can be opened again with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
 {end}"#,
         top = brand::page_top("Welcome to Perennos Tempo", true, true),
         end = brand::PAGE_END,
+        crate_section = crate::bank::welcome_section(
+            &m.os,
+            m.ram_total_gb,
+            !matches!(m.gpu, super::probe::Gpu::None)
+        ),
         verdict = html_escape(&verdict(p)),
         fits = fits,
         note = note,
         scan = scan,
+        ollama_tip = super::apply::ollama_tip(&m.ollama)
+            .map_or(String::new(), |t| format!("<p class=\"small\">{}</p>", html_escape(&t))),
         single = pre("tempo-launch setup --apply"),
         engine = pre(&format!(
             "Windows:       setx OLLAMA_HOST \"<engine address>:{OLLAMA_DEFAULT_PORT}\"\nMac or Linux:  OLLAMA_HOST=<engine address>:{OLLAMA_DEFAULT_PORT} ollama serve"

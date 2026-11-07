@@ -1,6 +1,7 @@
 // CHAT surface: the local agent loop (Ollama engine, MCP tools, memory RAG, delegate, workflow file).
 // Talks only to the same origin at /agent/*. Every visible string comes from copy.json.
-// The second-brain graph (memgraph.mjs, three.js) is imported only when the Brain or Both view opens.
+// The second brain (brain-world.mjs, three.js) is imported only when the Brain or Both view opens. It is kept
+// current by brain-feed.mjs (polls /agent/memory/graph and /agent/memory); memgraph.mjs is its flat fallback.
 // One look (tempo-theme.css): Brain, Dashboard or Both, and Light, Dark or System, are remembered
 // in localStorage (wrapped in try/catch). Keys: B brain, D dashboard, Shift+B both, C W M panels, P pause motion, comma settings.
 // Events arrive over /agent/stream (server-sent events, read with fetch so the key can go along)
@@ -51,6 +52,7 @@ const VIEWS = ['brain', 'dashboard', 'both'], THEMES = ['system', 'light', 'dark
 const DEFAULT_COPY = {
   wordmark: 'perennos tempo', brain: 'Brain', dashboard: 'Dashboard', both: 'Both', view: 'View', panels: 'Panels', settings: 'Settings',
   theme: 'Theme', system: 'System', light: 'Light', dark: 'Dark', pause: 'Pause motion', motionNote: 'Your system asks for less motion, so the sphere holds still.',
+  brainOpen: 'Open', brainClose: 'Close', brainLinks: 'Linked to', brainChanged: 'Last changed', brainSearch: 'Search the score', brainNoMatch: 'Nothing by that name', brainLoadError: "The 3D view didn't load. Here's the flat one instead.", brainNodes: 'sources',
   working: 'Working', idle: 'Idle', machinesUp: 'Machines up', memoryFiles: 'Memory files', chatCount: 'Chats', brainTitle: 'The second brain, as a field.', about: 'About', madeIn: 'Built and maintained in the Cayman Islands',
 };
 // Count a number up to its value (a few hundred ms); straight to it when motion is off.
@@ -76,7 +78,7 @@ export async function mount(el, ctx) {
 
   const saved = ctx.view ? (ctx.view.chat ??= {}) : {};
   let conv = saved.conv || null, since = 0, busy = false, dead = false, timer = 0;
-  let heavyModel = '', lane = null, lastTool = null, memUsed = new Set(), memFiles = [], graph = null;
+  let heavyModel = '', lane = null, lastTool = null, memUsed = new Set(), memFiles = [], graph = null, feed = null;
   let sse = false, es = null;
 
   const lab = t => h('span', { class: 'tt-lbl', text: t });
@@ -116,7 +118,7 @@ export async function mount(el, ctx) {
   let live = null, voice = null;
   function render(e) {
     if (e.type === 'delta') {
-      graph?.busy(true);
+      graph?.setThinking(true);
       if (!live) { live = row('ch-bot ch-live', c.tempo, ''); }
       live.querySelector('.ch-t').textContent += e.text;
       log.scrollTop = log.scrollHeight;
@@ -162,8 +164,9 @@ export async function mount(el, ctx) {
     sendBtn.disabled = busy; sendBtn.textContent = busy ? c.busy : c.send; sendBtn.classList.toggle('working', busy);
     root.dataset.busy = String(!!b); // the insignia's circuit runs faster and brighter while an engine works
     dot.className = 'tt-dot ' + (b ? 'run' : 'idle'); whereText.textContent = b ? c.working : c.idle;
-    graph?.busy(b);
-    if (was && !b) graph?.burst(); // a run finished
+    graph?.setThinking(b);
+    feed?.setFast(b); // nodes used in the turn show up within a couple of seconds
+    if (was && !b) { graph?.burst(); feed?.poke(); } // a run finished
   };
   const refreshWf = () => api('workflow?conv=' + conv).then(w => { wf.textContent = (w.text.split('## Log')[0] || '').trim() || c.noTasks; }).catch(() => {});
   let polling = false;
@@ -225,6 +228,7 @@ export async function mount(el, ctx) {
     await ready;
     es?.close(); es = null;
     conv = id; saved.conv = id; since = 0; lastTool = null; log.replaceChildren(empty);
+    feed?.poke(); // the nodes used in this conversation
     if (sse) { stream(); refreshWf(); } else await poll();
     convs();
   }
@@ -300,7 +304,7 @@ export async function mount(el, ctx) {
       drawMemory();
     } catch { memList.replaceChildren(h('p', { class: 'ch-empty', text: c.failed })); }
   }
-  function refreshUsed() { if (saved.tab === 'memory' || graph) loadMemory().then(() => { if (graph) { closeBrain(); openBrain(); } }); }
+  function refreshUsed() { if (saved.tab === 'memory') loadMemory(); feed?.poke(); }
   async function readFile(src) {
     showTab('memory');
     try {
@@ -324,29 +328,50 @@ export async function mount(el, ctx) {
   const brainPane = h('section', { class: 'ch-brain', 'aria-label': c.graphTitle },
     stage, h('div', { class: 'mg-hd' }, lab(c.graphTitle), h('h1', { text: c.brainTitle }), legend, hint), brainNote);
   let opening = false;
+  // One look at the brain: the graph plus the file list (its mtimes), merged. Also what the feed polls.
+  async function loadBrain() {
+    const q = conv ? '?conv=' + encodeURIComponent(conv) : '';
+    const [g, m] = await Promise.all([api('memory/graph' + q), api('memory' + q).catch(() => null)]);
+    if (!g.nodes) throw new Error('no graph');
+    if (m?.files) {
+      const mt = new Map(m.files.map(f => [f.src, f.mtime]));
+      for (const n of g.nodes) n.mtime = mt.get(n.src);
+      memFiles = m.files; memUsed = new Set(m.used);
+      setNum('mem', memFiles.length);
+      if (saved.tab === 'memory') drawMemory();
+    }
+    return g;
+  }
   async function openBrain() {
     if (graph || opening) return;
     opening = true;
     legend.replaceChildren(...['current', 'core', 'memory', 'pack', 'used'].map(k => h('span', { class: 'mg-key', 'data-kind': k, text: k === 'used' ? c.used : kindLabel(k) })));
     let g = { nodes: [], edges: [] }, why = '';
     try {
-      if (!memFiles.length) await loadMemory();
-      g = await api('memory/graph' + (conv ? '?conv=' + encodeURIComponent(conv) : ''));
-      if (!g.nodes) { g = { nodes: [], edges: [] }; why = c.failed; }
-      else if (!g.nodes.length) why = c.graphEmpty;
+      g = await loadBrain();
+      if (!g.nodes.length) why = c.graphEmpty;
     } catch (e) { why = e.status === 401 ? (c.signIn || e.message) : c.failed; }
     try {
-      const { openGraph: draw } = await import(new URL('./memgraph.mjs', import.meta.url).href);
+      const { mountBrain } = await import(new URL('./brain-world.mjs', import.meta.url).href);
       if (view === 'dashboard' || dead) return;
       stage.replaceChildren();
-      graph = await draw(stage, g, { used: memUsed, reduced: reducedMotion(), flatLabel: c.graphTitle, onPick: src => readFile(src) });
-      graph.busy(busy); graph.pause(paused);
+      const copy = { open: c.brainOpen, close: c.brainClose, links: c.brainLinks, changed: c.brainChanged, search: c.brainSearch, noMatch: c.brainNoMatch, loadError: c.brainLoadError, nodes: c.brainNodes };
+      graph = await mountBrain(stage, { data: g, source: 'agent', reduced: reducedMotion(), copy, flatLabel: c.graphTitle, onOpen: node => readFile(node.id) });
+      graph.setThinking(busy); graph.pause(paused);
       hint.textContent = graph.mode === 'flat' ? c.graphHintFlat : c.graphHint;
       brainNote.hidden = !why;
       brainNote.textContent = why;
+      const { createFeed } = await import(new URL('./brain-feed.mjs', import.meta.url).href);
+      if (!graph || dead) return;
+      feed = createFeed({
+        load: loadBrain,
+        onData: raw => { graph?.setData(raw); brainNote.hidden = raw.nodes.length > 0; if (!raw.nodes.length) { brainNote.hidden = false; brainNote.textContent = c.graphEmpty; } },
+        interval: 8000, fast: 2500,
+      });
+      feed.prime(g); feed.setFast(busy); feed.start(false);
     } catch { brainNote.hidden = false; brainNote.textContent = c.failed; } finally { opening = false; }
   }
-  function closeBrain() { graph?.close(); graph = null; }
+  function closeBrain() { feed?.stop(); feed = null; graph?.close(); graph = null; }
 
   // ---- view (Brain, Dashboard, Both), theme (System, Light, Dark), pause motion; all remembered
   let view = VIEWS.includes(store.get('view', 'dashboard')) ? store.get('view', 'dashboard') : 'dashboard';
@@ -486,6 +511,9 @@ export async function mount(el, ctx) {
   requestAnimationFrame(moveBars);
   const ro = new ResizeObserver(moveBars);
   ro.observe(root);
+  // SLASH hook (palette.mjs): the "/" menu, suggestion cards, guides and help. One call; nothing else in this file knows about it.
+  let slash = null;
+  import(new URL('./palette.mjs', import.meta.url).href).then(m => m.attach({ root, input, log, empty, api, send })).then(s => { slash = s; if (dead) s.detach(); }).catch(() => {});
   const ready = health();
   loadMemory();
   convs();
@@ -494,7 +522,7 @@ export async function mount(el, ctx) {
   const ht = setInterval(health, 30000);
   return {
     unmount() {
-      dead = true; voice?.unmount(); es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
+      dead = true; slash?.detach(); voice?.unmount(); es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
       document.removeEventListener('keydown', onKey); links.forEach(l => l.remove()); root.remove();
     },
   };
