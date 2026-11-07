@@ -19,7 +19,7 @@ robust, leverage, seamless (in copy), comprehensive, utilize, empower, solution,
 
 ## Music is the house style
 
-Tempo is a band that plays on your own machines. Names, workflows and little touches come from music when it fits naturally, and never when it would confuse.
+The product is called Tempo. Music is the guide for every name, workflow and little touch, going forward: Tempo is a band that plays on your own machines. Pick the music word that makes the feature obvious, and never one that confuses.
 
 | In music | In Tempo |
 | --- | --- |
