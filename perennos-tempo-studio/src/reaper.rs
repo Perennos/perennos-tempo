@@ -2264,13 +2264,21 @@ mod tests {
         }
     }
 
+    /// The kick stem's file name: a double quote tests the quoting, but Windows forbids `"` in a
+    /// file name, so there the file is plain (the track name keeps its quotes everywhere).
+    const KICK_FILE: &str = if cfg!(windows) {
+        "Kick In.wav"
+    } else {
+        "Kick \"In\".wav"
+    };
+
     fn plan_json(dir: &Path) -> Value {
         json!({
             "kind": "mix_plan",
             "sample_rate": 44100,
             "trim_db": -2.0,
             "stems": [
-                {"path": dir.join("Kick \"In\".wav").display().to_string(), "name": "Kick \"In\"", "gain_db": -3.0, "highpass_hz": null, "compress": true, "lufs": -20.0},
+                {"path": dir.join(KICK_FILE).display().to_string(), "name": "Kick \"In\"", "gain_db": -3.0, "highpass_hz": null, "compress": true, "lufs": -20.0},
                 {"path": "vox\\lead.wav", "name": "Lead\nVox", "gain_db": 1.5, "highpass_hz": 90.0, "compress": true, "lufs": -30.0},
                 {"path": dir.join("pad.wav").display().to_string(), "name": "pad", "gain_db": 20.0, "highpass_hz": 120.0, "compress": false}
             ],
@@ -2325,10 +2333,7 @@ mod tests {
         s.render = true;
         let lua = session_script(&s);
         // Paths and names are escaped Lua literals.
-        assert!(lua.contains(&format!(
-            "file = {}",
-            lua_str(&pstr(&d.join("Kick \"In\".wav")))
-        )));
+        assert!(lua.contains(&format!("file = {}", lua_str(&pstr(&d.join(KICK_FILE))))));
         assert!(lua.contains(r#"name = "Lead\nVox""#));
         assert!(lua.contains(r#"name = "Kick \"In\"""#));
         assert!(lua.contains("vox\\\\lead.wav"));
@@ -2631,7 +2636,7 @@ mod tests {
     #[test]
     fn session_pipeline_with_fake_reaper() {
         let d = tmpdir("sess");
-        for n in ["Kick \"In\".wav", "pad.wav"] {
+        for n in [KICK_FILE, "pad.wav"] {
             tone_at(&d.join(n), -20.0);
         }
         std::fs::create_dir_all(d.join("vox")).unwrap();

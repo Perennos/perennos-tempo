@@ -869,7 +869,11 @@ pub mod tests {
     fn the_preferred_prefix_comes_from_the_environment_then_the_saved_setting_and_must_be_plain() {
         let home = Path::new("/h");
         let saved = |text: &str| Fake {
-            files: [("/h/setup.json".to_string(), text.to_string())].into(),
+            files: [(
+                home.join("setup.json").to_string_lossy().into_owned(),
+                text.to_string(),
+            )]
+            .into(),
             ..Fake::default()
         };
         // nothing set: no preference

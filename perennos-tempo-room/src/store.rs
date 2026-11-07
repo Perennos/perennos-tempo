@@ -271,7 +271,7 @@ impl Member {
                 vec![Session {
                     hash: v["token_hash"].as_str()?.to_string(),
                     created: joined,
-                    last_seen: now,
+                    last_seen: now.floor(),
                 }],
                 true,
             ),
@@ -1004,7 +1004,8 @@ impl Store {
             .and_then(|m| m.sessions.iter_mut().find(|s| ct_eq(&s.hash, &h)))
         {
             if now - s.last_seen >= SEEN_WRITE_SECS {
-                s.last_seen = now;
+                // whole seconds: the hour rule needs no more, and the file reads back exactly
+                s.last_seen = now.floor();
                 stale = true;
             }
         }
@@ -1044,8 +1045,8 @@ impl Store {
         m.sessions.retain(|s| now - s.last_seen < days);
         m.sessions.push(Session {
             hash: sha256_hex(&token),
-            created: now,
-            last_seen: now,
+            created: now.floor(),
+            last_seen: now.floor(),
         });
         while m.sessions.len() > MAX_MEMBER_SESSIONS {
             let oldest = m
@@ -1152,8 +1153,8 @@ impl Store {
                     muted: vec![],
                     sessions: vec![Session {
                         hash: sha256_hex(&token),
-                        created: now,
-                        last_seen: now,
+                        created: now.floor(),
+                        last_seen: now.floor(),
                     }],
                     joined: now,
                 });

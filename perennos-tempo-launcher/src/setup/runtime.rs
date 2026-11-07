@@ -1259,9 +1259,11 @@ pub mod tests {
             tools,
             vec![format!(
                 "tar --zstd -xf {} -C {}",
-                home.join("runtime/downloads/ollama-linux-amd64.tar.zst")
+                home.join("runtime")
+                    .join("downloads")
+                    .join("ollama-linux-amd64.tar.zst")
                     .display(),
-                home.join("runtime/ollama-0.40.6.partial").display()
+                home.join("runtime").join("ollama-0.40.6.partial").display()
             )]
         );
         let text = said.join("\n");
@@ -1312,7 +1314,7 @@ pub mod tests {
         assert!(e.contains(&sha256_hex(&dl.body)), "says what it got: {e}");
         assert!(e.contains("nothing was unpacked or installed"), "{e}");
         // moved, never deleted: the bytes are in trash/<date>/
-        let day = home.join("trash/20261026");
+        let day = home.join("trash").join("20261026");
         let moved = day.join("ollama-linux-amd64.tar.zst.part");
         assert!(e.contains(moved.to_str().unwrap()), "{e}");
         assert_eq!(std::fs::read(&moved).unwrap(), dl.body);
@@ -1574,8 +1576,8 @@ pub mod tests {
             };
             let want = format!(
                 "{prog} {tar_first} {} -C {}",
-                home.join("runtime/downloads").join(file).display(),
-                home.join("runtime/ollama-0.40.6.partial").display()
+                home.join("runtime").join("downloads").join(file).display(),
+                home.join("runtime").join("ollama-0.40.6.partial").display()
             );
             assert_eq!(t[0], want);
         }

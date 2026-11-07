@@ -1915,7 +1915,10 @@ mod tests {
         assert!(first < second, "{}", r.question);
         assert_eq!(dl.count(), 1);
         let home = root.join("home");
-        let bin = home.join("runtime/ollama-0.40.6/ollama.exe");
+        let bin = home
+            .join("runtime")
+            .join("ollama-0.40.6")
+            .join("ollama.exe");
         assert!(bin.is_file());
         // started right after unpacking, with the program from the record
         assert_eq!(*started.lock().unwrap(), vec![bin.clone()]);

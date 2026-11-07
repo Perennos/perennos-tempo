@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(j["within_target"], true);
         assert_eq!(
             j["final_path"],
-            d.join("song-master.wav").display().to_string()
+            crate::util::strip_verbatim(&d.join("song-master.wav").display().to_string())
         );
         assert!(j["notes"][0]
             .as_str()
@@ -686,7 +686,7 @@ mod tests {
         let j = mix(&ctx(&fake, &found), &in_reaper).unwrap();
         assert_eq!(
             j["final_path"],
-            d.join("mix.wav").display().to_string(),
+            crate::util::strip_verbatim(&d.join("mix.wav").display().to_string()),
             "{j:#}"
         );
         assert!(j["notes"]
@@ -721,7 +721,10 @@ mod tests {
         let fake = FakeReaper::new(-14.0);
         let c = ctx(&fake, &found);
         let j = reaper_build_session(&c, &s, &default_script_for(&plan), false).unwrap();
-        assert_eq!(j["script"], d.join("mix-session.lua").display().to_string());
+        assert_eq!(
+            j["script"],
+            crate::util::strip_verbatim(&d.join("mix-session.lua").display().to_string())
+        );
         assert!(fake.calls.borrow().is_empty());
         let j = reaper_build_session(&c, &s, &default_script_for(&plan), true).unwrap();
         assert_eq!(j["status"]["done"], true);

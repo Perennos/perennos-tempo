@@ -474,7 +474,8 @@ mod tests {
         assert_eq!(m["settings"]["preset"], "apple");
         assert_eq!(
             m["path"],
-            inside.join("song-master.wav").display().to_string()
+            // results show plain paths on Windows too (no \\?\ prefix)
+            crate::util::strip_verbatim(&inside.join("song-master.wav").display().to_string())
         );
         assert_eq!(text(&out[5])["found"], false);
     }
@@ -516,7 +517,7 @@ mod tests {
         let b = text(&out[1]);
         assert_eq!(
             b["script"],
-            d.join("mix-session.lua").display().to_string(),
+            crate::util::strip_verbatim(&d.join("mix-session.lua").display().to_string()),
             "{b:#}"
         );
         assert_eq!(b["session"]["render"], true);

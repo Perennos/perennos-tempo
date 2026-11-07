@@ -296,7 +296,12 @@ impl Job<'_> {
     }
 
     fn file(&self, src: &Path, rel: &Path, out: &mut Merged) {
-        let shown = rel.display().to_string();
+        // the same on every system: folders joined with /
+        let shown = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
         let dest = self.home.join(rel);
         if fs::symlink_metadata(&dest).is_ok() {
             out.skipped.push(shown);
@@ -606,7 +611,9 @@ mod tests {
         assert!(m.skipped.is_empty());
         assert!(!old.exists(), "the emptied tree was moved away");
         let t = m.tree_in_trash.clone().unwrap();
-        assert!(t.starts_with(home.join("trash").join("20261106")), "{t:?}");
+        // compare real paths: on macOS the temp folder is a link (/var to /private/var)
+        let trash = fs::canonicalize(home.join("trash").join("20261106")).unwrap();
+        assert!(fs::canonicalize(&t).unwrap().starts_with(&trash), "{t:?}");
         assert!(t.is_dir() && t.join("hollow").is_dir());
         assert!(m
             .text(&home, &old)

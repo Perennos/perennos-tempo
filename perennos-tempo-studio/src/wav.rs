@@ -487,24 +487,32 @@ impl<R: Read + Seek> WavReader<R> {
         match (self.info.format, self.info.bits) {
             (SampleFormat::Int, 8) => out.extend(raw.iter().map(|&b| (b as f64 - 128.0) / 128.0)),
             (SampleFormat::Int, 16) => out.extend(
-                raw.chunks_exact(2)
-                    .map(|c| i16::from_le_bytes([c[0], c[1]]) as f64 / 32_768.0),
+                raw.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| i16::from_le_bytes(*c) as f64 / 32_768.0),
             ),
-            (SampleFormat::Int, 24) => out.extend(raw.chunks_exact(3).map(|c| {
+            (SampleFormat::Int, 24) => out.extend(raw.as_chunks::<3>().0.iter().map(|c| {
                 let v = (c[0] as i32) | ((c[1] as i32) << 8) | ((c[2] as i8 as i32) << 16);
                 v as f64 / 8_388_608.0
             })),
-            (SampleFormat::Int, 32) => out
-                .extend(raw.chunks_exact(4).map(|c| {
-                    i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64 / 2_147_483_648.0
-                })),
+            (SampleFormat::Int, 32) => out.extend(
+                raw.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| i32::from_le_bytes(*c) as f64 / 2_147_483_648.0),
+            ),
             (SampleFormat::Float, 32) => out.extend(
-                raw.chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64),
+                raw.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes(*c) as f64),
             ),
             (SampleFormat::Float, 64) => out.extend(
-                raw.chunks_exact(8)
-                    .map(|c| f64::from_le_bytes(c.try_into().unwrap())),
+                raw.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| f64::from_le_bytes(*c)),
             ),
             (f, b) => {
                 return Err(WavError::Unsupported(format!("{b}-bit {f:?}")));

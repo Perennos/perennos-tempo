@@ -2601,6 +2601,10 @@ pub fn packaged() -> bool {
 
 /// The scheduler line or task command for `learn`, and how often it runs.
 pub fn schedule_plan(exe: &Path, daily: bool) -> Result<(String, Vec<String>), String> {
+    // a line break would start a second crontab line; no scheduler needs one in a program's path
+    if exe.to_string_lossy().chars().any(char::is_control) {
+        return Err("the program's folder name has a line break or another control character; install Perennos Tempo in a plainer folder".into());
+    }
     if cfg!(windows) {
         // a windowless program: the task never shows a window
         let tr = task_command(exe)?;
@@ -3997,6 +4001,16 @@ mod tests {
             "/opt/a b\"c/tempo-launch",
         ] {
             let (line, _) = schedule_plan(Path::new(odd), false).unwrap();
+            if cfg!(target_os = "macos") {
+                // launchd: the path is one XML string in ProgramArguments, no shell reads it
+                let want = format!("<string>{}</string>", xml_escape(odd));
+                assert!(line.contains(&want), "{line}");
+                assert!(
+                    !line.contains(&format!("<string>{odd}</string>")) || !odd.contains('"'),
+                    "{line}"
+                );
+                continue;
+            }
             // one line, no bare %, and the path sits inside single quotes where cron's sh expands nothing
             assert_eq!(line.lines().count(), 1, "{line}");
             assert!(!line.replace("\\%", "").contains('%'), "{line}");
