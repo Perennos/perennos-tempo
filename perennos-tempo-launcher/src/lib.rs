@@ -1502,8 +1502,9 @@ pub fn problem_page(p: &Problem, tail: &str, when: u64) -> String {
         None => String::new(),
     };
     format!(
-        r#"{top}<h1>{title}</h1>
-<p>{what}</p>
+        r#"{top}<p class="tt-kicker">Notice</p>
+<h1>{title}</h1>
+<p class="lede">{what}</p>
 <ul>{tips}</ul>
 {log}
 <p class="small"><span class="dot"></span>Nothing was changed or lost. {when}</p>

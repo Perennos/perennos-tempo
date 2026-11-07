@@ -88,17 +88,18 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
         })
         .collect();
     format!(
-        r#"{top}<h1>Welcome to Perennos Tempo</h1>
+        r#"{top}<p class="tt-kicker">First run</p>
+<h1>Welcome to <em>Perennos Tempo</em></h1>
 <p class="lede">Tempo has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
 
-<h2>1. What this computer can run</h2>
+<h2>What this computer can run</h2>
 <p class="verdict">{verdict}</p>
 <ul>{fits}</ul>
 {note}
 <p><strong>What Tempo found</strong></p>
 <ul>{scan}</ul>
 
-<h2>2. Is this your only computer?</h2>
+<h2>Is this your only computer?</h2>
 <p>This page cannot take a click, so each answer shows the exact command. Run the one that fits, in a terminal.</p>
 <div class="choices">
 <div class="card">
@@ -120,7 +121,7 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 </div>
 </div>
 
-<h2>3. Let your AI help you set up</h2>
+<h2>Let your AI help you set up</h2>
 <p>Add Tempo's setup helper to the AI you already use. It can read the scan and the plan above, talk you through the choice in step 2, and write a <em>proposal</em> for your settings. It cannot change anything: you apply a proposal yourself with <code>{apply_cmd}</code>, which shows what would change and asks y/N.</p>
 <h3>Claude Desktop</h3>
 <p>Open <code>claude_desktop_config.json</code> (Windows: <code>%APPDATA%\Claude\</code>; Mac: <code>~/Library/Application Support/Claude/</code>), add this inside the file (keep any servers already there), and restart Claude Desktop:</p>
@@ -135,13 +136,13 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 <p>ChatGPT's connectors need an MCP server reachable over the internet, so it cannot start a program on your computer. Instead, run this, read what it prints, and paste it into your chat yourself:</p>
 {scan_cmd}
 
-<h2>4. What connecting an AI shares</h2>
+<h2>What connecting an AI shares</h2>
 <div class="share">
 <p><strong>Only the scan facts and the plan.</strong> The helper answers with this computer's system, CPU and graphics card class, memory, free disk, whether Ollama is there, the models Tempo recommends, and which Tempo apps are running. It never sends files, notes or chats, and its answers hold no user name, folder name, computer name or address.</p>
 <p>It is opt-in: nothing connects unless you add the entry to your AI yourself, and Tempo never calls out to any AI on its own. Once you do, what the helper answers becomes part of your conversation with that AI, so it reaches that AI's provider like anything else you type there. To stop, remove the entry from the AI's settings.</p>
 </div>
 
-<h2>5. Let the Conductor set up a band for your work</h2>
+<h2>Let the Conductor set up a band for your work</h2>
 <p>The <em>Tempo Conductor</em> ties you to your workflows and to your engines. A <em>band</em> is the team it sets up for your own workflow, all on this computer: for a social media account, say, a researcher, a writer, an editor and a scheduler. Each one shows up in Room as a teammate you can talk to like a person (<code>@writer</code>), and when you raise the baton a flow walks them one after another and files what they make as linked notes in your Vault. The Conductor also knows every engine you have (this computer's Ollama and each one you added with <code>tempo-launch link</code>) and cues each member on the one that suits the part: the writers on your strongest engine, the sorters on a quick one. They only talk and write drafts: they never post, send, buy or delete anything.</p>
 <p>See your engines first:</p>
 {band_engines}

@@ -2,9 +2,11 @@
    mono labels, red-orange for what is active) applied to notes. Tokens only; three themes. */
 /* Tokens, themes and motion come from tempo-theme.css (loaded first). The artwork and the fonts are named
    here, once: swap the files or these lines and nothing else. Fonts are the site's own (SIL OFL 1.1). */
-@font-face{font-family:"Archivo";src:url(/fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:"Archivo";src:url(/fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-stretch:62% 125%;font-style:normal;font-display:swap}
 @font-face{font-family:"Instrument Serif";src:url(/fonts/instrument-serif-italic-latin.woff2) format("woff2");font-weight:400;font-style:italic;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url(/fonts/jetbrains-mono-latin-700.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(/fonts/bodoni-moda-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(/fonts/bodoni-moda-italic-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:italic;font-display:swap}
 :root{--wm-src:url(/perennos-wordmark-cream.png);--ins-src:url(/perennos-insignia.webp)}
 :root{--rail:176px;--side:272px;--insp:300px;--top:38px;--status:28px}
 html{height:100%}
@@ -440,7 +442,7 @@ body.lay-both .graph-hd{padding:14px 16px 10px}
 .top .r .tt-seg>button{min-height:24px;padding:0 8px;gap:0}
 .top .tt-seg{margin:0}
 .top .r{gap:12px}
-.top .tt-seg>button[aria-pressed=true]{color:var(--warm2)}
+.top .tt-seg>button[aria-pressed=true]{color:var(--bg)}
 /* ------------------------------------------------------------- palette, sheets, suggest */
 .pal{position:fixed;inset:0;z-index:20;background:color-mix(in srgb,var(--bg) 55%,transparent);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;justify-content:center;align-items:flex-start;padding-top:12vh}
 .pal-box{width:min(640px,calc(100% - 32px));border:1px solid var(--line2);background:var(--bg2);box-shadow:0 30px 80px var(--shadow)}
@@ -500,3 +502,68 @@ body.konami .status .dot{background:var(--warm);box-shadow:0 0 8px var(--warm)}
   body.lay-both .graph{border-left:0;border-top:1px solid var(--line)}
 }
 @media (max-width:640px){.top .r .seg.pal-open,.top .r .seg.live{display:none}.top .tt-brand .tt-wm,.top .tt-brand b{display:none}.top .r .tt-seg>button{padding:0 6px}.top .r .tt-seg .tt-word{display:none}}
+
+/* ============================================================== couture
+   Editorial type, hairlines, pill buttons and slow easing over the bones above (tokens: tempo-theme.css). */
+body{font-size:13.5px;line-height:1.6}
+.lbl{font-weight:700;font-size:9.5px;letter-spacing:.28em}
+kbd{border-width:var(--hair);font-variant-numeric:lining-nums tabular-nums}
+.top{border-bottom:var(--hair) solid var(--line2);padding:0 var(--s5)}
+.top .seg{font-weight:700;letter-spacing:.2em}
+.top .seg.auto{border:var(--hair) solid var(--line3);border-radius:999px;padding:var(--s1) var(--s3);letter-spacing:.24em}
+.rail{border-right:var(--hair) solid var(--line2);padding:var(--s5) 0 var(--s3)}
+.rail button{padding:var(--s2) var(--s5);letter-spacing:.24em;font-weight:700;transition:color .4s var(--expo),padding-left .6s var(--expo)}
+.rail button:hover{padding-left:calc(var(--s5) + var(--s1))}
+.rail .sub{padding:var(--s4) var(--s5) var(--s2);letter-spacing:.3em;font-weight:700}
+.side{border-right:var(--hair) solid var(--line2)}
+.side-hd{padding:var(--s5) var(--s4) var(--s3);border-bottom:var(--hair) solid var(--line2)}
+.filter{padding:var(--s2) 0;border:0;border-bottom:var(--hair) solid var(--line3);border-radius:0;font-size:13px;transition:border-color .5s var(--expo)}
+.filter:focus{border-bottom-color:var(--warm)}
+.ti{padding:var(--s1) var(--s4)}
+.ti.dir{letter-spacing:.24em;font-weight:700}
+.hit{padding:var(--s3) var(--s4);border-bottom:var(--hair) solid var(--line)}
+.hit b{font-size:17px;letter-spacing:-.012em}
+.empty{padding:var(--s5) var(--s4);font-size:18px;line-height:1.35;letter-spacing:-.01em;text-wrap:balance}
+/* the note: a magazine opener */
+.doc-hd{padding:var(--s7) clamp(20px,6vw,88px) var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.doc-hd .lbl:first-child,.crumbs{color:var(--warm2)}
+.doc-hd h1{margin:var(--s3) 0 0;font:italic 400 clamp(36px,3.4vw + 14px,64px)/.98 var(--display);font-optical-sizing:auto;letter-spacing:-.04em;text-wrap:balance;max-width:16em}
+.meta{margin-top:var(--s4);letter-spacing:.24em}
+.doc-tools{gap:var(--s2);margin-top:var(--s5)}
+.doc-body{padding:var(--s7) clamp(20px,6vw,88px) 140px}
+.editor{padding:var(--s7) clamp(20px,6vw,88px) 140px;line-height:1.75}
+.md{max-width:66ch;font:440 18px/1.7 "Bodoni Moda",var(--serif);font-optical-sizing:auto;font-variant-numeric:oldstyle-nums proportional-nums;hanging-punctuation:first last;text-wrap:pretty;color:var(--frost)}
+.md p{margin:.9em 0;text-wrap:pretty}
+.md>p:first-of-type::first-letter{float:left;margin:.07em .09em 0 0;font:italic 400 3.5em/.78 var(--display);color:var(--warm2)}
+.md h1,.md h2,.md h3{font-family:var(--display);font-style:italic;font-weight:400;letter-spacing:-.03em;text-wrap:balance}
+.md h1{font-size:2.2em;line-height:1.02}
+.md h2{font-size:1.7em;line-height:1.08;margin-top:2em}
+.md h3{font-size:1.3em;margin-top:1.8em}
+.md h4,.md h5,.md h6{font-weight:700;letter-spacing:.28em}
+.md blockquote{margin:1.6em 0;padding:.2em 0 .2em 1.4em;border-left:1.5px solid var(--warm);font:italic 400 1.35em/1.35 var(--serif);color:var(--ink);letter-spacing:-.01em}
+.md a{background:linear-gradient(currentColor,currentColor) 0 100%/0 var(--hair) no-repeat;border-bottom:var(--hair) solid var(--line3);transition:background-size .6s var(--expo)}
+.md a:hover{background-size:100% var(--hair);border-bottom-color:transparent}
+.md pre{border:var(--hair) solid var(--line2);border-left:1.5px solid var(--warm);padding:var(--s4) var(--s5)}
+.md hr{border:0;height:var(--hair);background:var(--line3);margin:var(--s7) 0}
+.md table,.md td,.md th,.md code{font-variant-numeric:lining-nums tabular-nums}
+.md img{max-width:100%}
+/* buttons: pills */
+.btn{min-height:34px;padding:0 var(--s4);border:var(--hair) solid var(--line3);border-radius:999px;font-weight:600;transition:background-color .5s var(--expo),color .5s var(--expo),border-color .5s var(--expo),transform .12s var(--ease)}
+.btn.sm{min-height:28px;padding:0 var(--s3);font-weight:700;letter-spacing:.2em}
+.btn:hover{background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.btn:hover kbd{color:var(--bg);border-color:currentColor}
+.btn[aria-pressed=true]{background:var(--warm-soft)}
+.btn.go{background:var(--warm);border-color:var(--warm);color:var(--on-warm)}
+.btn.go:hover{background:transparent;color:var(--warm2)}
+.btn.danger:hover{background:transparent;border-color:var(--warm);color:var(--warm2)}
+.banner{border:var(--hair) solid var(--warm);border-radius:var(--r);padding:var(--s3) var(--s4)}
+.insp{border-left:var(--hair) solid var(--line2)}
+.insp-body{padding:var(--s5)}
+.pal-box,.sheet-box{border:var(--hair) solid var(--line3);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);background:color-mix(in srgb,var(--bg2) 90%,transparent)}
+.pal-box input{padding:var(--s5);font-size:26px;letter-spacing:-.015em}
+.sheet-box{padding:var(--s6)}
+.sheet-box h2{font:italic 400 clamp(28px,1.6vw + 18px,38px)/1.05 var(--serif);letter-spacing:-.022em}
+.sheet-box input{border:0;border-bottom:var(--hair) solid var(--line3);border-radius:0;padding:var(--s2) 0;transition:border-color .5s var(--expo)}
+.sheet-box input:focus{border-bottom-color:var(--warm)}
+.status{border-top:var(--hair) solid var(--line2);letter-spacing:.2em;font-weight:700;padding:0 var(--s5)}
+@media (max-width:640px){.doc-hd{padding:var(--s6) var(--s4) var(--s4)}.doc-body,.editor{padding:var(--s5) var(--s4) 120px}.md{font-size:17px}.top{padding:0 var(--s3)}}

@@ -107,6 +107,12 @@ function paintTheme(t) {
   if (meta) meta.content = light ? '#f1ece1' : '#1b1a1b';
   $('theme').firstElementChild.textContent = t;
 }
+// Changes the screen with a View Transition (a slow dissolve and rise) where there is one, at once where not.
+function swap(change) {
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (document.startViewTransition && !calm) document.startViewTransition(change);
+  else change();
+}
 // Fades between themes: a View Transition where there is one, a short colour transition where not.
 function applyTheme(t, animate = false) {
   if (t === 'charcoal' || t === 'ink') t = t === 'ink' ? 'dark' : 'system'; // the old names
@@ -189,6 +195,8 @@ async function boot() {
   applyTheme(load('theme') || 'system');
   window.matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => paintTheme(document.documentElement.dataset.theme));
   wire();
+  // The slow field behind the join and empty screens: only where WebGL works, never blocks the app.
+  import('/field.mjs').then((m) => m.mountField($('field'))).catch(() => {});
   const h = parseHash();
   if (h.owner) {
     try { await api('owner', { token: h.owner }); } catch (e) { toast(e.message, 8000); }
@@ -350,11 +358,13 @@ async function openRoom(id, push) {
   S.unread.delete(id);
   S.replyTo = null;
   updateReply();
-  document.body.classList.add('in-room');
-  $('chat').hidden = false;
-  $('back').hidden = false;
-  $('invite').hidden = S.me.role !== 'owner';
-  roomHeader(r);
+  swap(() => {
+    document.body.classList.add('in-room');
+    $('chat').hidden = false;
+    $('back').hidden = false;
+    $('invite').hidden = S.me.role !== 'owner';
+    roomHeader(r);
+  });
   if (push && !wide()) history.pushState({ room: id }, '');
   $('text').value = load('draft:' + id) || '';
   autosize();
@@ -377,11 +387,13 @@ function closeRoom() {
   saveDraft();
   S.room = null;
   save('room', '');
-  document.body.classList.remove('in-room');
-  $('chat').hidden = true;
-  $('back').hidden = true;
-  $('room-sep').hidden = true;
-  $('room-crumb').hidden = true;
+  swap(() => {
+    document.body.classList.remove('in-room');
+    $('chat').hidden = true;
+    $('back').hidden = true;
+    $('room-sep').hidden = true;
+    $('room-crumb').hidden = true;
+  });
   closeSuggest();
   renderRooms();
 }

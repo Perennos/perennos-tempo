@@ -40,10 +40,15 @@ const REQUEST_DEADLINE: Duration = if cfg!(test) {
 pub const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub const APP_JS: &str = include_str!("../assets/app.mjs");
 pub const APP_CSS: &str = include_str!("../assets/app.css");
+/// The slow three.js field behind the join and empty screens, and the three.js build it imports
+/// (0.170.0 from npm, MIT, unmodified; imported only when WebGL works).
+pub const FIELD_JS: &str = include_str!("../assets/field.mjs");
+const THREE_JS: &str = include_str!("../assets/vendor/three.module.min.js");
+const THREE_LICENSE: &str = include_str!("../assets/vendor/three.LICENSE");
 pub const ICON_SVG: &str = include_str!("../assets/icon.svg");
 pub const THEME_CSS: &str = include_str!("../assets/tempo-theme.css");
 // The official artwork and the site's own fonts (SIL OFL 1.1), served as they are; same files in every Tempo crate.
-const BRAND_FILES: [(&str, &str, &[u8]); 6] = [
+const BRAND_FILES: [(&str, &str, &[u8]); 8] = [
     (
         "/perennos-insignia.webp",
         "image/webp",
@@ -73,6 +78,16 @@ const BRAND_FILES: [(&str, &str, &[u8]); 6] = [
         "/fonts/jetbrains-mono-latin-700.woff2",
         "font/woff2",
         include_bytes!("../assets/fonts/jetbrains-mono-latin-700.woff2"),
+    ),
+    (
+        "/fonts/bodoni-moda-latin-variable.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/bodoni-moda-latin-variable.woff2"),
+    ),
+    (
+        "/fonts/bodoni-moda-italic-latin-variable.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/bodoni-moda-italic-latin-variable.woff2"),
     ),
 ];
 pub const MANIFEST: &str = include_str!("../assets/manifest.webmanifest");
@@ -708,6 +723,27 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
             200,
             "text/javascript; charset=utf-8",
             APP_JS.as_bytes(),
+            &[],
+        ),
+        "/field.mjs" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            FIELD_JS.as_bytes(),
+            &[],
+        ),
+        "/vendor/three.module.min.js" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            THREE_JS.as_bytes(),
+            &[],
+        ),
+        "/vendor/three.LICENSE" => respond(
+            &mut s,
+            200,
+            "text/plain; charset=utf-8",
+            THREE_LICENSE.as_bytes(),
             &[],
         ),
         "/app.css" => respond(

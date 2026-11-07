@@ -50,17 +50,17 @@
   </aside>
 
   <main class="stage" id="stage">
+    <canvas class="stagefx" id="field" aria-hidden="true"></canvas>
     <section class="join" id="join" hidden>
-      <div class="join-box">
+      <div class="join-box tt-stagger">
         <div class="art"><span class="tt-ins hero tilt" data-insignia><i class="tt-led"></i></span></div>
-        <p class="lbl">Perennos Tempo Room</p>
-        <h1>Come on in.</h1>
+        <p class="tt-kicker">Perennos Tempo Room</p>
+        <h1>Come on <em>in.</em></h1>
         <p class="sub">A private room where people talk, and Perennos Tempo answers when you write <b>@tempo</b>. Ask whoever runs it for the key to the room (an invite code): codes work once and expire. Already in a room and on a new device? Ask for a sign-in code instead; it needs no name.</p>
         <form id="join-form" class="join-form">
-          <label class="lbl" for="join-code">Invite or sign-in code</label>
-          <input id="join-code" class="field mono" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX" maxlength="20">
-          <label class="lbl" for="join-name">Your name in the room (not for a sign-in code)</label>
-          <input id="join-name" class="field" type="text" autocomplete="nickname" maxlength="32" placeholder="Mia">
+          <div class="tt-field"><input id="join-code" class="mono" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder=" " maxlength="20"><label for="join-code">Invite or sign-in code</label></div>
+          <div class="tt-field"><input id="join-name" type="text" autocomplete="nickname" maxlength="32" placeholder=" "><label for="join-name">Your name in the room</label></div>
+          <p class="hint">A sign-in code does not need a name.</p>
           <button class="btn go wide" type="submit">Join the room</button>
           <p class="err" id="join-err" role="alert"></p>
         </form>
@@ -102,9 +102,9 @@
     </section>
 
     <section class="empty-stage" id="empty-stage">
-      <div>
+      <div class="tt-stagger">
         <div class="art"><span class="tt-ins hero tilt" data-insignia><i class="tt-led"></i></span></div>
-        <p class="lbl">Perennos Tempo Room</p>
+        <p class="tt-kicker">Perennos Tempo Room</p>
         <h1 id="empty-title">Pick a room.</h1>
         <p class="sub" id="empty-sub">Mention <b>@tempo</b> in any message and Perennos Tempo answers in the thread.</p>
       </div>

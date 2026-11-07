@@ -38,7 +38,7 @@ pub const THREE_LICENSE: &str = include_str!("../assets/vendor/three.LICENSE");
 pub const ICON_SVG: &str = include_str!("../assets/icon.svg");
 pub const THEME_CSS: &str = include_str!("../assets/tempo-theme.css");
 // The official artwork and the site's own fonts (SIL OFL 1.1), served as they are; same files in every Tempo crate.
-const BRAND_FILES: [(&str, &str, &[u8]); 6] = [
+const BRAND_FILES: [(&str, &str, &[u8]); 8] = [
     (
         "/perennos-insignia.webp",
         "image/webp",
@@ -68,6 +68,16 @@ const BRAND_FILES: [(&str, &str, &[u8]); 6] = [
         "/fonts/jetbrains-mono-latin-700.woff2",
         "font/woff2",
         include_bytes!("../assets/fonts/jetbrains-mono-latin-700.woff2"),
+    ),
+    (
+        "/fonts/bodoni-moda-latin-variable.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/bodoni-moda-latin-variable.woff2"),
+    ),
+    (
+        "/fonts/bodoni-moda-italic-latin-variable.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/bodoni-moda-italic-latin-variable.woff2"),
     ),
 ];
 

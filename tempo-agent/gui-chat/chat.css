@@ -3,9 +3,11 @@
    (chat, status, engines) or Both. Tokens only; light, dark or the system's. Motion is transform and opacity. */
 /* The artwork and the fonts are named here, once: swap the files or these lines and nothing else.
    Paths are relative to this sheet. Fonts are the site's own (SIL OFL 1.1; see NOTICE.md). */
-@font-face{font-family:"Archivo";src:url(./fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:"Archivo";src:url(./fonts/archivo-latin-variable.woff2) format("woff2");font-weight:100 900;font-stretch:62% 125%;font-style:normal;font-display:swap}
 @font-face{font-family:"Instrument Serif";src:url(./fonts/instrument-serif-italic-latin.woff2) format("woff2");font-weight:400;font-style:italic;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url(./fonts/jetbrains-mono-latin-700.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(./fonts/bodoni-moda-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap}
+@font-face{font-family:"Bodoni Moda";src:url(./fonts/bodoni-moda-italic-latin-variable.woff2) format("woff2");font-weight:400 700;font-style:italic;font-display:swap}
 .ch{--wm-src:url(./perennos-wordmark-cream.png);--ins-src:url(./perennos-insignia.webp)}
 .ch{--rail:156px;--top:42px;position:relative;height:100%;min-height:0;overflow:hidden;display:grid;grid-template-columns:var(--rail) minmax(0,1fr);grid-template-rows:var(--top) minmax(0,1fr);background:var(--bg);color:var(--frost);font:13px/1.5 var(--sans)}
 .ch *{scrollbar-width:thin;scrollbar-color:var(--dim) transparent}
@@ -178,3 +180,46 @@ details.ch-tool[data-state=err]>summary{border-left-color:var(--warm);color:var(
   .ch[data-view=both] .mg-hd{padding:10px 14px}.ch[data-view=both] .mg-hd h1{font-size:20px}.ch[data-view=both] .mg-hint,.ch[data-view=both] .mg-legend{display:none}
   .ch-pop{left:auto;right:8px;bottom:58px}
 }
+
+/* ============================================================== couture
+   Type, hairlines, pills and slow easing for the non-brain parts (tokens: tempo-theme.css). */
+.ch{font-size:13.5px;line-height:1.6;--top:48px}
+.ch-top{padding:0 var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.ch-where{font-weight:700;letter-spacing:.24em}
+.ch-rail{border-right:var(--hair) solid var(--line2);padding:var(--s5) 0 var(--s3)}
+.ch-rail button{padding:var(--s2) var(--s5);font-weight:700;letter-spacing:.24em;transition:color .4s var(--expo),padding-left .6s var(--expo)}
+.ch-rail button:hover{padding-left:calc(var(--s5) + var(--s1))}
+.ch-rail .sub{padding:var(--s4) var(--s5) var(--s2);font-weight:700;letter-spacing:.3em}
+.ch-rail kbd{border-width:var(--hair)}
+.ch-strip{padding:var(--s4) var(--s6);gap:var(--s2) var(--s5);border-bottom:var(--hair) solid var(--line2)}
+.ch-v{font-weight:700;letter-spacing:.14em}
+.ch-num{font:300 clamp(24px,1vw + 18px,32px)/1 var(--display);letter-spacing:-.02em;font-variant-numeric:lining-nums tabular-nums}
+.ch-side{padding:var(--s5) var(--s4) var(--s5) var(--s6);border-right:var(--hair) solid var(--line2)}
+.ch-conv{min-height:40px;border-bottom:var(--hair) solid var(--line);letter-spacing:.12em}
+.ch-file{border-bottom:var(--hair) solid var(--line);min-height:38px}
+.ch-fname{font-size:13px}
+.ch-title{font:italic 400 clamp(22px,.8vw + 17px,28px)/1.1 var(--serif);letter-spacing:-.02em}
+.ch-log{padding:var(--s7) var(--s6) var(--s6);gap:var(--s5)}
+.ch-log>.ch-empty{max-width:20em;font:italic 400 clamp(26px,1.2vw + 16px,38px)/1.08 var(--display);font-optical-sizing:auto;letter-spacing:-.035em;color:var(--ink);text-wrap:balance}
+.ch-m{max-width:70ch}
+.ch-t{font-size:15px;line-height:1.65;text-wrap:pretty}
+.ch-bot{padding-left:var(--s4);border-left:1.5px solid var(--warm)}
+.ch-m>.tt-lbl,.ch-m>.ch-who{letter-spacing:.28em;font-weight:700}
+.ch-tool .ch-t,.ch-status .ch-t{letter-spacing:.1em}
+.ch-confirm{border-radius:var(--r);border-width:var(--hair);border-left:1.5px solid var(--warm)}
+.ch-comp{padding:var(--s4) var(--s6);border-top:var(--hair) solid var(--line2);gap:var(--s3)}
+.ch-in{border:var(--hair) solid var(--line3);border-radius:var(--r);padding:var(--s3) var(--s4);transition:border-color .5s var(--expo)}
+.ch-comp .ch-in{border-radius:22px;padding:var(--s3) var(--s5)}
+.ch-in:focus-visible{border-color:var(--warm);outline:0}
+.ch-btn{min-height:36px;padding:0 var(--s5);border:var(--hair) solid var(--line3);border-radius:999px;font-weight:700;letter-spacing:.2em;transition:background-color .5s var(--expo),color .5s var(--expo),border-color .5s var(--expo),transform .12s var(--ease)}
+.ch-btn:hover:not(:disabled){background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.ch-btn[aria-pressed=true]{background:var(--warm-soft)}
+.ch-go{background:var(--warm);border-color:var(--warm);color:var(--on-warm)}
+.ch-go:hover:not(:disabled){background:transparent;border-color:var(--warm);color:var(--warm2);filter:none}
+.ch-comp .ch-btn{align-self:flex-end;min-height:46px}
+.ch-pop{padding:var(--s5) var(--s5);border:var(--hair) solid var(--line3);background:color-mix(in srgb,var(--bg2) 90%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.ch-pop h2{font-size:clamp(26px,1vw + 18px,32px);letter-spacing:-.022em;line-height:1.05;margin-bottom:var(--s4)}
+.ch-pop .tt-lbl{margin:var(--s4) 0 var(--s2)}
+@container dash (max-width:700px){.ch-strip{padding:var(--s3) var(--s4)}.ch-log{padding:var(--s5) var(--s4)}.ch-comp{padding:var(--s3) var(--s4)}}
+@media (max-width:860px){.ch-top{padding:0 var(--s4)}}
+.ch-kpis{gap:var(--s5)}
