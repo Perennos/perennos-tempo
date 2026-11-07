@@ -18,6 +18,7 @@ pub mod brand;
 pub mod conductor;
 pub mod fleet;
 pub mod home;
+pub mod retune;
 pub mod setup;
 pub mod tempo_home;
 pub mod woodshed;
@@ -147,6 +148,16 @@ usage: tempo-launch [command]
                     the model a band is trained on; whether text a cloud model wrote may be trained on (off)
   woodshed mix [show | base PATH | add NAME [PATH] | start | set TARGET name=scale ... | check | global ...]
                     llama-server with LoRA adapters loaded and a fader per band or part, moved live
+  retune            Retune (weight edits): your frontier model edits a local model's weights, and Tempo keeps the edit only if it wins
+  retune plan MODEL [--hf REPO] [--weights DIR] [--yes]
+                    the terms (asked once), the licence, which computer, the full-precision weights and the bench's own
+                    Python folder (each a y/N with its size), and how to connect Claude Code or Claude Desktop
+  retune bench MODEL [--passes N] [--weights DIR] [--held-out FILE] [--session ID]
+                    the bench: an MCP server on stdio, with a fixed set of tools and a budget of forward passes (50)
+  retune show SESSION | check SESSION [--held-out FILE] [--outtype f16|bf16|q8_0] [--yes]
+                    list a session's edits, or apply them to a copy, make a GGUF and run the Rehearsal against the base
+  retune undo MODEL | SESSION --edit | versions [MODEL]
+                    step back to the version before (or take the last edit off a session), and every version kept
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1960,6 +1971,8 @@ pub enum Cmd {
     Crate(bank::BankCmd),
     /// `woodshed ...`: lessons, nightly LoRA training, and the Mix (see docs/WOODSHED.md).
     Woodshed(woodshed::WoodCmd),
+    /// `retune ...`: Retune (weight edits), see docs/RETUNE.md.
+    Retune(retune::RetuneCmd),
     Help,
     Version,
 }
@@ -2100,6 +2113,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "fleet" => Cmd::Fleet(fleet::parse_args(&rest)?),
         "crate" => Cmd::Crate(bank::parse_args(&rest)?),
         "woodshed" => Cmd::Woodshed(woodshed::parse_args(&rest)?),
+        "retune" => Cmd::Retune(retune::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2169,6 +2183,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Fleet(f) => Ok(fleet::run(ctx, f)),
         Cmd::Crate(c) => Ok(bank::run(ctx, c)),
         Cmd::Woodshed(w) => Ok(woodshed::run(ctx, w)),
+        Cmd::Retune(r) => Ok(retune::run(ctx, r)),
         Cmd::Schedule {
             remove,
             print,

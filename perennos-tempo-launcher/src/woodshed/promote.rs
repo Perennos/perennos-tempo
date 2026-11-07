@@ -263,12 +263,14 @@ mod tests {
                 n_eval: 15,
                 canary: 75.0,
                 n_canary: 12,
+                ..Scores::default()
             }),
             adapter_scores: Some(Scores {
                 eval: 40.0,
                 n_eval: 15,
                 canary: 75.0,
                 n_canary: 12,
+                ..Scores::default()
             }),
             margin: 5.0,
             gate: Some(Gate {
