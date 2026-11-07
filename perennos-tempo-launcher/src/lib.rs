@@ -58,6 +58,9 @@ usage: tempo-launch [command]
                     look at this computer and your goals, show which models fit, and with
                     --apply (and your yes) fetch what is missing and set up the agent
   setup --page      only write the plan to <home>\\setup.html (opened once at the first start)
+  setup --ollama [--yes]
+                    only fetch Tempo's own Ollama (checked against a pinned SHA-256) when this
+                    computer has none, and start it; no models are fetched
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1117,6 +1120,14 @@ fn ollama_setting_is_local() -> bool {
         .iter()
         .filter_map(|k| std::env::var(k).ok())
         .all(|u| ollama_url_is_local(&u))
+}
+
+/// What `start` says when there is no Ollama at all: none answers, none is installed, and Tempo
+/// has none of its own.
+pub const OLLAMA_MISSING: &str = "Ollama is not installed yet, so Tempo can't answer. Run: tempo-launch setup --apply (or install it from https://ollama.com/download).";
+
+fn ollama_missing_line(o: &setup::probe::Ollama, has_owned: bool) -> Option<&'static str> {
+    (!o.running && o.binary.is_none() && !has_owned).then_some(OLLAMA_MISSING)
 }
 
 /// Start Tempo's own Ollama when it is installed and none answers; a problem is a log line.
@@ -2295,6 +2306,13 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
     // Tempo's own Ollama, when it has one and none answers, before the agent: the agent's models
     // come from it. (Waits until it answers, up to its limit.)
     start_owned_ollama_at(ctx, ollama_port, true);
+    if let Some(line) = ollama_missing_line(
+        &setup::probe::probe_ollama(&setup::probe::RealHost, ollama_port),
+        owned_ollama_launch(ctx, ollama_port).is_some(),
+    ) {
+        println!("{line}");
+        ctx.note(line);
+    }
     let mut waiting = Vec::new();
     for app in APPS {
         if ctx.find(app.bin).is_none() {
@@ -4733,6 +4751,30 @@ mod tests {
         let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let busy = held.local_addr().unwrap().port();
         assert!(ensure_owned_ollama(&ctx, busy, false).is_err());
+    }
+
+    #[test]
+    fn start_says_one_clear_line_only_when_there_is_no_ollama_at_all() {
+        use setup::probe::Ollama;
+        let none = Ollama::default();
+        assert_eq!(ollama_missing_line(&none, false), Some(OLLAMA_MISSING));
+        assert_eq!(
+            OLLAMA_MISSING,
+            "Ollama is not installed yet, so Tempo can't answer. Run: tempo-launch setup --apply (or install it from https://ollama.com/download)."
+        );
+        assert!(!OLLAMA_MISSING.contains('\n'));
+        // Tempo's own copy, the system's program, or one that answers: nothing to say
+        assert_eq!(ollama_missing_line(&none, true), None);
+        let installed = Ollama {
+            binary: Some(PathBuf::from("/x/ollama")),
+            ..Ollama::default()
+        };
+        assert_eq!(ollama_missing_line(&installed, false), None);
+        let running = Ollama {
+            running: true,
+            ..Ollama::default()
+        };
+        assert_eq!(ollama_missing_line(&running, false), None);
     }
 
     #[cfg(unix)]

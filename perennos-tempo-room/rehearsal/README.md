@@ -23,7 +23,7 @@ python3 -I perennos-tempo-room/rehearsal/rehearse.py /tmp/rehearsal-bin /tmp/reh
   program's log into the run folder.
 - Use a new, empty run folder each time. Nothing outside it is written, and nothing is deleted.
 
-## What it checks (87 checks)
+## What it checks (124 checks)
 
 - **Signing in:**
   - the one-time owner link works once;

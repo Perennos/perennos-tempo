@@ -161,6 +161,10 @@ Name: "addtopath"; Description: "Add the tempo programs to PATH, for terminals";
 #if HaveVault
 Name: "learn"; Description: "Let Tempo learn from your vault every hour (on this computer, no window)"; GroupDescription: "Perennos Tempo:"; Components: vault
 #endif
+; Ollama is the engine Tempo runs models with. The box is ticked for the person when no Ollama is on
+; the computer (see CurPageChanged below) and left unticked when one is there. 1471164488 bytes is the
+; Windows x86_64 entry in perennos-tempo-launcher\catalog\runtime.json (about 1.4 GB).
+Name: "getollama"; Description: "Download Ollama, the engine Tempo runs models with (about 1.4 GB, checked against a pinned SHA-256)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
 Name: "setupmodels"; Description: "Download models that fit this computer now (several gigabytes, needs Ollama)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
 Name: "startup"; Description: "Start Perennos Tempo in the background when I sign in"; GroupDescription: "Perennos Tempo:"; Flags: unchecked
 
@@ -250,15 +254,19 @@ Filename: "{app}\bin\tempo-vault.exe"; Parameters: "init ""{code:VaultDir}"""; F
 Filename: "{#Launch}"; Parameters: "schedule"; Flags: runhidden waituntilterminated; Tasks: learn; StatusMsg: "Setting up hourly learning..."
 Filename: "{#Launch}"; Parameters: "schedule --remove"; Flags: runhidden waituntilterminated; Tasks: not learn
 #endif
+; Ollama, when its box is ticked (ticking it is the consent): fetch only Ollama, checked against the
+; pinned SHA-256 before it is unpacked, and start it once to see that it answers. `setup --ollama` never
+; looks up or pulls a model and never writes the agent's settings.
+Filename: "{#Launch}"; Parameters: "setup --ollama --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: getollama; StatusMsg: "Downloading Ollama (checked before it runs)..."
 ; Models for this computer. The box is unticked by default and says it downloads several gigabytes, so
-; nothing large is ever fetched unless the person ticked it. Exactly one of these three runs:
-; 1. box ticked and Ollama present: look at the computer and fetch what fits, hidden
-;    (`--yes` because ticking the box is the consent);
-; 2. box ticked, no Ollama (Tempo never installs it here): only write the plan to <home>\setup.html;
+; no model is ever fetched unless the person ticked it. Exactly one of these three runs:
+; 1. box ticked and an Ollama is there (installed, or just set up by the Ollama box): look at the
+;    computer and fetch what fits, hidden (`--yes` because ticking the box is the consent);
+; 2. box ticked, no Ollama anywhere: only write the plan to <home>\setup.html;
 ; 3. box not ticked: only write the plan too, so the page exists. In both 2 and 3 the launcher opens
-;    the plan at the first start; nothing is downloaded.
-Filename: "{#Launch}"; Parameters: "setup --apply --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: OllamaPresent; StatusMsg: "Downloading models for this computer. This can take a while..."
-Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: not OllamaPresent; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
+;    the plan at the first start; no model is downloaded.
+Filename: "{#Launch}"; Parameters: "setup --apply --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: OllamaAvailable; StatusMsg: "Downloading models for this computer. This can take a while..."
+Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: not OllamaAvailable; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
 Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: not setupmodels; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
 Filename: "{#Launch}"; Description: "Open Perennos Tempo"; Flags: postinstall nowait skipifsilent
 
@@ -274,17 +282,26 @@ const
 var
   VaultPage: TInputDirWizardPage;
   KeptVault: String;
+  OllamaTaskDecided: Boolean;
 
 function SetEnvironmentVariable(lpName: String; lpValue: String): BOOL;
   external 'SetEnvironmentVariableW@kernel32.dll stdcall';
 
 { Ollama is installed for this user (its own installer's folder), for all users (Program Files), or is
-  on PATH. Tempo never installs it. }
+  on PATH. (Tempo's own copy, fetched by the Ollama box, lives in the Tempo folder and is not counted
+  here.) }
 function OllamaPresent: Boolean;
 begin
   Result := FileExists(ExpandConstant('{localappdata}\Programs\Ollama\ollama.exe'))
     or FileExists(ExpandConstant('{commonpf}\Ollama\ollama.exe'))
     or (FileSearch('ollama.exe', GetEnv('PATH')) <> '');
+end;
+
+{ An Ollama is there for the models step: one that is installed, or Tempo's own, which the Ollama box
+  has just fetched (that step runs first). }
+function OllamaAvailable: Boolean;
+begin
+  Result := OllamaPresent or WizardIsTaskSelected('getollama');
 end;
 
 { Program Files for all users; for one user the per-user Programs folder, which is
@@ -572,15 +589,25 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   S: String;
 begin
+  { the Ollama box starts ticked only when no Ollama is on this computer; chosen once, so the
+    person's own change survives going back and forward }
+  if (CurPageID = wpSelectTasks) and not OllamaTaskDecided then
+  begin
+    OllamaTaskDecided := True;
+    if not OllamaPresent then
+      WizardSelectTasks('getollama');
+  end;
   if CurPageID = wpFinished then
   begin
     S := '';
     if (VaultPage <> nil) and WizardIsComponentSelected('vault') then
       S := 'Your vault is in ' + VaultDir('') + '.' + #13#10#13#10;
-    if OllamaPresent then
+    if WizardIsTaskSelected('getollama') and WizardIsComponentSelected('agent') then
+      S := S + 'Ollama is set up: Perennos Tempo downloaded its own copy, checked it against a pinned SHA-256 before running it, and uses it for models. If anything went wrong, run "tempo-launch setup --apply" later. The first time you open Perennos Tempo, it shows which models fit.' + #13#10#13#10
+    else if OllamaPresent then
       S := S + 'Ollama was found on this computer. The first time you open Perennos Tempo, it shows which models fit.' + #13#10#13#10
     else
-      S := S + 'Ollama was not found on this computer. Perennos Tempo uses it to run models. Get it from https://ollama.com/download. The first time you open Perennos Tempo, it shows which models fit this computer.' + #13#10#13#10;
+      S := S + 'Ollama was not found on this computer. Perennos Tempo uses it to run models. Run "tempo-launch setup --apply", or get it from https://ollama.com/download. The first time you open Perennos Tempo, it shows which models fit this computer.' + #13#10#13#10;
     S := S + 'Open Perennos Tempo any time from the Start menu. Everything stays on this computer.';
     WizardForm.FinishedLabel.Caption := S;
     WizardForm.FinishedLabel.AdjustHeight;

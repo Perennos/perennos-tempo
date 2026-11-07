@@ -23,6 +23,7 @@ tempo-launch setup --prefer quality         on a computer without a GPU, allow b
 tempo-launch setup --goal chat,code         add goals (chat, code, notes, music, rooms, private)
 tempo-launch setup --json                   the plan as JSON for other programs
 tempo-launch setup --page                   only write the plan page (<Tempo home>\setup.html)
+tempo-launch setup --ollama [--yes]         only fetch Tempo's own Ollama (checked against its pinned SHA-256), no models
 ```
 
 ## What it checks
@@ -158,7 +159,7 @@ After the downloads, setup writes the agent's settings file in `<agent data>` (`
 
 ## At install and at first start
 
-- **Windows installer:** a box, ticked by default: "Set up models for this computer (downloads what fits, shown before anything is fetched)". If Ollama is already there, it runs `tempo-launch setup --apply --yes` hidden after the install. If not, it only runs `tempo-launch setup --page`, which leaves the plan in `<Tempo home>\setup.html`.
+- **Windows installer:** an Ollama box ("Download Ollama, the engine Tempo runs models with"), ticked by default only when no Ollama is on the computer; ticking it is the consent, and it runs `tempo-launch setup --ollama --yes` hidden (fetches and checks only Ollama, never a model). A separate, unticked models box ("Download models that fit this computer now") runs `tempo-launch setup --apply --yes` hidden when an Ollama is there (installed, or just set up by the Ollama box). Otherwise Setup only runs `tempo-launch setup --page`, which leaves the plan in `<Tempo home>\setup.html`.
 - **Linux and Mac installer:** `install.sh --setup` runs `tempo-launch setup`, then asks y/N before `--apply`; `--yes` skips the question.
 - **First start:** when there are no agent settings yet, `tempo-launch` (or `tempo-launch start`) writes `<Tempo home>\setup.html` if it is not there yet, and opens it once. It shows the plan in plain words, the exact command to apply it and the d1 licence note. Nothing is fetched. A marker file `setup.page-opened` keeps it from opening again.
 
