@@ -46,8 +46,15 @@ pub fn rig(name: &str, key: [u8; 32]) -> Rig {
     let paths = paths(name);
     store::update(&paths, |f| f.me = name.into()).unwrap();
     let node = Node::open(&paths, key).unwrap();
-    let port = free_port();
-    let handle = serve::listen(&node, &[SocketAddr::from(([127, 0, 0, 1], port))]).unwrap();
+    // A free port can be taken by a parallel test between asking and binding, so try a few.
+    let (port, handle) = (0..20)
+        .find_map(|_| {
+            let port = free_port();
+            serve::listen(&node, &[SocketAddr::from(([127, 0, 0, 1], port))])
+                .ok()
+                .map(|h| (port, h))
+        })
+        .expect("no free port on 127.0.0.1 after 20 tries");
     Rig {
         paths,
         node,
