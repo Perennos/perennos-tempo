@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -251,18 +252,25 @@ struct Background {
     cmd: String,
     child: Child,
     out: Output,
+    /// Output pipes still open. A program the command started (`prog &`) may hold them after
+    /// the shell has ended; until they close the command counts as running, and its shell is not
+    /// waited for, so its process id (and group) cannot be reused and stopping it stays safe.
+    open: Arc<AtomicUsize>,
+    /// Windows: the job every process the command starts belongs to.
+    #[cfg(windows)]
+    job: Option<job::Job>,
     started: Instant,
-    /// How it ended: its exit code, or None while it runs.
+    /// How it ended: its exit code, how long it ran, whether it was stopped. None while it runs.
     ended: Option<(i32, Duration, bool)>,
 }
 
 impl Background {
-    /// Notice whether it has finished. When the shell is gone, whatever it left running in its
-    /// group ends too (on Unix): nothing Tempo started outlives the record of it.
+    /// Notice whether it has finished: its output closed and its shell ended. Whatever it left
+    /// running then ends too: nothing Tempo started outlives the record of it.
     fn refresh(&mut self) {
-        if self.ended.is_none() {
+        if self.ended.is_none() && self.open.load(Ordering::SeqCst) == 0 {
             if let Ok(Some(st)) = self.child.try_wait() {
-                end_group(&self.child);
+                self.end_rest();
                 self.ended = Some((st.code().unwrap_or(-1), self.started.elapsed(), false));
             }
         }
@@ -280,9 +288,9 @@ impl Background {
             return;
         }
         #[cfg(windows)]
-        {
+        if self.job.is_none() {
             use std::os::windows::process::CommandExt;
-            // the handle Tempo holds keeps the process id from being reused
+            // no job: end the tree the shell leads (the handle Tempo holds keeps its id its own)
             let _ = Command::new("taskkill")
                 .args(["/T", "/F", "/PID", &self.child.id().to_string()])
                 .creation_flags(0x0800_0000)
@@ -291,11 +299,29 @@ impl Background {
                 .stderr(Stdio::null())
                 .status();
         }
-        // still running (not yet waited for), so its process id is still its own
-        end_group(&self.child);
+        // not yet waited for, so its process id and group are still its own
+        self.end_rest();
         let _ = self.child.kill();
         let code = self.child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
         self.ended = Some((code, self.started.elapsed(), true));
+    }
+
+    /// End every process in its group (Unix: it was started as its own) or its job (Windows).
+    fn end_rest(&self) {
+        #[cfg(unix)]
+        {
+            // `--` first: procps reads a bare `-9 -<group>` as two signals and ends nothing
+            let _ = Command::new("kill")
+                .args(["-s", "KILL", "--", &format!("-{}", self.child.id())])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(windows)]
+        if let Some(j) = &self.job {
+            j.end();
+        }
     }
 
     fn status(&self) -> String {
@@ -307,25 +333,105 @@ impl Background {
     }
 }
 
-/// End the process group a background command leads (Unix; it was started as its own group).
-fn end_group(child: &Child) {
-    #[cfg(unix)]
-    {
-        // `--` first: procps reads a bare `-9 -<group>` as two signals and ends nothing
-        let _ = Command::new("kill")
-            .args(["-s", "KILL", "--", &format!("-{}", child.id())])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+/// A Windows job object: every process a background command starts joins it, so ending the job
+/// ends them all, even after the shell itself has gone; and when the agent ends, even by a
+/// crash, Windows closes the job and ends them too.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    type Handle = *mut core::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        limit_flags: u32,
+        min_working_set: usize,
+        max_working_set: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
     }
-    #[cfg(not(unix))]
-    let _ = child;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process_memory: usize,
+        peak_job_memory: usize,
+    }
+
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attributes: *mut core::ffi::c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            class: i32,
+            info: *mut core::ffi::c_void,
+            len: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn TerminateJobObject(job: Handle, code: u32) -> i32;
+        fn CloseHandle(h: Handle) -> i32;
+    }
+
+    pub struct Job(Handle);
+
+    impl Job {
+        /// A job holding `child` (None when Windows refuses one; `taskkill /T` is used then).
+        pub fn new(child: &std::process::Child) -> Option<Job> {
+            // SAFETY: plain Win32 calls on handles this function owns; `child` keeps its own
+            // process handle open for the duration of the call
+            unsafe {
+                let j = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if j.is_null() {
+                    return None;
+                }
+                let mut limits = ExtendedLimits::default();
+                limits.basic.limit_flags = KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    j,
+                    EXTENDED_LIMIT_INFORMATION,
+                    (&mut limits as *mut ExtendedLimits).cast(),
+                    std::mem::size_of::<ExtendedLimits>() as u32,
+                );
+                if AssignProcessToJobObject(j, child.as_raw_handle() as Handle) == 0 {
+                    CloseHandle(j);
+                    return None;
+                }
+                Some(Job(j))
+            }
+        }
+
+        pub fn end(&self) {
+            // SAFETY: the handle is open until drop
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the handle was opened by CreateJobObjectW and is closed once
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
 }
 
 /// Start a command that keeps running after the call returns; its output is collected (the latest
 /// `BG_KEEP` bytes) for `command_output`.
-fn spawn_background(cmd: &str, cwd: &Path) -> Result<(Child, Output), String> {
+fn spawn_background(conv: &str, cmd: &str, cwd: &Path) -> Result<Background, String> {
     let mut c = shell_command(cmd);
     #[cfg(unix)]
     {
@@ -339,8 +445,10 @@ fn spawn_background(cmd: &str, cwd: &Path) -> Result<(Child, Output), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = c.spawn().map_err(|e| format!("cannot start shell: {e}"))?;
+    #[cfg(windows)]
+    let job = job::Job::new(&child);
     let out = Arc::new(Mutex::new(Vec::new()));
-    for mut pipe in [
+    let pipes: Vec<Box<dyn Read + Send>> = [
         child
             .stdout
             .take()
@@ -352,8 +460,10 @@ fn spawn_background(cmd: &str, cwd: &Path) -> Result<(Child, Output), String> {
     ]
     .into_iter()
     .flatten()
-    {
-        let out = out.clone();
+    .collect();
+    let open = Arc::new(AtomicUsize::new(pipes.len()));
+    for mut pipe in pipes {
+        let (out, open) = (out.clone(), open.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while let Ok(n) = pipe.read(&mut buf) {
@@ -367,9 +477,20 @@ fn spawn_background(cmd: &str, cwd: &Path) -> Result<(Child, Output), String> {
                     o.drain(..cut);
                 }
             }
+            open.fetch_sub(1, Ordering::SeqCst);
         });
     }
-    Ok((child, out))
+    Ok(Background {
+        conv: conv.to_string(),
+        cmd: cmd.to_string(),
+        child,
+        out,
+        open,
+        #[cfg(windows)]
+        job,
+        started: Instant::now(),
+        ended: None,
+    })
 }
 
 /// The arguments and result a hook is told, cut so the whole event stays well inside what an
@@ -1490,23 +1611,13 @@ impl Env {
         if running >= BG_MAX {
             return format!("refused: {BG_MAX} background commands are already running; end one with command_stop first");
         }
-        let (child, out) = match spawn_background(cmd, cwd) {
-            Ok(x) => x,
+        let b = match spawn_background(&conv.id, cmd, cwd) {
+            Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
         let n = self.bg_seq.get() + 1;
         self.bg_seq.set(n);
-        bg.insert(
-            n,
-            Background {
-                conv: conv.id.clone(),
-                cmd: cmd.to_string(),
-                child,
-                out,
-                started: Instant::now(),
-                ended: None,
-            },
-        );
+        bg.insert(n, b);
         // forget the oldest finished ones past the limit (the running ones are at most BG_MAX)
         while bg.len() > BG_REMEMBER {
             let Some(old) = bg
@@ -1546,10 +1657,6 @@ impl Env {
         let until = Instant::now() + wait;
         while b.running() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(100));
-        }
-        if b.ended.is_some() {
-            // let the readers take what was still in the pipes
-            std::thread::sleep(Duration::from_millis(150));
         }
         let out = b.out.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let text = String::from_utf8_lossy(&out);
@@ -2561,34 +2668,39 @@ mod tests {
         assert!(e.bg.borrow().is_empty());
     }
 
-    /// Stopping a background command, or the agent ending, ends what the command started too.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn stopping_ends_what_a_background_command_started() {
-        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
-        let r = run(
-            &e,
-            &c,
-            "run_command",
-            json!({"command": "sleep 300 & echo pid=$!; wait", "background": true}),
-        );
-        assert!(r.contains("bg-1"), "{r}");
-        let mut pid = String::new();
+    /// The `pid=<n>` background command bg-1 printed (after the first line, which repeats it).
+    #[cfg(any(target_os = "linux", windows))]
+    fn printed_pid(e: &Env, c: &Conv) -> String {
         for _ in 0..100 {
-            let o = run(&e, &c, "command_output", json!({"id": "bg-1"}));
-            // after the first line, which repeats the command
+            let o = run(e, c, "command_output", json!({"id": "bg-1"}));
             let body = o.split_once('\n').map_or("", |x| x.1);
             if let Some(p) = body.split("pid=").nth(1) {
-                pid = p.chars().take_while(char::is_ascii_digit).collect();
-                break;
+                let p: String = p.chars().take_while(char::is_ascii_digit).collect();
+                if !p.is_empty() {
+                    return p;
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(
-            !pid.is_empty(),
-            "{}",
-            run(&e, &c, "command_output", json!({"id": "bg-1"}))
-        );
+        panic!("{}", run(e, c, "command_output", json!({"id": "bg-1"})));
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn gone_soon(pid: &str, alive: impl Fn(&str) -> bool) -> bool {
+        (0..50).any(|_| {
+            let gone = !alive(pid);
+            if !gone {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            gone
+        })
+    }
+
+    /// What a background command started ends with it: when it is stopped, when the agent ends,
+    /// and when its shell has ended (a program still holding its output keeps it running).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopping_ends_what_a_background_command_started() {
         // running: /proc has it and it is not a zombie waiting to be collected
         let alive = |p: &str| {
             std::fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|st| {
@@ -2597,17 +2709,66 @@ mod tests {
                     .is_some_and(|r| !r.trim_start().starts_with('Z'))
             })
         };
+        let start = |cmd: &str| {
+            let (e, c, d) = env_with(Box::new(Yes), |_| {});
+            let r = run(
+                &e,
+                &c,
+                "run_command",
+                json!({"command": cmd, "background": true}),
+            );
+            assert!(r.contains("bg-1"), "{r}");
+            (e, c, d)
+        };
+        // the shell waits for what it started; the agent ending ends both
+        let (e, c, _d) = start("sleep 300 & echo pid=$!; wait");
+        let pid = printed_pid(&e, &c);
         assert!(alive(&pid));
         drop(e);
-        let mut gone = false;
-        for _ in 0..50 {
-            if !alive(&pid) {
-                gone = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(gone, "{pid} outlived the agent");
+        assert!(gone_soon(&pid, alive), "{pid} outlived the agent");
+        // the shell ends at once, and `sleep` holds its output: still running, and stoppable
+        let (e, c, _d) = start("sleep 300 & echo pid=$!");
+        let pid = printed_pid(&e, &c);
+        std::thread::sleep(Duration::from_millis(300));
+        let o = run(&e, &c, "command_output", json!({"id": "bg-1"}));
+        assert!(o.starts_with("[bg-1: running for"), "{o}");
+        assert!(alive(&pid));
+        let r = run(&e, &c, "command_stop", json!({"id": "bg-1"}));
+        assert!(r.starts_with("[bg-1: stopped after"), "{r}");
+        assert!(gone_soon(&pid, alive), "{pid} outlived command_stop");
+        // a program that let go of the output ends when the shell's end is noticed
+        let (e, c, _d) = start("sleep 300 >/dev/null 2>&1 & echo pid=$!");
+        let pid = printed_pid(&e, &c);
+        let o = run(&e, &c, "command_output", json!({"id": "bg-1", "wait": 10}));
+        assert!(o.starts_with("[bg-1: exited 0"), "{o}");
+        assert!(gone_soon(&pid, alive), "{pid} outlived its shell");
+    }
+
+    /// Windows: what a background command started ends with it, even after its shell is gone.
+    #[cfg(windows)]
+    #[test]
+    fn stopping_ends_what_a_background_command_started() {
+        use std::os::windows::process::CommandExt;
+        let alive = |p: &str| {
+            Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {p}"), "/NH"])
+                .creation_flags(0x0800_0000)
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(p))
+        };
+        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
+        let cmd = "$p = Start-Process -FilePath ping -ArgumentList '-n','300','127.0.0.1' -NoNewWindow -PassThru; Write-Output \"pid=$($p.Id)\"";
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": cmd, "background": true}),
+        );
+        assert!(r.contains("bg-1"), "{r}");
+        let pid = printed_pid(&e, &c);
+        // ending it (or noticing that its shell ended) ends what it started
+        run(&e, &c, "command_stop", json!({"id": "bg-1"}));
+        assert!(gone_soon(&pid, alive), "{pid} outlived command_stop");
     }
 
     #[test]

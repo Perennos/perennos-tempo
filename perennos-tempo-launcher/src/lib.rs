@@ -3929,7 +3929,7 @@ mod tests {
         let b64 = "dGhpcy1pcy1hLXNlY3JldC10b2tlbi12YWx1ZS0xMjM0NTY3ODkw+/Qz==";
         let json_tok = "Zq8Xw3Lk9Pp2Vn7Bm4Tr6Yc1Hd5Gf0Js";
         let text = format!(
-            "{{\"token\":\"{json_tok}\",\"user\":\"alex\"}}\nsecret {b64} end\nX-Api-Key: short123\nCookie: session=Abc123def456\n\"password\": \"hunter2hunter2\"\nAuthorization: Basic dXNlcjpwYXNz\nclient_secret=abc123XYZ\nplain words stay\nlistening on 127.0.0.1:8765"
+            "{{\"token\":\"{json_tok}\",\"user\":\"riley\"}}\nsecret {b64} end\nX-Api-Key: short123\nCookie: session=Abc123def456\n\"password\": \"hunter2hunter2\"\nAuthorization: Basic dXNlcjpwYXNz\nclient_secret=abc123XYZ\nplain words stay\nlistening on 127.0.0.1:8765"
         );
         let r = redact(&text);
         for secret in [
@@ -3947,7 +3947,10 @@ mod tests {
             r.contains("plain words stay") && r.contains("listening on 127.0.0.1:8765"),
             "{r}"
         );
-        assert!(r.contains("\"user\":\"alex\""), "ordinary fields stay: {r}");
+        assert!(
+            r.contains("\"user\":\"riley\""),
+            "ordinary fields stay: {r}"
+        );
     }
 
     #[cfg(unix)]
@@ -4042,7 +4045,7 @@ mod tests {
     fn an_unreadable_crontab_is_never_overwritten() {
         // no crontab yet: fine, start an empty one
         assert_eq!(
-            crontab_lines(false, "", "no crontab for alex\n"),
+            crontab_lines(false, "", "no crontab for riley\n"),
             Ok(vec![])
         );
         assert_eq!(
