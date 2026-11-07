@@ -49,6 +49,8 @@ pub struct ServeOpts {
     pub key: Option<String>,
     /// Listening on an address other than loopback needs this (and the key still applies).
     pub allow_remote: bool,
+    /// Talk to Tempo: what is installed. None looks it up on every request (`voice.rs`).
+    pub voice: Option<crate::voice::Voice>,
 }
 
 impl Default for ServeOpts {
@@ -62,6 +64,7 @@ impl Default for ServeOpts {
             confirm_timeout: Duration::from_secs(900),
             key: None,
             allow_remote: false,
+            voice: None,
         }
     }
 }
@@ -488,7 +491,7 @@ fn pct_decode(s: &str) -> String {
 fn read_request(s: &TcpStream) -> Result<Req, (u16, &'static str)> {
     let bad = (400, "bad request");
     let clone = s.try_clone().map_err(|_| bad)?;
-    let mut rd = BufReader::new(clone.take((MAX_HEAD + MAX_BODY) as u64));
+    let mut rd = BufReader::new(clone.take((MAX_HEAD + crate::voice::MAX_AUDIO + 1) as u64));
     let mut line = String::new();
     rd.read_line(&mut line).map_err(|_| bad)?;
     let mut parts = line.split_whitespace();
@@ -535,7 +538,13 @@ fn read_request(s: &TcpStream) -> Result<Req, (u16, &'static str)> {
         Some(v) => v.parse().map_err(|_| bad)?,
         None => 0,
     };
-    if len > MAX_BODY {
+    // a recording may be bigger than a chat message
+    let cap = if req.path == "/agent/voice/transcribe" {
+        crate::voice::MAX_AUDIO
+    } else {
+        MAX_BODY
+    };
+    if len > cap {
         return Err((413, "body too large"));
     }
     req.body = vec![0; len];
@@ -616,6 +625,7 @@ fn check(sh: &Shared, req: &Req) -> Result<(), (u16, &'static str)> {
         return Err((405, "only GET and POST"));
     }
     if req.method == "POST"
+        && req.path != "/agent/voice/transcribe"
         && !req
             .header("content-type")
             .is_some_and(|c| c.to_ascii_lowercase().starts_with("application/json"))
@@ -652,6 +662,9 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
                 );
             }
         }
+        if api == "voice" || api.starts_with("voice/") {
+            return voice_api(sh, &req, api, s);
+        }
         let body: Value = if req.method == "POST" {
             match serde_json::from_slice(&req.body) {
                 Ok(v) => v,
@@ -677,6 +690,47 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
         ),
         Some(port) => pass_through(&req, s, port),
         None => refuse(&mut s, 404, "not found"),
+    }
+}
+
+/// Talk to Tempo (`voice.rs`): the audio is a raw body, not JSON, and it is only ever heard by
+/// this computer, so a connection from anywhere but loopback is refused even with the key.
+fn voice_api(sh: &Shared, req: &Req, api: &str, mut s: TcpStream) {
+    if !s.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
+        return refuse(&mut s, 403, "voice only answers on this computer");
+    }
+    let v = sh.opts.voice.clone().unwrap_or_else(|| {
+        crate::voice::Voice::discover(
+            &crate::products::tempo_home(&|k| std::env::var(k).ok()),
+            std::env::var_os("PATH"),
+            std::env::var_os("TEMPO_WHISPER_MODEL").map(PathBuf::from),
+            sh.cfg.data_dir.join("voice-tmp"),
+            sh.cfg.trash_dir.clone(),
+        )
+    });
+    let fail = |s: &mut TcpStream, (code, why): (u16, String)| refuse(s, code, &why);
+    match (req.method.as_str(), api) {
+        ("GET", "voice") => send_json(&mut s, 200, &v.status()),
+        ("POST", "voice/transcribe") => {
+            let ct = req.header("content-type").unwrap_or("");
+            match crate::voice::transcribe(&v, ct, &req.body, req.q("lang")) {
+                Ok(out) => send_json(&mut s, 200, &out),
+                Err(e) => fail(&mut s, e),
+            }
+        }
+        ("POST", "voice/speak") => {
+            let text = serde_json::from_slice::<Value>(&req.body)
+                .ok()
+                .and_then(|b| b.get("text").and_then(Value::as_str).map(str::to_string));
+            match text.map(|t| crate::voice::speak(&v, &t)) {
+                Some(Ok(wav)) => {
+                    let _ = respond(&mut s, 200, "audio/wav", &wav);
+                }
+                Some(Err(e)) => fail(&mut s, e),
+                None => refuse(&mut s, 400, "send {\"text\": \"...\"}"),
+            }
+        }
+        _ => refuse(&mut s, 404, "not found"),
     }
 }
 

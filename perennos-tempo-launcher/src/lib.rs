@@ -66,6 +66,10 @@ usage: tempo-launch [command]
   setup --ollama [--yes]
                     only fetch Tempo's own Ollama (checked against a pinned SHA-256) when this
                     computer has none, and start it; no models are fetched
+  setup --voice [--piper] [--multilingual] [--yes]
+                    fetch whisper.cpp and a speech model that fits this computer (and with --piper,
+                    Piper and a voice for spoken replies), each checked against a pinned SHA-256,
+                    after a y/N that shows the sizes. Speech stays on this computer.
   welcome           the first-run page: what the scan found, one computer or several, and how to
                     let your AI help (opened by itself the first time, then `tempo-launch welcome`)
   link URL          add another computer's Ollama (a tailnet or home-network address) to the
