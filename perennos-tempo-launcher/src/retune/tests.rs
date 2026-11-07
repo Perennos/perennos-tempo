@@ -1330,7 +1330,7 @@ fn the_gate_compares_against_the_baseline_built_the_same_way_not_your_quantised_
     let log = e.log.borrow().clone();
     let converts: Vec<String> = log
         .iter()
-        .map(|a| a.join(" "))
+        .map(|a| a.join(" ").replace('\\', "/"))
         .filter(|l| l.contains("convert_hf_to_gguf.py"))
         .collect();
     assert_eq!(converts.len(), 2, "{converts:?}");
