@@ -12,6 +12,8 @@ pub mod products;
 pub mod project;
 pub mod rag;
 pub mod server;
+pub mod soundcheck;
+pub mod soundcheck_mcp;
 pub mod tempo_home;
 pub mod tools;
 pub mod util;

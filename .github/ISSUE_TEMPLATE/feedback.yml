@@ -1,0 +1,42 @@
+name: How it felt
+description: Not a bug. What worked, what felt off, what you wish it did.
+title: "[feedback] "
+labels: [feedback, beta]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Honest is more useful than nice. Tell us what you'd tell a friend.
+  - type: textarea
+    id: tried
+    attributes:
+      label: What did you try?
+      placeholder: "Installed it on my laptop, asked the agent to tidy my downloads folder, set up a Room for my family..."
+    validations:
+      required: true
+  - type: textarea
+    id: good
+    attributes:
+      label: What worked well?
+  - type: textarea
+    id: off
+    attributes:
+      label: What felt slow, confusing or off?
+  - type: textarea
+    id: wish
+    attributes:
+      label: What do you wish it did?
+  - type: dropdown
+    id: again
+    attributes:
+      label: Would you keep using it?
+      options:
+        - Yes, every day
+        - Yes, for some things
+        - Maybe, once it's further along
+        - No
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup, roughly (optional)
+      placeholder: "Windows 11, 16 GB RAM, no graphics card"

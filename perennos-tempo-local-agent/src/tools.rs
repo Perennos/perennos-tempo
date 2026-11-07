@@ -255,16 +255,27 @@ static BG_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// outlives `main`), so every way out of the process calls this. Windows closes its job instead.
 pub fn end_all_background() {
     #[cfg(unix)]
-    {
-        let groups = std::mem::take(&mut *BG_GROUPS.lock().unwrap_or_else(|e| e.into_inner()));
-        for g in groups {
-            let _ = Command::new("kill")
-                .args(["-s", "KILL", "--", &format!("-{g}")])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+    end_background_groups(|_| true);
+}
+
+/// End the registered background groups `pick` chooses, and forget them. The process-wide list
+/// is shared by every `Env` in the process, so a test ends only its own group, never a group
+/// another test is still watching.
+#[cfg(unix)]
+fn end_background_groups(pick: impl Fn(u32) -> bool) {
+    let chosen: Vec<u32> = {
+        let mut groups = BG_GROUPS.lock().unwrap_or_else(|e| e.into_inner());
+        let (chosen, kept) = groups.iter().partition(|g| pick(**g));
+        *groups = kept;
+        chosen
+    };
+    for g in chosen {
+        let _ = Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{g}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -2803,8 +2814,12 @@ mod tests {
         assert!(r.contains("bg-1"), "{r}");
         let pid = printed_pid(&e, &c);
         assert!(alive(&pid));
+        // the shell is the group leader, and the sleep runs in its group: end only that group,
+        // the way end_all_background ends every group (other tests' groups stay untouched)
+        let shell = e.bg.borrow().values().next().map(|b| b.child.id()).unwrap();
         std::mem::forget(e);
-        end_all_background();
+        assert!(BG_GROUPS.lock().unwrap().contains(&shell));
+        end_background_groups(|g| g == shell);
         assert!(gone_soon(&pid, alive), "{pid} outlived end_all_background");
     }
 

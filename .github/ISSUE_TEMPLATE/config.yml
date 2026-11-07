@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: A security problem
+    url: https://github.com/Perennos/perennos-tempo/security/advisories/new
+    about: Please report it privately here, not in a public issue. See SECURITY.md.
+  - name: How to test Perennos Tempo
+    url: https://github.com/Perennos/perennos-tempo/blob/main/TESTING.md
+    about: What to try, what to look out for, and how to tell us.

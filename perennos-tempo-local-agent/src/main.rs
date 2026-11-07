@@ -12,11 +12,13 @@ const HELP: &str = "Perennos Tempo local agent: an offline agent loop over a loc
 USAGE:
     tempo-local-agent [OPTIONS] [PROMPT]
     tempo-local-agent serve [OPTIONS] [SERVE OPTIONS]
+    tempo-local-agent soundcheck [OPTIONS]     code and security review (see soundcheck --help)
+    tempo-local-agent soundcheck-mcp           the soundcheck as an MCP tool on stdio
 
 With a PROMPT it runs one turn and exits. With no PROMPT it starts a line REPL
 (an empty line or `exit` ends it). A new conversation works in the folder you start
 it in. In the chat, /help lists the commands (/cd, /mode, /plan, /undo, /diff,
-/compact, /init, /review, /think, /model, /usage, /status, your own commands);
+/compact, /init, /soundcheck, /think, /model, /usage, /status, your own commands);
 !cmd runs a command yourself and @file attaches a file.
 
 OPTIONS:
@@ -267,7 +269,86 @@ fn repl(agent: &mut Agent, conv: &mut Conv, sink: &mut StdSink) -> Result<(), St
     }
 }
 
+/// `soundcheck` and `soundcheck-mcp` (and their `review` aliases) run on their own, before the
+/// chat's setup: they need the config and Ollama, nothing else.
+fn soundcheck_entry() -> Option<ExitCode> {
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    let mcp = match argv.first().map(String::as_str) {
+        Some("soundcheck" | "review") => false,
+        Some("soundcheck-mcp" | "review-mcp") => true,
+        _ => return None,
+    };
+    argv.remove(0);
+    Some(match soundcheck_main(argv, mcp) {
+        Ok(code) => ExitCode::from(code),
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    })
+}
+
+fn soundcheck_main(mut argv: Vec<String>, mcp: bool) -> Result<u8, String> {
+    use tempo_local_agent::soundcheck as sc;
+    let mut config_path = None;
+    if let Some(i) = argv.iter().position(|a| a == "--config") {
+        argv.remove(i);
+        if i >= argv.len() {
+            return Err("--config needs a value".into());
+        }
+        config_path = Some(argv.remove(i));
+    }
+    let mut cli = if mcp {
+        None
+    } else {
+        Some(sc::parse_args(&argv)?)
+    };
+    if cli.as_ref().is_some_and(|c| c.help)
+        || (mcp && argv.iter().any(|a| a == "-h" || a == "--help"))
+    {
+        print!("{}", sc::HELP);
+        return Ok(0);
+    }
+    let getenv = |k: &str| std::env::var(k).ok();
+    let cfg = Config::load(
+        config_path.as_deref(),
+        getenv("TEMPO_AGENT_CONFIG"),
+        &getenv,
+    )?;
+    let mut models = cfg.models.clone();
+    if let Some(m) = cli.as_mut().and_then(|c| c.model.take()) {
+        models.retain(|x| *x != m);
+        models.insert(0, m);
+    }
+    let llm = sc::OllamaLlm::new(&cfg, models);
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let Some(mut cli) = cli else {
+        let server = tempo_local_agent::soundcheck_mcp::Server {
+            root: cwd,
+            llm: Some(&llm),
+            chunk_chars: sc::chunk_chars_for(&cfg),
+        };
+        server
+            .run(std::io::stdin().lock(), std::io::stdout())
+            .map_err(|e| e.to_string())?;
+        return Ok(0);
+    };
+    cli.opts.chunk_chars = sc::chunk_chars_for(&cfg);
+    cli.opts.memory = Some(sc::memory_path(&cfg));
+    let code = sc::run_cli(
+        &cli,
+        &cwd,
+        Some(&llm),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    );
+    Ok(code as u8)
+}
+
 fn main() -> ExitCode {
+    if let Some(code) = soundcheck_entry() {
+        return code;
+    }
     let result = real_main();
     // every way out of the process (one-shot, REPL, serve, errors) ends background commands
     tempo_local_agent::tools::end_all_background();
