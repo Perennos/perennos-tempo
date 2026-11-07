@@ -39,6 +39,8 @@ usage: tempo-launch [command]
   vault [FOLDER]    Tempo Vault on FOLDER (default: TEMPO_VAULT, else Documents\\Tempo Vault)
   room              Tempo Room, signed in as you
   agent             start the agent and open its chat page (with its key, from the agent's data folder)
+  studio            Tempo Studio (mixing and mastering) has no page of its own: starts the agent and
+                    opens its chat page; ask Tempo to analyse or master a file in your Music folder
   start             start the agent and every installed app without opening anything (sign-in); the very
                     first time it also writes and opens the setup page (the plan for this computer)
   stop              stop the apps tempo-launch started
@@ -55,7 +57,20 @@ usage: tempo-launch [command]
         [--prefer preferred|mainstream|quality] [--preferred-prefix P] [--json]
                     look at this computer and your goals, show which models fit, and with
                     --apply (and your yes) fetch what is missing and set up the agent
+  setup --apply-proposal
+                    show what the proposal your AI wrote (see mcp) would change in the agent's
+                    settings, and apply it only after your y/N
   setup --page      only write the plan to <home>\\setup.html (opened once at the first start)
+  setup --ollama [--yes]
+                    only fetch Tempo's own Ollama (checked against a pinned SHA-256) when this
+                    computer has none, and start it; no models are fetched
+  welcome           the first-run page: what the scan found, one computer or several, and how to
+                    let your AI help (opened by itself the first time, then `tempo-launch welcome`)
+  link URL          add another computer's Ollama (a tailnet or home-network address) to the
+                    agent's ollama_fallbacks; nothing is contacted
+  mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
+                    the plan and the status, and write a proposal you apply yourself;
+                    --scan prints the scan facts to paste into any AI
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -120,7 +135,13 @@ pub const FIELD: App = App {
     signs: &["\"read_only\":true"],
     wait: Duration::from_secs(30),
 };
+/// The apps that have a server and a port: what `start`, `stop` and `status` go through. Tempo
+/// Studio is not here: it has no window or server of its own (the agent uses it as a tool), so there
+/// is nothing to start, wait for or stop. `tempo-launch studio` opens the agent instead.
 pub const APPS: [App; 4] = [AGENT, VAULT, ROOM, FIELD];
+/// What `tempo-launch studio` says: how Tempo Studio is used, since it has nothing to open.
+pub const STUDIO_LINE: &str =
+    "Tempo Studio works through Tempo: ask Tempo to analyse or master a file in your Music folder.";
 /// Tempo's own copy of Ollama (`setup --apply` fetches it when a computer has none). It is not in
 /// `APPS`: its program lives in `<home>/runtime`, named by `<home>/runtime/ollama.json`, and it is
 /// started with `OLLAMA_HOST` instead of arguments. Whatever Ollama answers on the port is used
@@ -1111,6 +1132,14 @@ fn ollama_setting_is_local() -> bool {
         .all(|u| ollama_url_is_local(&u))
 }
 
+/// What `start` says when there is no Ollama at all: none answers, none is installed, and Tempo
+/// has none of its own.
+pub const OLLAMA_MISSING: &str = "Ollama is not installed yet, so Tempo can't answer. Run: tempo-launch setup --apply (or install it from https://ollama.com/download).";
+
+fn ollama_missing_line(o: &setup::probe::Ollama, has_owned: bool) -> Option<&'static str> {
+    (!o.running && o.binary.is_none() && !has_owned).then_some(OLLAMA_MISSING)
+}
+
 /// Start Tempo's own Ollama when it is installed and none answers; a problem is a log line.
 fn start_owned_ollama(ctx: &Ctx, wait: bool) {
     start_owned_ollama_at(ctx, setup::apply::ollama_port(), wait);
@@ -1820,6 +1849,8 @@ pub enum Cmd {
     Vault(Option<PathBuf>),
     Room,
     Agent,
+    /// Tempo Studio has no page of its own: the agent, then its page, and how to use Studio.
+    Studio,
     Start,
     Stop,
     Status {
@@ -1836,6 +1867,14 @@ pub enum Cmd {
     OpenRemote(String),
     /// `setup`: recommend models for this computer and your goals; `--apply` fetches them.
     Setup(setup::apply::Opts),
+    /// `welcome`: write and open the first-run page.
+    Welcome,
+    /// `link URL`: add another computer's Ollama to the agent's `ollama_fallbacks`.
+    Link(String),
+    /// `mcp`: the setup helper as an MCP server on stdio; `--scan` prints the scan facts.
+    Mcp {
+        scan: bool,
+    },
     Help,
     Version,
 }
@@ -1923,6 +1962,10 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             only(&[])?;
             Cmd::Agent
         }
+        "studio" => {
+            only(&[])?;
+            Cmd::Studio
+        }
         "start" => {
             only(&[])?;
             Cmd::Start
@@ -1954,6 +1997,20 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             Cmd::Logs
         }
         "setup" => Cmd::Setup(setup::apply::parse_args(&rest)?),
+        "welcome" => {
+            only(&[])?;
+            Cmd::Welcome
+        }
+        "link" => match rest.as_slice() {
+            [u] if !u.starts_with("--") => Cmd::Link(u.to_string()),
+            _ => return Err("link takes one address, like http://192.168.0.20:11434".into()),
+        },
+        "mcp" => {
+            only(&["--scan"])?;
+            Cmd::Mcp {
+                scan: rest.contains(&"--scan"),
+            }
+        }
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -1981,7 +2038,7 @@ pub fn run(args: &[String]) -> i32 {
 pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
     let clicked = matches!(
         cmd,
-        Cmd::Home | Cmd::Field | Cmd::Vault(_) | Cmd::Room | Cmd::Agent
+        Cmd::Home | Cmd::Field | Cmd::Vault(_) | Cmd::Room | Cmd::Agent | Cmd::Studio
     );
     // (OpenRemote is typed in a terminal, so a failure is printed, not shown as a page)
     let r = match cmd {
@@ -1992,6 +2049,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Vault(dir) => open_vault(ctx, dir.as_deref()),
         Cmd::Room => open_room(ctx),
         Cmd::Agent => agent(ctx),
+        Cmd::Studio => studio(ctx),
         Cmd::Start => Ok(start(ctx)),
         Cmd::Stop => Ok(stop(ctx)),
         Cmd::Status { json } => {
@@ -2001,6 +2059,23 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Learn => learn(ctx),
         Cmd::OpenRemote(id) => open_remote(ctx, &id),
         Cmd::Setup(o) => Ok(setup::run_setup(ctx, &o)),
+        Cmd::Welcome => {
+            setup::run_welcome(ctx, &setup::probe::RealHost, setup::apply::ollama_port())
+                .map(|_| 0)
+                .map_err(|e| Problem::other("The welcome page could not be opened", e))
+        }
+        Cmd::Link(url) => Ok(setup::propose::link(
+            ctx,
+            setup::propose::real_pinned(),
+            &url,
+            unix_now(),
+            &mut io::stdout(),
+        )),
+        Cmd::Mcp { scan } => Ok(if scan {
+            setup::mcp::print_scan(ctx)
+        } else {
+            setup::mcp::run_stdio(ctx)
+        }),
         Cmd::Schedule {
             remove,
             print,
@@ -2222,10 +2297,28 @@ fn hide_key(target: &str) -> String {
 }
 
 fn agent(ctx: &Ctx) -> Result<i32, Problem> {
+    let l = agent_up(ctx)?;
+    open_agent_page(ctx, &l.url(), agent_key(ctx).as_deref())
+}
+
+/// Start the agent if it is not running (Tempo's own Ollama first, when it has one) and say where it
+/// is. Nothing else is started.
+fn agent_up(ctx: &Ctx) -> Result<Launch, Problem> {
     start_owned_ollama(ctx, false);
     let l = launch_for(ctx, AGENT);
     ensure(ctx, &l, true)?;
     println!("{} is running on 127.0.0.1:{}", AGENT.title, l.port);
+    Ok(l)
+}
+
+/// `studio`: Tempo Studio is a command-line program and a tool the agent uses; it has no window or
+/// server to open. So this does what helps: the agent, its page, and one plain line on how to use
+/// Studio. The line is printed (in a terminal) and written to launch.log (from a shortcut nothing
+/// is shown, so that is where it can be read).
+fn studio(ctx: &Ctx) -> Result<i32, Problem> {
+    let l = agent_up(ctx)?;
+    println!("{STUDIO_LINE}");
+    ctx.note(&format!("studio: {STUDIO_LINE}"));
     open_agent_page(ctx, &l.url(), agent_key(ctx).as_deref())
 }
 
@@ -2262,6 +2355,13 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
     // Tempo's own Ollama, when it has one and none answers, before the agent: the agent's models
     // come from it. (Waits until it answers, up to its limit.)
     start_owned_ollama_at(ctx, ollama_port, true);
+    if let Some(line) = ollama_missing_line(
+        &setup::probe::probe_ollama(&setup::probe::RealHost, ollama_port),
+        owned_ollama_launch(ctx, ollama_port).is_some(),
+    ) {
+        println!("{line}");
+        ctx.note(line);
+    }
     let mut waiting = Vec::new();
     for app in APPS {
         if ctx.find(app.bin).is_none() {
@@ -3070,9 +3170,11 @@ mod tests {
             ("field", Cmd::Field),
             ("room", Cmd::Room),
             ("agent", Cmd::Agent),
+            ("studio", Cmd::Studio),
             ("start", Cmd::Start),
             ("stop", Cmd::Stop),
             ("learn", Cmd::Learn),
+            ("welcome", Cmd::Welcome),
             ("logs", Cmd::Logs),
             ("--help", Cmd::Help),
             ("--version", Cmd::Version),
@@ -3082,6 +3184,33 @@ mod tests {
         assert!(parse(&s(&["nope"])).is_err());
         assert!(parse(&s(&["room", "--wat"])).is_err());
         assert!(parse(&s(&["vault", "a", "b"])).is_err());
+    }
+
+    #[test]
+    fn studio_takes_no_arguments_and_is_not_an_app_with_a_server() {
+        assert_eq!(
+            parse(&s(&["studio", "--wat"])),
+            Err("studio: unknown argument --wat".to_string())
+        );
+        assert!(parse(&s(&["studio", "D:\\Music"])).is_err());
+        assert!(parse(&s(&["studio", "--json"])).is_err());
+        assert!(parse(&s(&["studio", "agent"])).is_err());
+        // a web page can fire the verbs of the link list and nothing else: studio is not one
+        assert!(parse(&s(&["perennos-tempo:studio"])).is_err());
+        // it is a command, not an entry of APPS: start, stop and status go through APPS and would
+        // look for a program, a port and a health answer that Studio does not have
+        assert!(APPS
+            .iter()
+            .all(|a| a.id != "studio" && a.bin != "tempo-studio"));
+        // the help text names it, with how to use it
+        assert!(
+            USAGE.lines().any(|l| l.trim_start().starts_with("studio ")),
+            "{USAGE}"
+        );
+        assert!(USAGE.contains("ask Tempo to analyse or master a file in your Music folder"));
+        // the line it says is plain: no key, no address, and the product's name in full
+        assert!(STUDIO_LINE.starts_with("Tempo Studio works through Tempo"));
+        assert!(!STUDIO_LINE.contains("127.0.0.1") && !STUDIO_LINE.contains("key"));
     }
 
     #[test]
@@ -4333,7 +4462,7 @@ mod tests {
     }
 
     #[test]
-    fn first_start_writes_the_plan_page_once_and_fetches_nothing() {
+    fn first_start_opens_the_welcome_page_once_and_fetches_nothing() {
         use setup::probe::tests::Fake;
         let root = tmp("firststart");
         let ctx = ctx_in(&root);
@@ -4346,17 +4475,38 @@ mod tests {
             ..Fake::default()
         };
         let page = setup::first_start(&ctx, &host, 1).unwrap();
-        assert_eq!(page, ctx.home.join("setup.html"));
+        assert_eq!(page, ctx.home.join("welcome.html"));
         let html = fs::read_to_string(&page).unwrap();
+        assert!(html.contains("Just this computer") && html.contains("Several computers"));
         assert!(html.contains("tempo-launch setup --apply"));
+        assert!(html.contains("tempo-launch link http://"));
         assert!(html.contains("8 GB RAM, no GPU: qwen3:4b (2.5 GB)"));
-        assert!(html.contains("USD 10 million") && html.contains("--with-d1"));
-        assert!(html.contains("never downloaded"));
+        assert!(html.contains("claude mcp add tempo-setup --"));
+        assert!(html.contains("claude_desktop_config.json") && html.contains("mcpServers"));
+        assert!(html.contains("only the scan facts") || html.contains("Only the scan facts"));
+        // offline and strict: no outside address, no script, no form, a locked-down policy
+        assert!(html.contains("default-src 'none'"));
+        for bad in [
+            "<script",
+            "<link",
+            "<form",
+            "<iframe",
+            "src=\"http",
+            "href=\"http",
+            "url(http",
+        ] {
+            assert!(!html.contains(bad), "{bad}");
+        }
+        // the plan page is there too, and the welcome page was the one opened
+        let plan_html = fs::read_to_string(ctx.home.join("setup.html")).unwrap();
+        assert!(plan_html.contains("USD 10 million") && plan_html.contains("--with-d1"));
+        assert!(plan_html.contains("never downloaded"));
         assert_eq!(ctx.opened.borrow().len(), 1);
+        assert!(ctx.opened.borrow()[0].ends_with("welcome.html"));
         // the second start: nothing more
         assert!(setup::first_start(&ctx, &host, 1).is_none());
         assert_eq!(ctx.opened.borrow().len(), 1);
-        // a page the installer wrote with `setup --page` is opened once too, and not rewritten
+        // a plan page the installer wrote with `setup --page` is kept as it is
         let root3 = tmp("firststart3");
         let ctx3 = ctx_in(&root3);
         let mut out = Vec::new();
@@ -4372,9 +4522,14 @@ mod tests {
             &mut |_| false,
         );
         assert_eq!(code, 0);
-        assert!(ctx3.home.join("setup.html").is_file() && ctx3.opened.borrow().is_empty());
+        let written = fs::read_to_string(ctx3.home.join("setup.html")).unwrap();
+        assert!(ctx3.opened.borrow().is_empty());
         assert!(setup::first_start(&ctx3, &host, 1).is_some());
         assert_eq!(ctx3.opened.borrow().len(), 1);
+        assert_eq!(
+            fs::read_to_string(ctx3.home.join("setup.html")).unwrap(),
+            written
+        );
         assert!(setup::first_start(&ctx3, &host, 1).is_none());
         let _ = fs::remove_dir_all(root3);
         // with settings already there it never runs at all
@@ -4383,9 +4538,86 @@ mod tests {
         fs::create_dir_all(&ctx2.agent_data).unwrap();
         fs::write(ctx2.agent_data.join("config.json"), "{}").unwrap();
         assert!(setup::first_start(&ctx2, &host, 1).is_none());
-        assert!(!ctx2.home.join("setup.html").exists());
+        assert!(!ctx2.home.join("welcome.html").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(root2);
+    }
+
+    #[test]
+    fn welcome_link_and_mcp_parse_and_the_link_is_checked() {
+        assert_eq!(parse(&s(&["welcome"])), Ok(Cmd::Welcome));
+        assert!(parse(&s(&["welcome", "x"])).is_err());
+        assert_eq!(
+            parse(&s(&["link", "http://192.168.0.20:11434"])),
+            Ok(Cmd::Link("http://192.168.0.20:11434".into()))
+        );
+        assert!(parse(&s(&["link"])).is_err() && parse(&s(&["link", "a", "b"])).is_err());
+        assert_eq!(parse(&s(&["mcp"])), Ok(Cmd::Mcp { scan: false }));
+        assert_eq!(parse(&s(&["mcp", "--scan"])), Ok(Cmd::Mcp { scan: true }));
+        assert!(parse(&s(&["mcp", "--write"])).is_err());
+        let Ok(Cmd::Setup(o)) = parse(&s(&["setup", "--apply-proposal"])) else {
+            panic!()
+        };
+        assert!(o.apply_proposal);
+        assert!(parse(&s(&["setup", "--apply-proposal", "--yes"])).is_err());
+        assert!(parse(&s(&["setup", "--apply-proposal", "--apply"])).is_err());
+
+        let root = tmp("link");
+        let ctx = ctx_in(&root);
+        let run = |url: &str, pinned: Option<PathBuf>| {
+            let mut out = Vec::new();
+            let code = setup::propose::link(&ctx, pinned, url, 1_793_000_000, &mut out);
+            (code, String::from_utf8(out).unwrap())
+        };
+        // a public address is refused, and nothing is written
+        for bad in [
+            "http://example.com:11434",
+            "https://8.8.8.8",
+            "http://user@10.0.0.2",
+            "10.0.0.2",
+            "http://10.0.0.2/x",
+        ] {
+            assert_eq!(run(bad, None).0, 2, "{bad}");
+        }
+        assert!(!ctx.agent_data.join("config.json").exists());
+        // a private one is added, with the default port, into a new file
+        let (code, said) = run("http://192.168.0.20", None);
+        assert_eq!(code, 0, "{said}");
+        let cfg = ctx.agent_data.join("config.json");
+        let j = setup::json::parse(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(j.strs("ollama_fallbacks"), ["http://192.168.0.20:11434"]);
+        // a second one is appended, other keys and the old file are kept, a repeat changes nothing
+        fs::write(
+            &cfg,
+            r#"{"models":["a:1b"],"ollama_fallbacks":["http://10.0.0.5:11434"]}"#,
+        )
+        .unwrap();
+        assert_eq!(run("http://tower.local:11434/", None).0, 0);
+        let j = setup::json::parse(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(j.strs("models"), ["a:1b"]);
+        assert_eq!(
+            j.strs("ollama_fallbacks"),
+            ["http://10.0.0.5:11434", "http://tower.local:11434"]
+        );
+        assert!(ctx.home.join("trash").is_dir());
+        let before = fs::read_to_string(&cfg).unwrap();
+        let (code, said) = run("http://tower.local:11434", None);
+        assert_eq!(code, 0);
+        assert!(said.contains("already"));
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), before);
+        // a tailnet address works; a file TEMPO_AGENT_CONFIG names is left alone
+        assert_eq!(run("http://10.20.30.40:11434", None).0, 0);
+        let pinned = root.join("pinned.json");
+        fs::write(&pinned, "{}").unwrap();
+        let (code, said) = run("http://10.1.1.1:11434", Some(pinned.clone()));
+        assert_eq!(code, 0);
+        assert!(said.contains("\"ollama_fallbacks\": [\"http://10.1.1.1:11434\"]"));
+        assert_eq!(fs::read_to_string(&pinned).unwrap(), "{}");
+        // a settings file that is not an object is never overwritten
+        fs::write(&cfg, "[1]").unwrap();
+        assert_eq!(run("http://10.1.1.1:11434", None).0, 1);
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), "[1]");
+        let _ = fs::remove_dir_all(root);
     }
 
     // ---- Tempo's own Ollama
@@ -4410,6 +4642,10 @@ mod tests {
             );
         }
     }
+
+    /// The fake agent (and the check that none is there) uses the agent's real port, so the tests
+    /// that do take turns.
+    static AGENT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Run by the fake `tempo-local-agent` script: answers the agent's health on its own port.
     #[test]
@@ -4670,10 +4906,35 @@ mod tests {
         assert!(ensure_owned_ollama(&ctx, busy, false).is_err());
     }
 
+    #[test]
+    fn start_says_one_clear_line_only_when_there_is_no_ollama_at_all() {
+        use setup::probe::Ollama;
+        let none = Ollama::default();
+        assert_eq!(ollama_missing_line(&none, false), Some(OLLAMA_MISSING));
+        assert_eq!(
+            OLLAMA_MISSING,
+            "Ollama is not installed yet, so Tempo can't answer. Run: tempo-launch setup --apply (or install it from https://ollama.com/download)."
+        );
+        assert!(!OLLAMA_MISSING.contains('\n'));
+        // Tempo's own copy, the system's program, or one that answers: nothing to say
+        assert_eq!(ollama_missing_line(&none, true), None);
+        let installed = Ollama {
+            binary: Some(PathBuf::from("/x/ollama")),
+            ..Ollama::default()
+        };
+        assert_eq!(ollama_missing_line(&installed, false), None);
+        let running = Ollama {
+            running: true,
+            ..Ollama::default()
+        };
+        assert_eq!(ollama_missing_line(&running, false), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn start_brings_up_tempos_own_ollama_before_the_agent() {
         use std::os::unix::fs::PermissionsExt;
+        let _turn = AGENT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         if !port_free(AGENT.port) {
             return; // something else is on the agent's port: this test cannot run here
         }
@@ -4714,6 +4975,122 @@ mod tests {
         // stop ends both, by their records
         assert_eq!(run_cmd(&ctx, Cmd::Stop), 0);
         assert!(answers(&OLLAMA, port).is_none() && answers(&AGENT, AGENT.port).is_none());
+    }
+
+    /// Ends what tempo-launch started when a test ends, even by a failed assertion, so a fake agent
+    /// never keeps the agent's port for the tests that follow.
+    #[cfg(unix)]
+    struct StopOnDrop<'a>(&'a Ctx);
+
+    #[cfg(unix)]
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            stop(self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn studio_opens_the_agent_page_and_starts_nothing_else() {
+        use std::os::unix::fs::PermissionsExt;
+        let _turn = AGENT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        if !port_free(AGENT.port) {
+            return; // something else is on the agent's port: this test cannot run here
+        }
+        let root = tmp("studio");
+        let ctx = ctx_in(&root);
+        let _stop = StopOnDrop(&ctx);
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let script = |name: &str, text: String| {
+            let p = bin.join(name);
+            fs::write(&p, text).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // the agent is the fake that answers its health; Tempo Studio and the other apps are
+        // installed too, and each leaves a mark if it is ever run
+        let me = std::env::current_exe().unwrap();
+        script(
+            AGENT.bin,
+            format!(
+                "#!/bin/sh\nTEMPO_FAKE_AGENT=1 exec \"{}\" tests::fake_agent --exact --nocapture --test-threads=1\n",
+                me.display()
+            ),
+        );
+        let others = [VAULT.bin, ROOM.bin, FIELD.bin, "tempo-studio"];
+        for name in others {
+            script(
+                name,
+                format!("#!/bin/sh\necho ran > \"{}/ran-{name}\"\n", root.display()),
+            );
+        }
+        fs::create_dir_all(&ctx.agent_data).unwrap();
+        fs::write(ctx.agent_data.join("control.key"), "studio-key_1\n").unwrap();
+        let page = agent_page_url(
+            &format!("http://127.0.0.1:{}/", AGENT.port),
+            agent_key(&ctx).as_deref(),
+        );
+
+        // the agent is not running: it is started, and its page (not another) is opened
+        assert_eq!(run_cmd(&ctx, Cmd::Studio), 0);
+        assert_eq!(ctx.opened.borrow().as_slice(), std::slice::from_ref(&page));
+        assert!(page.starts_with("http://127.0.0.1:8765/") && loopback_url(&page));
+        assert!(answers(&AGENT, AGENT.port).is_some());
+        // nothing else was started: one record, the agent's, and none of the other programs ran
+        let recs = ctx.records();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0].app, "agent");
+        assert!(is_ours(&recs[0]));
+        let pid = recs[0].pid;
+        for name in others {
+            assert!(!root.join(format!("ran-{name}")).exists(), "{name} ran");
+        }
+        // the plain line is recorded, and the agent's key is not
+        let launch_log = fs::read_to_string(ctx.log_path("launch")).unwrap();
+        assert!(
+            launch_log.contains(&format!("studio: {STUDIO_LINE}")),
+            "{launch_log}"
+        );
+        assert!(!launch_log.contains("studio-key_1"), "{launch_log}");
+
+        // again: the agent is found where it is, nothing is started, the page opens again
+        assert_eq!(run_cmd(&ctx, Cmd::Studio), 0);
+        assert_eq!(ctx.opened.borrow().as_slice(), [page.clone(), page]);
+        let recs = ctx.records();
+        assert_eq!((recs.len(), recs[0].pid), (1, pid));
+        for name in others {
+            assert!(!root.join(format!("ran-{name}")).exists(), "{name} ran");
+        }
+
+        // stop ends the agent, the only thing there is to end
+        assert_eq!(run_cmd(&ctx, Cmd::Stop), 0);
+        assert!(answers(&AGENT, AGENT.port).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn studio_without_the_agent_is_a_plain_problem_and_opens_no_agent_page() {
+        let _turn = AGENT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        if !port_free(AGENT.port) {
+            return; // something else is on the agent's port: this test cannot run here
+        }
+        let root = tmp("studio-missing");
+        let ctx = ctx_in(&root);
+        // as from a shortcut: a page says why (the only thing opened), and nothing is started
+        assert_eq!(run_cmd(&ctx, Cmd::Studio), 1);
+        let page = fs::read_to_string(ctx.home.join("problem.html")).unwrap();
+        assert!(page.contains("Tempo Agent is not installed"), "{page}");
+        let opened = ctx.opened.borrow().clone();
+        assert_eq!(opened, [ctx.home.join("problem.html").to_string_lossy()]);
+        assert!(ctx.records().is_empty());
+        // Studio is not described as ready when the agent that would use it is not there
+        let launch_log = fs::read_to_string(ctx.log_path("launch")).unwrap();
+        assert!(
+            launch_log.contains("problem: Tempo Agent is not installed")
+                && !launch_log.contains(STUDIO_LINE),
+            "{launch_log}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

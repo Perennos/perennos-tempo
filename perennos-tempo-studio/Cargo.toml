@@ -1,6 +1,6 @@
 [package]
 name = "perennos-tempo-studio"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 authors = ["Perennos"]
 description = "Perennos Tempo studio: open REAPER and mix and master songs, with a built-in loudness meter, mixdown and mastering fallback."

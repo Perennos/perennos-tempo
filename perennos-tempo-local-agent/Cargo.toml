@@ -1,6 +1,6 @@
 [package]
 name = "perennos-tempo-local-agent"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 authors = ["Perennos"]
 description = "Perennos Tempo local agent: offline agent loop over Ollama with MCP, RAG, guarded file tools and a persistent workflow file."

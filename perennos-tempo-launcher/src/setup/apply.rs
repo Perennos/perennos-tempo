@@ -29,6 +29,12 @@ pub struct Opts {
     pub prefer_set: bool,
     /// `--page`: write `<home>/setup.html` (the plan, for the first start to open); change nothing else.
     pub page: bool,
+    /// `--ollama`: fetch and check only Tempo's own Ollama (when this computer has none), and start
+    /// it once to see that it answers. No models are looked up or pulled, no settings are written.
+    pub ollama: bool,
+    /// `--apply-proposal`: show what the proposal an AI wrote (`tempo-launch mcp`) would change in
+    /// the agent's settings, ask y/N, and only then write it. Always asks; takes no `--yes`.
+    pub apply_proposal: bool,
     pub goals: Vec<String>,
     /// `--preferred-prefix P`: save P as this computer's preferred prefix in `<home>/setup.json` (an
     /// empty value clears it) and use it now.
@@ -45,6 +51,8 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
             "--json" => o.json = true,
             "--with-d1" => o.with_d1 = true,
             "--page" => o.page = true,
+            "--ollama" => o.ollama = true,
+            "--apply-proposal" => o.apply_proposal = true,
             "--goal" => {
                 i += 1;
                 o.goals.push(
@@ -83,8 +91,32 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
         }
         i += 1;
     }
-    if o.yes && !o.apply {
-        return Err("setup: --yes goes with --apply".into());
+    if o.apply_proposal
+        && (o.apply
+            || o.yes
+            || o.page
+            || o.json
+            || o.ollama
+            || o.with_d1
+            || !o.goals.is_empty()
+            || o.prefer_set
+            || o.preferred_prefix.is_some())
+    {
+        return Err("setup: --apply-proposal stands alone, and always asks".into());
+    }
+    if o.ollama
+        && (o.apply
+            || o.page
+            || o.json
+            || o.with_d1
+            || !o.goals.is_empty()
+            || o.prefer_set
+            || o.preferred_prefix.is_some())
+    {
+        return Err("setup: --ollama only fetches Ollama; use it alone, or with --yes".into());
+    }
+    if o.yes && !o.apply && !o.ollama {
+        return Err("setup: --yes goes with --apply or --ollama".into());
     }
     if o.page && (o.apply || o.json) {
         return Err("setup: --page cannot be combined with --apply or --json".into());
@@ -633,7 +665,8 @@ fn bring_up_ollama(
     ctx: &Ctx,
     host: &dyn Host,
     o: &Opts,
-    c: &Computed,
+    machine: &Machine,
+    runtime_plan: &Option<RuntimePlan>,
     port: u16,
     now: u64,
     say: &mut dyn FnMut(&str),
@@ -650,16 +683,16 @@ fn bring_up_ollama(
     let start_and_wait = |bin: &Path, start: &mut dyn FnMut(&Path) -> bool| {
         start(bin) && wait_for_ollama(host, port)
     };
-    let owned = match &c.plan.runtime {
+    let owned = match runtime_plan {
         None => {
             // the installed Ollama
-            if let Some(bin) = &c.machine.ollama.binary {
+            if let Some(bin) = &machine.ollama.binary {
                 say("Starting Ollama...");
                 if start_and_wait(bin, start_ollama) {
                     return (true, 0, J::Null);
                 }
             }
-            say(&format!("\n{}", ollama_help(&c.machine)));
+            say(&format!("\n{}", ollama_help(machine)));
             return (false, 1, J::Null);
         }
         Some(RuntimePlan::Unsupported(why)) => {
@@ -759,6 +792,18 @@ pub fn run(
     confirm: &mut dyn FnMut(&str) -> bool,
     start_ollama: &mut dyn FnMut(&Path) -> bool,
 ) -> i32 {
+    if o.apply_proposal {
+        return super::propose::apply_proposal(
+            ctx,
+            super::propose::real_pinned(),
+            now,
+            out,
+            confirm,
+        );
+    }
+    if o.ollama {
+        return run_ollama_only(ctx, host, o, port, now, out, confirm, start_ollama);
+    }
     let c = match compute(ctx, host, o, true, port, now) {
         Ok(c) => c,
         Err(e) => {
@@ -806,8 +851,18 @@ pub fn run(
         let mut fetched_ok: Vec<String> = Vec::new();
         let mut fetch_now = !c.plan.fetch.is_empty();
         if !c.machine.ollama.running && (fetch_now || c.plan.runtime.is_some()) {
-            let (up, failed, result) =
-                bring_up_ollama(ctx, host, o, &c, port, now, &mut say, confirm, start_ollama);
+            let (up, failed, result) = bring_up_ollama(
+                ctx,
+                host,
+                o,
+                &c.machine,
+                &c.plan.runtime,
+                port,
+                now,
+                &mut say,
+                confirm,
+                start_ollama,
+            );
             code = code.max(failed);
             runtime_result = result;
             fetch_now = fetch_now && up;
@@ -929,6 +984,47 @@ pub fn run(
         report.set("pulled", J::Arr(pulled));
         report.set("config", wrote);
         let _ = write!(out, "{}", report.pretty());
+    }
+    code
+}
+
+/// `setup --ollama`: only Ollama. Looks at the computer (no registry, no models), and when no
+/// Ollama answers, starts the installed one, or fetches (checked against the pinned SHA-256) and
+/// starts Tempo's own. Never pulls a model and never writes the agent's settings.
+#[allow(clippy::too_many_arguments)]
+fn run_ollama_only(
+    ctx: &Ctx,
+    host: &dyn Host,
+    o: &Opts,
+    port: u16,
+    now: u64,
+    out: &mut dyn Write,
+    confirm: &mut dyn FnMut(&str) -> bool,
+    start_ollama: &mut dyn FnMut(&Path) -> bool,
+) -> i32 {
+    let mut say = |s: &str| {
+        let _ = writeln!(out, "{s}");
+    };
+    let machine = probe::probe(host, &ctx.home, port);
+    if machine.ollama.running {
+        say("An Ollama already answers on this computer. Nothing was fetched.");
+        return 0;
+    }
+    let rt = runtime::plan_runtime(&machine, host, &ctx.home, &host.runtime_pins(), port);
+    let (up, code, _) = bring_up_ollama(
+        ctx,
+        host,
+        o,
+        &machine,
+        &rt,
+        port,
+        now,
+        &mut say,
+        confirm,
+        start_ollama,
+    );
+    if up {
+        say("Ollama is ready. No models were fetched.");
     }
     code
 }
@@ -1967,6 +2063,80 @@ mod tests {
         let res = j.get("ollama_runtime_result").unwrap();
         assert_eq!(res.str("result"), Some("started"));
         assert!(res.str("binary").unwrap().ends_with("ollama.exe"));
+    }
+
+    #[test]
+    fn ollama_only_fetches_and_starts_ollama_and_never_touches_models_or_settings() {
+        let root = tmp("own-only");
+        let (host, dl) = bare(50, FakeDl::new());
+        let port = free_port();
+        let started = Mutex::new(Vec::new());
+        let keep = Mutex::new(Vec::new());
+        let r = go_with(
+            &root,
+            &host,
+            &opts(&["--ollama", "--yes"]),
+            port,
+            false,
+            &mut starts_a_mock_on(port, &started, &keep),
+        );
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert!(r.question.is_empty(), "{}", r.question);
+        assert_eq!(dl.count(), 1);
+        assert!(root.join("home/runtime/ollama-0.40.6/ollama.exe").is_file());
+        assert!(r.out.contains("SHA-256 matches the pin."), "{}", r.out);
+        assert!(r.out.contains("No models were fetched."), "{}", r.out);
+        assert!(!r.out.contains("Fetching qwen"), "{}", r.out);
+        assert!(r.cfg.is_none(), "no settings written");
+        assert!(!root.join("home/setup/applied.json").exists());
+    }
+
+    #[test]
+    fn ollama_only_without_yes_asks_and_declining_fetches_nothing() {
+        let root = tmp("own-only-no");
+        let (host, dl) = bare(50, FakeDl::new());
+        let port = free_port();
+        let started = Mutex::new(Vec::new());
+        let keep = Mutex::new(Vec::new());
+        let r = go_with(
+            &root,
+            &host,
+            &opts(&["--ollama"]),
+            port,
+            false,
+            &mut starts_a_mock_on(port, &started, &keep),
+        );
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert!(r.question.contains("Fetch Tempo's own copy of Ollama"));
+        assert_eq!(dl.count(), 0);
+        assert!(!root.join("home/runtime").exists());
+    }
+
+    #[test]
+    fn ollama_only_leaves_an_ollama_that_answers_alone() {
+        let root = tmp("own-only-there");
+        let m = mock(&["qwen3:4b"], Mode::Ok);
+        let (host, dl) = bare(50, FakeDl::new());
+        let r = go(&root, &host, &opts(&["--ollama", "--yes"]), m.port, false);
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert!(r.out.contains("already answers"), "{}", r.out);
+        assert_eq!(dl.count(), 0);
+        assert!(!root.join("home/runtime").exists());
+    }
+
+    #[test]
+    fn ollama_flag_cannot_be_mixed_with_the_model_options() {
+        for bad in [
+            &["--ollama", "--apply"][..],
+            &["--ollama", "--page"],
+            &["--ollama", "--with-d1"],
+            &["--ollama", "--goal", "chat"],
+            &["--ollama", "--json"],
+        ] {
+            assert!(parse_args(bad).is_err(), "{bad:?}");
+        }
+        assert!(opts(&["--ollama", "--yes"]).ollama);
+        assert!(parse_args(&["--yes"]).is_err());
     }
 
     #[test]

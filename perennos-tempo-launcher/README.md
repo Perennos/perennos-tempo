@@ -11,6 +11,7 @@ tempo-launch vault [FOLDER]  Tempo Vault on FOLDER (default: TEMPO_VAULT, else D
 tempo-launch room            Tempo Room, signed in as the owner
 tempo-launch field           the Tempo Field
 tempo-launch agent           the agent, then its chat page (`#key=` from `<agent data>/control.key`, never in a query, log or error)
+tempo-launch studio          Tempo Studio (mixing and mastering): the agent, then its chat page, and a line on how to use Studio
 tempo-launch home [--json]   the Tempo folder in use, why, and other Tempo folders with files
 tempo-launch home --merge DIR  move DIR's files into the home; never overwrites or deletes
 tempo-launch start           everything installed, nothing opened (what sign-in runs)
@@ -20,6 +21,10 @@ tempo-launch open ID         opens an app on another machine listed in remote.js
 tempo-launch setup [--apply [--yes]] [--with-d1] [--goal chat,code,...] [--json | --page]
                              recommends models for this computer and your goals; with --apply and your yes it
                              fetches what is missing and writes the agent's settings (docs/TEMPO-SETUP.md)
+tempo-launch welcome         the first-run page: scan, one or several computers, how to let your AI help (opened once by itself)
+tempo-launch link URL        adds another computer's Ollama (private or tailnet address) to ollama_fallbacks
+tempo-launch mcp [--scan]    stdio MCP server for your AI (scan, plan, status, propose); --scan prints the scan facts
+tempo-launch setup --apply-proposal  shows what your AI's proposal would change; applies it only after y/N
 tempo-launch learn           one learning pass over the vault (what the hourly task runs)
 tempo-launch schedule [--daily | --remove | --print]
 tempo-launch logs            opens the logs folder
@@ -32,6 +37,13 @@ tempo-launch logs            opens the logs folder
 | Tempo Room | `tempo-room serve` | 8767 | `/room/health` |
 | Tempo Field | `tempo-dashboard` | 7878 | `/healthz` |
 
+- Tempo Studio is not in this table because it has no window, server or port of its own: it is a command-line
+  program and a tool the agent uses, connected automatically. `tempo-launch studio` therefore does what helps:
+  it starts the agent if it is not running (nothing else is started), opens the agent's page exactly as
+  `tempo-launch agent` does, and says plainly: "Tempo Studio works through Tempo: ask Tempo to analyse or master
+  a file in your Music folder." The line is printed when run in a terminal and also written to `launch.log`
+  (a shortcut shows no console). If the agent cannot start, the usual problem page says why, as for `agent`.
+  `start`, `stop` and `status` do not list Studio, as there is nothing of it to start, wait for or end.
 - An app counts as running only when its own health answer comes back (the vault's must name the folder
   asked for), so another program on the port is never taken for it.
 - The programs are looked for next to tempo-launch, then in the folders of `TEMPO_BIN`. `PATH` is never searched, and a relative folder is ignored, so nothing planted elsewhere (or in the current folder) can run as Tempo.
@@ -70,5 +82,5 @@ Optional file `remote.json` in the Tempo home. No file means no remote apps. A b
 - `open ID` opens the address with the system opener. The opener still refuses everything except this computer's own pages and files, and now exactly the address of an entry that passed these checks.
 
 std only; `build.rs` gives the Windows program its icon (`TEMPO_LAUNCH_ICON`) and version details when a
-resource compiler (`windres` or `rc.exe`) is there. `cargo test` runs 143 tests, among them a start, wait, open
+resource compiler (`windres` or `rc.exe`) is there. `cargo test` runs 203 tests, among them a start, wait, open
 and stop of a stand-in vault, and a crash shown with its last words.

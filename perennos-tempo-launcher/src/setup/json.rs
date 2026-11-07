@@ -264,6 +264,27 @@ impl J {
         J::Arr(v.iter().map(|s| J::Str(s.clone())).collect())
     }
 
+    /// One line, no spaces: for a message that ends at the newline (the MCP server's stdout).
+    pub fn compact(&self) -> String {
+        match self {
+            J::Null => "null".into(),
+            J::Bool(b) => b.to_string(),
+            J::Num(n) => n.clone(),
+            J::Str(s) => quote(s),
+            J::Arr(a) => format!(
+                "[{}]",
+                a.iter().map(J::compact).collect::<Vec<_>>().join(",")
+            ),
+            J::Obj(o) => format!(
+                "{{{}}}",
+                o.iter()
+                    .map(|(k, v)| format!("{}:{}", quote(k), v.compact()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+
     pub fn pretty(&self) -> String {
         let mut s = String::new();
         self.write(&mut s, 0);

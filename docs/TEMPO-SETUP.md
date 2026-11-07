@@ -13,6 +13,10 @@ Plain English. Perennos Tempo configures itself for each computer and each perso
 Run it as often as you like. A second run changes nothing that is already right.
 
 ```
+tempo-launch welcome                        write and open the first-run page (scan, one or several computers, AI helper)
+tempo-launch link URL                       add another computer's Ollama (private or tailnet address) to ollama_fallbacks
+tempo-launch mcp [--scan]                   the setup helper as a stdio MCP server for your AI; --scan prints the scan facts
+tempo-launch setup --apply-proposal         show what your AI's proposal would change, ask y/N, then write it
 tempo-launch setup                          show the plan, change nothing
 tempo-launch setup --apply                  show the plan, ask y/N, fetch what is missing, set up the agent
 tempo-launch setup --apply --yes            the same without the question
@@ -23,6 +27,7 @@ tempo-launch setup --prefer quality         on a computer without a GPU, allow b
 tempo-launch setup --goal chat,code         add goals (chat, code, notes, music, rooms, private)
 tempo-launch setup --json                   the plan as JSON for other programs
 tempo-launch setup --page                   only write the plan page (<Tempo home>\setup.html)
+tempo-launch setup --ollama [--yes]         only fetch Tempo's own Ollama (checked against its pinned SHA-256), no models
 ```
 
 ## What it checks
@@ -158,9 +163,32 @@ After the downloads, setup writes the agent's settings file in `<agent data>` (`
 
 ## At install and at first start
 
-- **Windows installer:** a box, ticked by default: "Set up models for this computer (downloads what fits, shown before anything is fetched)". If Ollama is already there, it runs `tempo-launch setup --apply --yes` hidden after the install. If not, it only runs `tempo-launch setup --page`, which leaves the plan in `<Tempo home>\setup.html`.
+- **Windows installer:** an Ollama box ("Download Ollama, the engine Tempo runs models with"), ticked by default only when no Ollama is on the computer; ticking it is the consent, and it runs `tempo-launch setup --ollama --yes` hidden (fetches and checks only Ollama, never a model). A separate, unticked models box ("Download models that fit this computer now") runs `tempo-launch setup --apply --yes` hidden when an Ollama is there (installed, or just set up by the Ollama box). Otherwise Setup only runs `tempo-launch setup --page`, which leaves the plan in `<Tempo home>\setup.html`.
 - **Linux and Mac installer:** `install.sh --setup` runs `tempo-launch setup`, then asks y/N before `--apply`; `--yes` skips the question.
-- **First start:** when there are no agent settings yet, `tempo-launch` (or `tempo-launch start`) writes `<Tempo home>\setup.html` if it is not there yet, and opens it once. It shows the plan in plain words, the exact command to apply it and the d1 licence note. Nothing is fetched. A marker file `setup.page-opened` keeps it from opening again.
+- **First start:** when there are no agent settings yet, `tempo-launch` (or `tempo-launch start`) writes `<Tempo home>\setup.html` if it is not there yet (the plan in plain words, the exact command to apply it and the d1 licence note) and opens the welcome page once (see First run). Nothing is fetched. A marker file `setup.page-opened` keeps it from opening again.
+
+## First run
+
+The first time Tempo starts (no agent settings yet), it scans this computer and opens `<Tempo home>/welcome.html` once. Open it again with `tempo-launch welcome`. The page is static, works offline, loads nothing and runs no script. It has three parts:
+
+1. **What this computer can run**, from the same scan and plan as `setup` (memory, graphics card, free disk, Ollama), in plain words, with the models that fit.
+2. **One computer or several?** The page cannot take a click, so each answer shows its exact command. *Just this computer*: `tempo-launch setup --apply`. *Several computers*: run that on each; on the engine (a home server or GPU box) use Ollama from ollama.com and let it listen on its tailnet or home-network address (`OLLAMA_HOST`); on the computer you sit at run `tempo-launch link http://<engine address>:11434`. `link` adds the address to `ollama_fallbacks` in the agent's settings after the same private-address check as `remote.json` (10/8, 172.16/12, 192.168/16, 100.64/10, loopback, `.ts.net`, `.local`, `.lan` and similar; never a public address), uses port 11434 when none is given, keeps the old file in `<Tempo home>/trash/<date>/` and contacts nothing. Tempo then uses its own Ollama first and moves to the next address when one cannot be reached. A file named by `TEMPO_AGENT_CONFIG` is left alone: the line to add is printed.
+3. **Let your AI help you set up.** Copy-paste entries for Claude Desktop (`claude_desktop_config.json`), Claude Code (`claude mcp add tempo-setup -- <path>/tempo-launch mcp`) and other clients that start a local program. ChatGPT cannot start a local program, so for it the page offers `tempo-launch mcp --scan`, whose output you paste yourself.
+
+### The setup helper: `tempo-launch mcp`
+
+A stdio MCP server (JSON-RPC 2.0, one message per line). Tools:
+
+| Tool | Does |
+| --- | --- |
+| `setup_scan` (read-only) | machine facts only: system, CPU and graphics card class, memory, free disk, whether Ollama is present |
+| `setup_plan` (read-only) | the recommended models and runtime, with size, licence and why; nothing is fetched |
+| `tempo_status` (read-only) | which Tempo apps are installed and running, whether settings exist, how many other computers are linked, whether a proposal is waiting |
+| `setup_propose` | writes a proposed settings change to `<Tempo home>/proposed-settings.json` and returns the command for you to run |
+
+**What is shared.** Only the scan facts and the plan. Never files, notes or chats, and no user name, folder, computer name or address (a test checks this). What the tools answer becomes part of your conversation with that AI, so it reaches that AI's provider. It is opt-in: nothing connects unless you add the entry to your AI, and Tempo never calls out to any AI. Remove the entry to stop.
+
+**The AI never applies anything.** `setup_propose` accepts only `models`, `fast_models`, `embed_model`, `ollama_url` and `ollama_fallbacks` (private, tailnet or local addresses only). You apply it with `tempo-launch setup --apply-proposal`: it shows each change as `-` and `+` lines, shows the AI's note labelled as the AI's, and asks y/N (there is no `--yes`). On yes it writes the settings (old file to the trash) and moves the proposal to `<Tempo home>/setup/`. The agent reads settings when it starts, so run `tempo-launch stop` and `tempo-launch start` afterwards.
 
 ## Re-run it
 

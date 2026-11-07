@@ -28,7 +28,7 @@ jobs:
         run: python -I -B acceptance/build_python_runtime.py
       - name: Build native unsigned setup
         run: C:/TempoCI/build-python/python.exe -I -B build_desktop_installer.py --package C:/TempoCI/payload --out C:/TempoCI/build --python-runtime C:/TempoCI/python-runtime.zip
-      - name: Verify and extract without claiming installation
+      - name: Verify and extract (this step does not install anything)
         run: C:/TempoCI/build-python/python.exe -I -B acceptance/windows_acceptance.py verify-build
       - name: Install through own native UI and exercise actual local runtime
         timeout-minutes: 36

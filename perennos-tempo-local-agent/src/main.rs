@@ -268,7 +268,10 @@ fn repl(agent: &mut Agent, conv: &mut Conv, sink: &mut StdSink) -> Result<(), St
 }
 
 fn main() -> ExitCode {
-    match real_main() {
+    let result = real_main();
+    // every way out of the process (one-shot, REPL, serve, errors) ends background commands
+    tempo_local_agent::tools::end_all_background();
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
