@@ -34,6 +34,11 @@ pub const APP_CSS: &str = include_str!("../assets/app.css");
 pub const MEMGRAPH_JS: &str = include_str!("../assets/memgraph.mjs");
 pub const CANVAS_JS: &str = include_str!("../assets/canvas.mjs");
 pub const THREE_JS: &str = include_str!("../assets/vendor/three.module.min.js");
+pub const THREE_POST_JS: &str = include_str!("../assets/vendor/three-post.js");
+// The second brain world: the same bytes as tempo-agent/gui-chat, so the chat surface and Vault draw one brain.
+pub const BRAIN_WORLD_JS: &str = include_str!("../assets/brain-world.mjs");
+pub const BRAIN_SIM_JS: &str = include_str!("../assets/brain-sim.mjs");
+pub const BRAIN_FEED_JS: &str = include_str!("../assets/brain-feed.mjs");
 pub const THREE_LICENSE: &str = include_str!("../assets/vendor/three.LICENSE");
 pub const ICON_SVG: &str = include_str!("../assets/icon.svg");
 pub const THEME_CSS: &str = include_str!("../assets/tempo-theme.css");
@@ -652,6 +657,34 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
             200,
             "text/javascript; charset=utf-8",
             THREE_JS.as_bytes(),
+            &[],
+        ),
+        "/vendor/three-post.js" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            THREE_POST_JS.as_bytes(),
+            &[],
+        ),
+        "/brain-world.mjs" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            BRAIN_WORLD_JS.as_bytes(),
+            &[],
+        ),
+        "/brain-sim.mjs" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            BRAIN_SIM_JS.as_bytes(),
+            &[],
+        ),
+        "/brain-feed.mjs" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            BRAIN_FEED_JS.as_bytes(),
             &[],
         ),
         "/vendor/three.LICENSE" => respond(
