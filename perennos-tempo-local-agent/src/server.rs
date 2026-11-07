@@ -400,6 +400,8 @@ pub fn start(
                 sh.conns.fetch_sub(1, Ordering::SeqCst);
             });
         }
+        // the worker thread is never joined, so its `Env` is not dropped: end its commands here
+        crate::tools::end_all_background();
     });
     Ok(Running { addr, accept })
 }
