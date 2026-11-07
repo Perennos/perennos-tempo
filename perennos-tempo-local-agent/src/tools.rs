@@ -246,6 +246,28 @@ const BG_WAIT_MAX: i64 = 60;
 /// What a background command printed (its latest `BG_KEEP` bytes), filled as it runs.
 type Output = Arc<Mutex<Vec<u8>>>;
 
+/// Process groups of the background commands still running (Unix: a command's pid is its group).
+#[cfg(unix)]
+static BG_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// End every background command still running, with everything it started. Dropping an `Env`
+/// does this too, but not on the exit paths that never drop it (the server's worker thread
+/// outlives `main`), so every way out of the process calls this. Windows closes its job instead.
+pub fn end_all_background() {
+    #[cfg(unix)]
+    {
+        let groups = std::mem::take(&mut *BG_GROUPS.lock().unwrap_or_else(|e| e.into_inner()));
+        for g in groups {
+            let _ = Command::new("kill")
+                .args(["-s", "KILL", "--", &format!("-{g}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
 /// A command started with `background: true`: running, or finished and not yet forgotten.
 struct Background {
     conv: String,
@@ -272,6 +294,7 @@ impl Background {
             if let Ok(Some(st)) = self.child.try_wait() {
                 self.end_rest();
                 self.ended = Some((st.code().unwrap_or(-1), self.started.elapsed(), false));
+                self.unregister();
             }
         }
     }
@@ -304,6 +327,16 @@ impl Background {
         let _ = self.child.kill();
         let code = self.child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
         self.ended = Some((code, self.started.elapsed(), true));
+        self.unregister();
+    }
+
+    /// It has ended: its group no longer needs ending when the agent does.
+    fn unregister(&self) {
+        #[cfg(unix)]
+        BG_GROUPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|p| *p != self.child.id());
     }
 
     /// End every process in its group (Unix: it was started as its own) or its job (Windows).
@@ -445,6 +478,11 @@ fn spawn_background(conv: &str, cmd: &str, cwd: &Path) -> Result<Background, Str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = c.spawn().map_err(|e| format!("cannot start shell: {e}"))?;
+    #[cfg(unix)]
+    BG_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(child.id());
     #[cfg(windows)]
     let job = job::Job::new(&child);
     let out = Arc::new(Mutex::new(Vec::new()));
@@ -2742,6 +2780,32 @@ mod tests {
         let o = run(&e, &c, "command_output", json!({"id": "bg-1", "wait": 10}));
         assert!(o.starts_with("[bg-1: exited 0"), "{o}");
         assert!(gone_soon(&pid, alive), "{pid} outlived its shell");
+    }
+
+    /// When the agent ends without dropping its `Env`, `end_all_background` still ends them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn end_all_background_ends_what_drop_never_reached() {
+        let alive = |p: &str| {
+            std::fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|st| {
+                st.rsplit(')')
+                    .next()
+                    .is_some_and(|r| !r.trim_start().starts_with('Z'))
+            })
+        };
+        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": "sleep 300 & echo pid=$!; wait", "background": true}),
+        );
+        assert!(r.contains("bg-1"), "{r}");
+        let pid = printed_pid(&e, &c);
+        assert!(alive(&pid));
+        std::mem::forget(e);
+        end_all_background();
+        assert!(gone_soon(&pid, alive), "{pid} outlived end_all_background");
     }
 
     /// Windows: what a background command started ends with it, even after its shell is gone.
