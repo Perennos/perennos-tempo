@@ -38,7 +38,8 @@ pub fn allowed(allow: &[String], tool: &str) -> bool {
     })
 }
 
-/// An entry the owner may write: `comfy_image`, `mcp:server/tool` or `mcp:server/*`.
+/// An entry the owner may write: `comfy_image`, `stage` (this computer's ComfyUI may play Stage's
+/// workflows for the fleet), `mcp:server/tool` or `mcp:server/*`.
 pub fn allow_entry_ok(e: &str) -> bool {
     let ok = |s: &str| {
         !s.is_empty()
@@ -47,6 +48,7 @@ pub fn allow_entry_ok(e: &str) -> bool {
                 .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
     };
     e == "comfy_image"
+        || e == "stage"
         || e.strip_prefix("mcp:")
             .and_then(|r| r.split_once('/'))
             .is_some_and(|(s, t)| ok(s) && (t == "*" || ok(t)))
@@ -340,8 +342,14 @@ pub fn advert(p: &Paths, all: bool) -> Option<J> {
     let fleet = store::load(p);
     let mut o: Vec<(String, J)> = vec![];
     let comfy = comfy_state(&comfy_base(p));
-    if comfy.bool("up") == Some(true) && (all || allowed(&fleet.allow, "comfy_image")) {
+    let stage_ok = allowed(&fleet.allow, "stage");
+    if comfy.bool("up") == Some(true) && (all || allowed(&fleet.allow, "comfy_image") || stage_ok) {
         o.push(("comfy".into(), comfy));
+    }
+    // the Stage workflows this computer has ready, so another computer's Stage can pick it
+    if stage_ok && !all {
+        let ready = crate::stage::ready_ids(&crate::Ctx::from_env());
+        o.push(("stage".into(), J::strings(&ready)));
     }
     let servers = mcp_servers(p);
     let mut mcp: Vec<(String, J)> = vec![];
@@ -832,7 +840,7 @@ mod tests {
             !allowed(&[], "comfy_image"),
             "nothing is offered until the owner says so"
         );
-        for good in ["comfy_image", "mcp:a/b", "mcp:a.b-c/*"] {
+        for good in ["comfy_image", "stage", "mcp:a/b", "mcp:a.b-c/*"] {
             assert!(allow_entry_ok(good), "{good}");
         }
         for bad in ["", "*", "mcp:a", "mcp:/x", "mcp:a/b c", "run_command"] {

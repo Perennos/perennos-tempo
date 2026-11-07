@@ -1,0 +1,2463 @@
+{
+ "version": 1,
+ "about": "Stage: video and image workflows for ComfyUI, each pinned to a commit and a SHA-256, with Pedals (modifiers) that map to widget values. Built from open projects, credited in docs/STAGE-SOURCES.md.",
+ "pedals": {
+  "camera": {
+   "kind": "choice",
+   "about": "How the camera moves.",
+   "choices": [
+    {
+     "id": "static",
+     "label": "Static"
+    },
+    {
+     "id": "push_in",
+     "label": "Push in"
+    },
+    {
+     "id": "pull_out",
+     "label": "Pull out"
+    },
+    {
+     "id": "pan_left",
+     "label": "Pan left"
+    },
+    {
+     "id": "pan_right",
+     "label": "Pan right"
+    },
+    {
+     "id": "pan_up",
+     "label": "Pan up"
+    },
+    {
+     "id": "pan_down",
+     "label": "Pan down"
+    },
+    {
+     "id": "orbit_left",
+     "label": "Orbit left"
+    },
+    {
+     "id": "orbit_right",
+     "label": "Orbit right"
+    },
+    {
+     "id": "truck",
+     "label": "Truck sideways"
+    },
+    {
+     "id": "crane_up",
+     "label": "Crane up"
+    },
+    {
+     "id": "crane_down",
+     "label": "Crane down"
+    },
+    {
+     "id": "low_angle",
+     "label": "Low angle"
+    },
+    {
+     "id": "high_angle",
+     "label": "High angle"
+    },
+    {
+     "id": "roll_cw",
+     "label": "Roll clockwise"
+    },
+    {
+     "id": "roll_ccw",
+     "label": "Roll counter-clockwise"
+    },
+    {
+     "id": "dolly_zoom",
+     "label": "Dolly zoom"
+    },
+    {
+     "id": "crash_zoom",
+     "label": "Crash zoom in"
+    }
+   ]
+  },
+  "lens": {
+   "kind": "choice",
+   "about": "The lens, in millimetres. Written into the prompt.",
+   "choices": [
+    {
+     "id": "24mm",
+     "label": "24 mm wide",
+     "prompt": "shot on a 24 mm wide-angle lens, deep focus, expansive perspective"
+    },
+    {
+     "id": "35mm",
+     "label": "35 mm",
+     "prompt": "shot on a 35 mm lens, natural perspective"
+    },
+    {
+     "id": "50mm",
+     "label": "50 mm",
+     "prompt": "shot on a 50 mm lens, natural field of view"
+    },
+    {
+     "id": "85mm",
+     "label": "85 mm portrait",
+     "prompt": "shot on an 85 mm portrait lens, shallow depth of field, soft compressed background"
+    }
+   ]
+  },
+  "light": {
+   "kind": "choice",
+   "about": "The light on the scene.",
+   "choices": [
+    {
+     "id": "golden_hour",
+     "label": "Golden hour",
+     "prompt": "golden hour sunlight, warm color temperature, long soft shadows"
+    },
+    {
+     "id": "blue_hour",
+     "label": "Blue hour",
+     "prompt": "twilight blue-hour light with warm practical lamps, soft light and blurred shadows"
+    },
+    {
+     "id": "rim",
+     "label": "Rim light",
+     "prompt": "a strong rim light from behind the subject, glowing edges, darker front"
+    },
+    {
+     "id": "noir",
+     "label": "Noir",
+     "prompt": "film noir lighting, a single hard key light from the side, deep black shadows"
+    },
+    {
+     "id": "neon",
+     "label": "Neon night",
+     "prompt": "neon night lighting, magenta and cyan rim light, dark moody background"
+    },
+    {
+     "id": "softbox",
+     "label": "Studio softbox",
+     "prompt": "soft studio light from a large softbox on the left, gentle fill, clean shadows"
+    },
+    {
+     "id": "overcast",
+     "label": "Overcast",
+     "prompt": "overcast daylight, soft and even, no hard shadows"
+    },
+    {
+     "id": "candlelight",
+     "label": "Candlelight",
+     "prompt": "warm candlelight, flickering amber glow, deep shadows"
+    }
+   ]
+  },
+  "strength": {
+   "kind": "number",
+   "about": "How hard the effect or edit is applied (1 is the author's setting)."
+  },
+  "angle": {
+   "kind": "number",
+   "unit": "degrees",
+   "about": "How far the camera travels around the subject."
+  },
+  "duration": {
+   "kind": "number",
+   "unit": "s",
+   "about": "How long the clip is."
+  },
+  "size": {
+   "kind": "number",
+   "unit": "px",
+   "about": "The shorter side of the picture, in pixels."
+  },
+  "speed": {
+   "kind": "number",
+   "about": "How fast the camera moves (1 is the author's setting)."
+  },
+  "seed": {
+   "kind": "integer",
+   "about": "The random seed. -1 picks a fresh one each run."
+  },
+  "effect": {
+   "kind": "choice",
+   "about": "Which effect to play (Stage workflows that have one)."
+  },
+  "mode": {
+   "kind": "choice",
+   "about": "Replace the person in the clip, or animate your character with the clip's motion.",
+   "choices": [
+    {
+     "id": "replace",
+     "label": "Replace"
+    },
+    {
+     "id": "animate",
+     "label": "Animate"
+    }
+   ]
+  }
+ },
+ "workflows": [
+  {
+   "id": "swap-character-video",
+   "title": "Character swap in video",
+   "feature": "character swap",
+   "what": "Puts your character in place of the person in a clip and keeps their motion, the camera and the rest of the shot.",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "recast"
+   },
+   "nodes": [],
+   "models": [
+    {
+     "name": "wan2.1_14B_SCAIL_2_int8_convrot.safetensors",
+     "dir": "diffusion_models",
+     "licence": "MIT",
+     "gb": 16.65,
+     "url": "https://huggingface.co/Comfy-Org/SCAIL-2/resolve/main/diffusion_models/wan2.1_14B_SCAIL_2_int8_convrot.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
+     "dir": "loras",
+     "licence": "MIT",
+     "gb": 1.23,
+     "url": "https://huggingface.co/Comfy-Org/SCAIL-2/resolve/main/loras/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.74,
+     "url": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "dir": "text_encoders",
+     "licence": "Apache-2.0",
+     "gb": 6.74,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "clip_vision_h.safetensors",
+     "dir": "clip_vision",
+     "licence": "Apache-2.0",
+     "gb": 1.26,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "Wan2_1_VAE_bf16.safetensors",
+     "dir": "vae",
+     "licence": "Apache-2.0",
+     "gb": 0.25,
+     "url": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1_VAE_bf16.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "sam3.1_multiplex_fp16.safetensors",
+     "dir": "checkpoints",
+     "licence": "SAM License",
+     "gb": 1.75,
+     "url": "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 24,
+   "ram_gb": 32,
+   "comfyui_min": "0.42",
+   "tested": "Not run on a 24 GB card upstream. Measured peak: 30.57 GB on L40S · 20261020-162214-l40s.",
+   "inputs": [
+    {
+     "name": "clip",
+     "kind": "video",
+     "required": true,
+     "binds": [
+      {
+       "node": "155",
+       "field": "file",
+       "class": "LoadVideo"
+      }
+     ]
+    },
+    {
+     "name": "character",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "30",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "prompt",
+     "kind": "text",
+     "required": true,
+     "default": "A person walks through a sunny park.",
+     "about": "Describe the shot with the new character in it.",
+     "binds": [
+      {
+       "node": "213:3",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "target",
+     "kind": "text",
+     "required": false,
+     "default": "person",
+     "about": "What to replace, in a word or two.",
+     "binds": [
+      {
+       "node": "213:191",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "202",
+     "kind": "video",
+     "class": "SaveVideo"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "lens",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "213:3",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "light",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "213:3",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "mode",
+     "via": "choices",
+     "default": "replace",
+     "choices": {
+      "replace": [
+       {
+        "node": "213:203",
+        "field": "value",
+        "value": true,
+        "class": "PrimitiveBoolean"
+       }
+      ],
+      "animate": [
+       {
+        "node": "213:203",
+        "field": "value",
+        "value": false,
+        "class": "PrimitiveBoolean"
+       }
+      ]
+     }
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "213:19",
+       "field": "noise_seed",
+       "class": "SamplerCustom"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 24,
+     "label": "24 GB and up",
+     "sets": [],
+     "tested": false
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/recast/workflow.api.json",
+    "sha256": "3212ba7f643b40ffc6b78fe6cbfabb0f04b4f511d5bad8961b7de76470302d39",
+    "bytes": 11603,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Swapped the character"
+  },
+  {
+   "id": "swap-character-photo",
+   "title": "Character swap in a photo",
+   "feature": "character swap",
+   "what": "Puts the person from a second photo into the first photo's scene.",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "character-swap"
+   },
+   "nodes": [],
+   "models": [
+    {
+     "name": "flux3-image-klein-int8-convrot.safetensors",
+     "dir": "diffusion_models",
+     "licence": "FLUX Kommunity License",
+     "gb": 5.83,
+     "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/diffusion_models/flux3-image-klein-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "qwen3vl_4b_int8_convrot.safetensors",
+     "dir": "text_encoders",
+     "licence": "FLUX Kommunity License",
+     "gb": 4.86,
+     "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "flux2-vae.safetensors",
+     "dir": "vae",
+     "licence": "FLUX Kommunity License",
+     "gb": 0.34,
+     "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/vae/flux2-vae.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 12,
+   "ram_gb": 16,
+   "comfyui_min": "0.42",
+   "tested": "Ran its example without an error on an RTX 3090 Ti (24 GB) on 2026-11-05 (upstream's own test, not ours).",
+   "inputs": [
+    {
+     "name": "scene",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "11",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "character",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "12",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "details",
+     "kind": "text",
+     "required": false,
+     "default": "",
+     "about": "Anything to keep or change.",
+     "binds": [
+      {
+       "node": "4",
+       "field": "text",
+       "template": "The scene from <ref_image_0> with its main person replaced by the person from <ref_image_1>: same pose, framing, lighting and clothing as the scene; the new person's face, hair and build. {value}",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "9",
+     "kind": "image",
+     "class": "SaveImage"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "strength",
+     "via": "number",
+     "min": 8,
+     "max": 32,
+     "default": 16,
+     "binds": [
+      {
+       "node": "7",
+       "field": "steps",
+       "round": true,
+       "class": "KSampler"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "7",
+       "field": "seed",
+       "class": "KSampler"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 12,
+     "label": "12 GB and up",
+     "sets": [],
+     "tested": true
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/character-swap/workflow.api.json",
+    "sha256": "353d36a1a539a7a93f7c1c56a33f60dbf8c60eb580d16c187084d90ab19ecc4b",
+    "bytes": 2772,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Swapped the character"
+  },
+  {
+   "id": "effect-clip",
+   "title": "Effect clips from a photo",
+   "feature": "effect pack",
+   "what": "Turns a photo into a 5 second effect clip: cakeify, hydraulic press, explode, inflate, squish, 360 degree orbit, crane up, crash zoom, dolly zoom.",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "effects"
+   },
+   "nodes": [],
+   "models": [
+    {
+     "name": "wan2.1_i2v_480p_14B_fp8_scaled.safetensors",
+     "dir": "diffusion_models",
+     "licence": "Apache-2.0",
+     "gb": 16.4,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_480p_14B_fp8_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "dir": "text_encoders",
+     "licence": "Apache-2.0",
+     "gb": 6.74,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "clip_vision_h.safetensors",
+     "dir": "clip_vision",
+     "licence": "Apache-2.0",
+     "gb": 1.26,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "wan_2.1_vae.safetensors",
+     "dir": "vae",
+     "licence": "Apache-2.0",
+     "gb": 0.25,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "cakeify_16_epochs.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Cakeify/resolve/main/cakeify_16_epochs.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "crush_20_epochs.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Crush/resolve/main/crush_20_epochs.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=crush"
+    },
+    {
+     "name": "explode_30_epochs.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Explode/resolve/main/explode_30_epochs.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=explode"
+    },
+    {
+     "name": "inflate_20_epochs.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Inflate/resolve/main/inflate_20_epochs.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=inflate"
+    },
+    {
+     "name": "squish_18.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Squish/resolve/main/squish_18.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=squish"
+    },
+    {
+     "name": "360_Orbit.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/360-Orbit/resolve/main/360_Orbit.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=orbit-360"
+    },
+    {
+     "name": "crane_up.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Crane_up/resolve/main/crane_up.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=crane-up"
+    },
+    {
+     "name": "crash_zoom_in.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Remade-AI/Crash-zoom-in/resolve/main/crash_zoom_in.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=crash-zoom-in"
+    },
+    {
+     "name": "wan_21_i2v_dolly_zoom.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.36,
+     "url": "https://huggingface.co/ostris/wan21_i2v_dolly_zoom_lora/resolve/main/wan_21_i2v_dolly_zoom.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false,
+     "for": "effect=dolly-zoom"
+    }
+   ],
+   "min_vram_gb": 20,
+   "ram_gb": 32,
+   "comfyui_min": "0.42",
+   "tested": "Not run on a 24 GB card upstream. Measured peak: 41.94 GB on H100 · 20261023-162024-h100.",
+   "inputs": [
+    {
+     "name": "image",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "52",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "subject",
+     "kind": "text",
+     "required": true,
+     "default": "a person",
+     "about": "A few words on who or what is in the photo.",
+     "placeholder": true,
+     "binds": []
+    },
+    {
+     "name": "details",
+     "kind": "text",
+     "required": false,
+     "default": "",
+     "about": "Anything extra for the prompt.",
+     "placeholder": true,
+     "binds": []
+    }
+   ],
+   "outputs": [
+    {
+     "node": "56",
+     "kind": "video",
+     "class": "SaveVideo"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "effect",
+     "via": "choices",
+     "default": "cakeify",
+     "choices": {
+      "cakeify": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "cakeify_16_epochs.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video opens on {subject}. A knife, held by a hand, is coming into frame and hovering over it. The knife then begins cutting into it to c4k3 cakeify it. As the knife slices it open, the inside is revealed to be cake with chocolate layers. The knife cuts through and the contents are revealed. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "crush": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "crush_20_epochs.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video begins with {subject}. A hydraulic press positioned above slowly descends towards it. Upon contact, the hydraulic press c5us4 crushes it, deforming and flattening it, causing it to collapse inward until it is no longer recognizable. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "explode": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "explode_30_epochs.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video opens with {subject}. Then it 3xp105ion huge explosion that engulfs the entire screen with a bright light. The light is so bright that it obscures everything around. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "inflate": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "inflate_20_epochs.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}, then infl4t3 inflates it, expanding into a giant, round, inflated figure. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "squish": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "squish_18.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "In the video, {subject} is presented, held in a person's hands. The person then presses on it, causing a sq41sh squish effect. The person keeps pressing down on it, further showing the sq41sh squish effect. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "orbit-360": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "360_Orbit.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The camera performs an 0rb4it 360 degree orbit, circling around and showing the surroundings, before returning to the front view. Throughout the 0rb4it 360 degree orbit, the main subject stays in place. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "crane-up": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "crane_up.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The cr4n3 crane up effect is applied, smoothly lifting the camera's viewpoint higher, revealing more of the surrounding landscape. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "crash-zoom-in": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "crash_zoom_in.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The camera performs a cr34sh crash zoom in effect, rapidly zooming closer to the face. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "dolly-zoom": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "wan_21_i2v_dolly_zoom.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "dolly zoom. The video shows {subject}. The camera moves toward them while zooming out: they stay the same size and the background behind them stretches away. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ]
+     }
+    },
+    {
+     "name": "camera",
+     "via": "choices",
+     "choices": {
+      "orbit_left": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "360_Orbit.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The camera performs an 0rb4it 360 degree orbit, circling around and showing the surroundings, before returning to the front view. Throughout the 0rb4it 360 degree orbit, the main subject stays in place. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "orbit_right": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "360_Orbit.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The camera performs an 0rb4it 360 degree orbit, circling around and showing the surroundings, before returning to the front view. Throughout the 0rb4it 360 degree orbit, the main subject stays in place. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "crane_up": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "crane_up.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The cr4n3 crane up effect is applied, smoothly lifting the camera's viewpoint higher, revealing more of the surrounding landscape. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "push_in": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "crash_zoom_in.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "The video shows {subject}. The camera performs a cr34sh crash zoom in effect, rapidly zooming closer to the face. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ],
+      "dolly_zoom": [
+       {
+        "node": "ff_effect",
+        "field": "lora_name",
+        "value": "wan_21_i2v_dolly_zoom.safetensors",
+        "class": "LoraLoaderModelOnly"
+       },
+       {
+        "node": "6",
+        "field": "text",
+        "value": "dolly zoom. The video shows {subject}. The camera moves toward them while zooming out: they stay the same size and the background behind them stretches away. {details}",
+        "class": "CLIPTextEncode"
+       }
+      ]
+     }
+    },
+    {
+     "name": "lens",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "6",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "light",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "6",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "strength",
+     "via": "number",
+     "min": 0.5,
+     "max": 1.4,
+     "default": 1.0,
+     "binds": [
+      {
+       "node": "ff_effect",
+       "field": "strength_model",
+       "class": "LoraLoaderModelOnly"
+      }
+     ]
+    },
+    {
+     "name": "duration",
+     "via": "number",
+     "min": 3,
+     "max": 5,
+     "default": 5,
+     "binds": [
+      {
+       "node": "50",
+       "field": "length",
+       "scale": 16,
+       "offset": 1,
+       "round": true,
+       "class": "WanImageToVideo"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "3",
+       "field": "seed",
+       "class": "KSampler"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 20,
+     "label": "20 GB and up (the model moves in pieces; 24 GB is what upstream measured against)",
+     "sets": [],
+     "tested": false
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/effects/workflow.api.json",
+    "sha256": "c12f1655e1ee2cd28a8c6cae746ea5bcbc6b41bf2798a1a714b7862c387116dc",
+    "bytes": 4568,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Made the effect clip"
+  },
+  {
+   "id": "camera-photo",
+   "title": "Camera moves on a photo",
+   "feature": "camera moves and cinematic looks",
+   "what": "Animates a photo with a camera move you pick: pan, zoom, roll, at the speed you set.",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "camera-moves"
+   },
+   "nodes": [],
+   "models": [
+    {
+     "name": "wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors",
+     "dir": "diffusion_models",
+     "licence": "Apache-2.0",
+     "gb": 15.3,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors",
+     "dir": "diffusion_models",
+     "licence": "Apache-2.0",
+     "gb": 15.3,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "dir": "text_encoders",
+     "licence": "Apache-2.0",
+     "gb": 6.74,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "wan_2.1_vae.safetensors",
+     "dir": "vae",
+     "licence": "Apache-2.0",
+     "gb": 0.25,
+     "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 20,
+   "ram_gb": 32,
+   "comfyui_min": "0.42",
+   "tested": "Not run on a 24 GB card upstream. Measured peak: 41.26 GB on L40S · 20261020-133620-l40s.",
+   "inputs": [
+    {
+     "name": "image",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "97",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "prompt",
+     "kind": "text",
+     "required": true,
+     "default": "A quiet scene, everything gently alive.",
+     "about": "What happens in the shot.",
+     "binds": [
+      {
+       "node": "107",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "106",
+     "kind": "video",
+     "class": "SaveVideo"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "camera",
+     "via": "choices",
+     "default": "push_in",
+     "choices": {
+      "static": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Static",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "pan_up": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Pan Up",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "pan_down": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Pan Down",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "pan_left": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Pan Left",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "pan_right": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Pan Right",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "push_in": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Zoom In",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "pull_out": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Zoom Out",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "roll_ccw": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "Anti Clockwise (ACW)",
+        "class": "WanCameraEmbedding"
+       }
+      ],
+      "roll_cw": [
+       {
+        "node": "108",
+        "field": "camera_pose",
+        "value": "ClockWise (CW)",
+        "class": "WanCameraEmbedding"
+       }
+      ]
+     }
+    },
+    {
+     "name": "lens",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "107",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "light",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "107",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "speed",
+     "via": "number",
+     "min": 0.2,
+     "max": 3.0,
+     "default": 1.0,
+     "binds": [
+      {
+       "node": "108",
+       "field": "speed",
+       "class": "WanCameraEmbedding"
+      }
+     ]
+    },
+    {
+     "name": "duration",
+     "via": "number",
+     "min": 2,
+     "max": 5,
+     "default": 5,
+     "binds": [
+      {
+       "node": "108",
+       "field": "length",
+       "scale": 16,
+       "offset": 1,
+       "round": true,
+       "class": "WanCameraEmbedding"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "102",
+       "field": "noise_seed",
+       "class": "KSamplerAdvanced"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 20,
+     "label": "20 GB and up",
+     "sets": [],
+     "tested": false
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/camera-moves/workflow.api.json",
+    "sha256": "06b1a892f4b17aaf2ed0615656a364edf77e3a577b35aa4c25ee5096d327adf7",
+    "bytes": 5870,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Moved the camera"
+  },
+  {
+   "id": "re-angle-video",
+   "title": "Re-angle a video",
+   "feature": "re-angle",
+   "what": "Re-shoots a clip from a new camera angle: it lifts the footage into depth, moves the camera, and lets LTX-2.5 paint what the move reveals. Small moves (10 to 20 degrees) work best.",
+   "source": {
+    "repo": "Tekholms-LW/ReAngle",
+    "commit": "d13a284274d13f8d915b147c41e9c07196da2bb5",
+    "licence": "Apache-2.0",
+    "url": "https://github.com/Tekholms-LW/ReAngle",
+    "credit": "Tekholms-LW/ReAngle (Apache-2.0)",
+    "app": null
+   },
+   "nodes": [
+    {
+     "name": "ComfyUI-LTXVideo",
+     "repo": "Lightricks/ComfyUI-LTXVideo",
+     "commit": "44c8a36b7c31ee00b4271daed11dc2a4aa481140",
+     "licence": "LTX-2 Community License"
+    },
+    {
+     "name": "ComfyUI-GGUF",
+     "repo": "city96/ComfyUI-GGUF",
+     "commit": "6ea2651e7df66d7585f6ffee804b20e92fb38b8a",
+     "licence": "Apache-2.0"
+    },
+    {
+     "name": "ComfyUI-VideoHelperSuite",
+     "repo": "Kosinkadink/ComfyUI-VideoHelperSuite",
+     "commit": "4d907bee61e92c2e65af3bd6383a4e4d356126d1",
+     "licence": "GPL-3.0"
+    },
+    {
+     "name": "ComfyUI-Video-Depth-Anything",
+     "repo": "yuvraj108c/ComfyUI-Video-Depth-Anything",
+     "commit": "a0db08e63d1ea571601c45cde4aaee0acdd0544d",
+     "licence": "Apache-2.0"
+    },
+    {
+     "name": "comfyui-reangle",
+     "repo": "Tekholms-LW/ReAngle",
+     "commit": "d13a284274d13f8d915b147c41e9c07196da2bb5",
+     "licence": "Apache-2.0",
+     "subdir": "comfyui-reshoot-nodes"
+    }
+   ],
+   "models": [
+    {
+     "name": "ltx-2.5-22b-distilled-Q4_K_M.gguf",
+     "dir": "unet",
+     "licence": "LTX-2.x Community License",
+     "gb": null,
+     "url": "https://huggingface.co/unsloth/LTX-2.5-GGUF/resolve/main/ltx-2.5-22b-distilled-Q4_K_M.gguf",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+     "dir": "text_encoders",
+     "licence": "LTX-2.x Community License",
+     "gb": 15.37,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-video-vae-bf16.safetensors",
+     "dir": "vae",
+     "licence": "LTX-2.x Community License",
+     "gb": 1.47,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-bf16.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-audio-vae-bf16.safetensors",
+     "dir": "vae",
+     "licence": "LTX-2.x Community License",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-audio-vae-bf16.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-22b-ic-lora-layout-to-render-1.0.safetensors",
+     "dir": "loras",
+     "licence": "LTX-2.x Community License",
+     "gb": null,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Layout-To-Render/resolve/main/ltx-2.5-22b-ic-lora-layout-to-render-1.0.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "video_depth_anything_vits.pth",
+     "dir": "videodepthanything",
+     "licence": "Apache-2.0",
+     "gb": null,
+     "url": "https://huggingface.co/depth-anything/Video-Depth-Anything-Small/resolve/main/video_depth_anything_vits.pth",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 12,
+   "ram_gb": 32,
+   "comfyui_min": "0.42",
+   "tested": "Upstream ran it on an RTX 5080 (16 GB), peak about 15.3 GB, about 55 s a chunk. Only the 16 GB tier is measured. Do not use the Base or Large depth models: they are non-commercial.",
+   "inputs": [
+    {
+     "name": "video",
+     "kind": "video",
+     "required": true,
+     "binds": [
+      {
+       "node": "1",
+       "field": "video",
+       "class": "VHS_LoadVideo"
+      }
+     ]
+    },
+    {
+     "name": "prompt",
+     "kind": "text",
+     "required": false,
+     "default": "The same scene filmed from a new camera angle, consistent lighting, detail and motion.",
+     "about": "What the scene is, so the filled-in parts match.",
+     "binds": [
+      {
+       "node": "40",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "90",
+     "kind": "video",
+     "class": "VHS_VideoCombine"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "camera",
+     "via": "choices",
+     "default": "orbit_left",
+     "choices": {
+      "orbit_left": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "orbit_left",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "orbit_right": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "orbit_right",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "low_angle": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "low",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "high_angle": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "high",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "push_in": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "push",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "pull_out": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "pull",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "truck": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "truck",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ],
+      "crane_up": [
+       {
+        "node": "20",
+        "field": "preset",
+        "value": "crane",
+        "class": "ReAngleCameraPathFromPreset"
+       }
+      ]
+     }
+    },
+    {
+     "name": "angle",
+     "via": "number",
+     "min": 5,
+     "max": 30,
+     "default": 12,
+     "binds": [
+      {
+       "node": "20",
+       "field": "angle_deg",
+       "class": "ReAngleCameraPathFromPreset"
+      }
+     ]
+    },
+    {
+     "name": "lens",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "40",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "light",
+     "via": "prompt",
+     "binds": [
+      {
+       "node": "40",
+       "field": "text",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    },
+    {
+     "name": "duration",
+     "via": "number",
+     "min": 1,
+     "max": 1.7,
+     "default": 1.7,
+     "binds": [
+      {
+       "node": "1",
+       "field": "frame_load_cap",
+       "scale": 24,
+       "quantize": [
+        8,
+        1
+       ],
+       "class": "VHS_LoadVideo"
+      },
+      {
+       "node": "20",
+       "field": "num_frames",
+       "scale": 24,
+       "quantize": [
+        8,
+        1
+       ],
+       "class": "ReAngleCameraPathFromPreset"
+      },
+      {
+       "node": "50",
+       "field": "length",
+       "scale": 24,
+       "quantize": [
+        8,
+        1
+       ],
+       "class": "EmptyLTXVLatentVideo"
+      },
+      {
+       "node": "53",
+       "field": "frames_number",
+       "scale": 24,
+       "quantize": [
+        8,
+        1
+       ],
+       "class": "LTXVEmptyLatentAudio"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "61",
+       "field": "noise_seed",
+       "class": "RandomNoise"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 12,
+     "label": "12 to 19 GB: 640 x 352, one chunk of 33 frames (upstream's tested 16 GB tier)",
+     "sets": [
+      {
+       "node": "1",
+       "field": "custom_width",
+       "value": 640,
+       "class": "VHS_LoadVideo"
+      },
+      {
+       "node": "1",
+       "field": "custom_height",
+       "value": 352,
+       "class": "VHS_LoadVideo"
+      },
+      {
+       "node": "50",
+       "field": "width",
+       "value": 640,
+       "class": "EmptyLTXVLatentVideo"
+      },
+      {
+       "node": "50",
+       "field": "height",
+       "value": 352,
+       "class": "EmptyLTXVLatentVideo"
+      }
+     ],
+     "tested": true
+    },
+    {
+     "min_vram_gb": 20,
+     "label": "20 GB and up: 768 x 448 (upstream's estimate, not measured)",
+     "sets": [
+      {
+       "node": "1",
+       "field": "custom_width",
+       "value": 768,
+       "class": "VHS_LoadVideo"
+      },
+      {
+       "node": "1",
+       "field": "custom_height",
+       "value": 448,
+       "class": "VHS_LoadVideo"
+      },
+      {
+       "node": "50",
+       "field": "width",
+       "value": 768,
+       "class": "EmptyLTXVLatentVideo"
+      },
+      {
+       "node": "50",
+       "field": "height",
+       "value": 448,
+       "class": "EmptyLTXVLatentVideo"
+      }
+     ],
+     "tested": false
+    }
+   ],
+   "workflow": {
+    "path": "workflows/ltx25_reshoot_api.json",
+    "sha256": "4a1cc132f2836c6f26930405e3085ab5c55c4fd117cc49eb0940c668b12a128a",
+    "bytes": 8591,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Re-angled"
+  },
+  {
+   "id": "paint-edit-photo",
+   "title": "Paint to edit a photo",
+   "feature": "paint-to-edit",
+   "what": "Paint over the part of a photo to change, say what it should become, and only that part is redrawn.",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "inpaint"
+   },
+   "nodes": [],
+   "models": [
+    {
+     "name": "flux3-image-klein-int8-convrot.safetensors",
+     "dir": "diffusion_models",
+     "licence": "FLUX Kommunity License",
+     "gb": 5.83,
+     "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/diffusion_models/flux3-image-klein-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "qwen3vl_4b_int8_convrot.safetensors",
+     "dir": "text_encoders",
+     "licence": "FLUX Kommunity License",
+     "gb": 4.86,
+     "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "flux2-vae.safetensors",
+     "dir": "vae",
+     "licence": "FLUX Kommunity License",
+     "gb": 0.34,
+     "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/vae/flux2-vae.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 12,
+   "ram_gb": 16,
+   "comfyui_min": "0.42",
+   "tested": "Ran its example without an error on an RTX 3090 Ti (24 GB) on 2026-11-05 (upstream's own test, not ours).",
+   "inputs": [
+    {
+     "name": "image",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "11",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "mask",
+     "kind": "image",
+     "required": true,
+     "about": "The same photo with the part to change painted over.",
+     "binds": [
+      {
+       "node": "12",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "instruction",
+     "kind": "text",
+     "required": true,
+     "default": "a red leather jacket",
+     "about": "What the painted part becomes.",
+     "binds": [
+      {
+       "node": "4",
+       "field": "text",
+       "template": "{value}. Keep the rest of the image exactly the same.",
+       "class": "CLIPTextEncode"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "9",
+     "kind": "image",
+     "class": "SaveImage"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "strength",
+     "via": "number",
+     "min": 8,
+     "max": 30,
+     "default": 16,
+     "binds": [
+      {
+       "node": "7",
+       "field": "steps",
+       "round": true,
+       "class": "KSampler"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "7",
+       "field": "seed",
+       "class": "KSampler"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 12,
+     "label": "12 GB and up",
+     "sets": [],
+     "tested": true
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/inpaint/workflow.api.json",
+    "sha256": "639c36780db3d1ad8af2fe68ad416ce4192dc0b114307a80567a09e155fe0aad",
+    "bytes": 4726,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Edited"
+  },
+  {
+   "id": "clean-plate-video",
+   "title": "Remove people from a clip",
+   "feature": "paint-to-edit",
+   "what": "Removes people and moving subjects from a shot and rebuilds the background behind them (an LTX-2.5 clean plate LoRA).",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "vfx-clean-plate"
+   },
+   "nodes": [
+    {
+     "name": "ComfyUI-LTXVideo",
+     "repo": "Lightricks/ComfyUI-LTXVideo",
+     "commit": "44c8a36b7c31ee00b4271daed11dc2a4aa481140",
+     "licence": "LTX-2 Community License"
+    }
+   ],
+   "models": [
+    {
+     "name": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+     "dir": "diffusion_models",
+     "licence": "LTX-2.x Community License",
+     "gb": 21.5,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+     "dir": "text_encoders",
+     "licence": "LTX-2.x Community License",
+     "gb": 15.37,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-video-vae-bf16.safetensors",
+     "dir": "vae",
+     "licence": "LTX-2.x Community License",
+     "gb": 1.47,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-bf16.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-audio-vae-bf16.safetensors",
+     "dir": "vae",
+     "licence": "LTX-2.x Community License",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-audio-vae-bf16.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-22b-ic-lora-clean-plate-1.0.safetensors",
+     "dir": "loras",
+     "licence": "LTX-2.x Community License",
+     "gb": 0.33,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate/resolve/main/ltx-2.5-22b-ic-lora-clean-plate-1.0.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 24,
+   "ram_gb": 64,
+   "comfyui_min": "0.42",
+   "tested": "Ran its example without an error on an RTX 3090 Ti (24 GB) on 2026-11-05, about 242 s (upstream's own test, not ours).",
+   "inputs": [
+    {
+     "name": "clip",
+     "kind": "video",
+     "required": true,
+     "binds": [
+      {
+       "node": "5001",
+       "field": "file",
+       "class": "LoadVideo"
+      }
+     ]
+    },
+    {
+     "name": "prompt",
+     "kind": "text",
+     "required": true,
+     "default": "An empty street with parked cars and shop fronts.",
+     "about": "What the empty place looks like.",
+     "binds": [
+      {
+       "node": "5508",
+       "field": "value",
+       "class": "PrimitiveStringMultiline"
+      }
+     ]
+    },
+    {
+     "name": "avoid",
+     "kind": "text",
+     "required": false,
+     "default": "people, pedestrians, person, crowd",
+     "about": "What must not appear.",
+     "binds": [
+      {
+       "node": "5509",
+       "field": "value",
+       "class": "PrimitiveStringMultiline"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "4852",
+     "kind": "video",
+     "class": "SaveVideo"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "strength",
+     "via": "number",
+     "min": 0.5,
+     "max": 1.3,
+     "default": 1.0,
+     "binds": [
+      {
+       "node": "5004:5606",
+       "field": "strength_model",
+       "class": "LTXICLoRALoaderModelOnly"
+      }
+     ]
+    },
+    {
+     "name": "size",
+     "via": "number",
+     "min": 448,
+     "max": 720,
+     "default": 544,
+     "binds": [
+      {
+       "node": "5548:5026",
+       "field": "resize_type.shorter_size",
+       "round": true,
+       "class": "ResizeImageMaskNode"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "5516:4832",
+       "field": "noise_seed",
+       "class": "RandomNoise"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 24,
+     "label": "24 GB and up",
+     "sets": [],
+     "tested": true
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/vfx-clean-plate/workflow.api.json",
+    "sha256": "1cf6fa95ed19f312933686b795ad97339cb7ecb946d857060a3211521d68936d",
+    "bytes": 12999,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Cleaned the plate"
+  },
+  {
+   "id": "relight-photo",
+   "title": "Relight a photo",
+   "feature": "relight",
+   "what": "Relights a photo with a light you pick, and keeps the scene as it is.",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "relight"
+   },
+   "nodes": [],
+   "models": [
+    {
+     "name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+     "dir": "diffusion_models",
+     "licence": "Apache-2.0",
+     "gb": 20.43,
+     "url": "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+     "dir": "text_encoders",
+     "licence": "Apache-2.0",
+     "gb": 9.38,
+     "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "qwen_image_vae.safetensors",
+     "dir": "vae",
+     "licence": "Apache-2.0",
+     "gb": 0.25,
+     "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.85,
+     "url": "https://huggingface.co/lightx2v/Qwen-Image-Lightning/resolve/main/Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "Qwen-Image-Edit-2509-Relight.safetensors",
+     "dir": "loras",
+     "licence": "Apache-2.0",
+     "gb": 0.24,
+     "url": "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/loras/Qwen-Image-Edit-2509-Relight.safetensors",
+     "gated": false,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 24,
+   "ram_gb": 32,
+   "comfyui_min": "0.42",
+   "tested": "Not run on a 24 GB card upstream. Measured peak: 32.99 GB on H100 · 20261024-164909-h100. The rim light phrase is Tempo's own; the others are the author's.",
+   "inputs": [
+    {
+     "name": "image",
+     "kind": "image",
+     "required": true,
+     "binds": [
+      {
+       "node": "11",
+       "field": "image",
+       "class": "LoadImage"
+      }
+     ]
+    },
+    {
+     "name": "details",
+     "kind": "text",
+     "required": false,
+     "default": "",
+     "about": "Anything extra about the light.",
+     "placeholder": true,
+     "binds": []
+    }
+   ],
+   "outputs": [
+    {
+     "node": "12",
+     "kind": "image",
+     "class": "SaveImage"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "light",
+     "via": "choices",
+     "default": "golden_hour",
+     "choices": {
+      "golden_hour": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using golden hour sunlight through a low window, warm color temperature, long soft shadows. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "blue_hour": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using twilight blue-hour light with warm practical lamps, soft light and blurred shadows. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "rim": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using a strong rim light from behind the subject, glowing edges, darker front. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "noir": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using dramatic chiaroscuro, a single hard key light from the side, deep shadows. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "neon": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using neon night lighting, magenta and cyan rim light, dark moody background. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "softbox": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using soft studio light from a large softbox on the left, gentle fill, clean shadows. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "overcast": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using overcast daylight, soft and even, no hard shadows. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ],
+      "candlelight": [
+       {
+        "node": "15",
+        "field": "value",
+        "value": " relight the image using warm candlelight, flickering amber glow, deep shadows. {details}",
+        "class": "PrimitiveStringMultiline"
+       }
+      ]
+     }
+    },
+    {
+     "name": "strength",
+     "via": "number",
+     "min": 0.0,
+     "max": 1.5,
+     "default": 1.0,
+     "binds": [
+      {
+       "node": "10:118",
+       "field": "strength_model",
+       "class": "LoraLoaderModelOnly"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "10:3",
+       "field": "seed",
+       "class": "KSampler"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 24,
+     "label": "24 GB and up",
+     "sets": [],
+     "tested": false
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/relight/workflow.api.json",
+    "sha256": "3a0801fca3ebb388965a62befc2ff6cae754a706f5a6609b9e16ad6ddda7b4fe",
+    "bytes": 4334,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Relit"
+  },
+  {
+   "id": "lip-sync-video",
+   "title": "Lip sync: say new words in a clip",
+   "feature": "lip sync",
+   "what": "Makes the person in a clip say new words, in any language: a new voice track and new lip movement from your text (an LTX-2.5 DubIt LoRA).",
+   "source": {
+    "repo": "neuregex/ComfyUI-freefield",
+    "commit": "aea0739999a869282314868ec3dc13d71da46567",
+    "licence": "MIT",
+    "url": "https://github.com/neuregex/ComfyUI-freefield",
+    "credit": "neuregex/ComfyUI-freefield, a snapshot of the Freefield apps (MIT)",
+    "app": "dub"
+   },
+   "nodes": [
+    {
+     "name": "ComfyUI-LTXVideo",
+     "repo": "Lightricks/ComfyUI-LTXVideo",
+     "commit": "44c8a36b7c31ee00b4271daed11dc2a4aa481140",
+     "licence": "LTX-2 Community License"
+    }
+   ],
+   "models": [
+    {
+     "name": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+     "dir": "diffusion_models",
+     "licence": "LTX-2.x Community License",
+     "gb": 21.5,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+     "dir": "text_encoders",
+     "licence": "LTX-2.x Community License",
+     "gb": 15.37,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-video-vae-bf16.safetensors",
+     "dir": "vae",
+     "licence": "LTX-2.x Community License",
+     "gb": 1.47,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-bf16.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.5-audio-vae-bf16.safetensors",
+     "dir": "vae",
+     "licence": "LTX-2.x Community License",
+     "gb": 0.36,
+     "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-audio-vae-bf16.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    },
+    {
+     "name": "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+     "dir": "loras",
+     "licence": "LTX-2.x Community License",
+     "gb": 2.47,
+     "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-DubIt/resolve/main/ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+     "gated": true,
+     "sha256": null,
+     "verified": false
+    }
+   ],
+   "min_vram_gb": 24,
+   "ram_gb": 64,
+   "comfyui_min": "0.42",
+   "tested": "Ran its example without an error on an RTX 3090 Ti (24 GB) on 2026-11-05, about 135 s (upstream's own test, not ours). It fits a 24 GB card only with plenty of system memory (upstream had 104 GB).",
+   "inputs": [
+    {
+     "name": "clip",
+     "kind": "video",
+     "required": true,
+     "binds": [
+      {
+       "node": "5001",
+       "field": "file",
+       "class": "LoadVideo"
+      }
+     ]
+    },
+    {
+     "name": "prompt",
+     "kind": "text",
+     "required": true,
+     "default": "A woman with short black hair in a denim jacket says: hello, and welcome back.",
+     "about": "Who is in the clip and the words they now say.",
+     "binds": [
+      {
+       "node": "5508",
+       "field": "value",
+       "class": "PrimitiveStringMultiline"
+      }
+     ]
+    },
+    {
+     "name": "avoid",
+     "kind": "text",
+     "required": false,
+     "default": "blurry, distorted face, warped mouth",
+     "about": "What must not appear.",
+     "binds": [
+      {
+       "node": "5509",
+       "field": "value",
+       "class": "PrimitiveStringMultiline"
+      }
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "node": "4852",
+     "kind": "video",
+     "class": "SaveVideo"
+    }
+   ],
+   "pedals": [
+    {
+     "name": "strength",
+     "via": "number",
+     "min": 0.5,
+     "max": 1.3,
+     "default": 1.0,
+     "binds": [
+      {
+       "node": "5004:5606",
+       "field": "strength_model",
+       "class": "LTXICLoRALoaderModelOnly"
+      }
+     ]
+    },
+    {
+     "name": "size",
+     "via": "number",
+     "min": 448,
+     "max": 720,
+     "default": 544,
+     "binds": [
+      {
+       "node": "5548:5026",
+       "field": "resize_type.shorter_size",
+       "round": true,
+       "class": "ResizeImageMaskNode"
+      }
+     ]
+    },
+    {
+     "name": "seed",
+     "via": "number",
+     "min": -1,
+     "max": 4294967295,
+     "default": -1,
+     "binds": [
+      {
+       "node": "5516:4832",
+       "field": "noise_seed",
+       "class": "RandomNoise"
+      }
+     ]
+    }
+   ],
+   "tiers": [
+    {
+     "min_vram_gb": 24,
+     "label": "24 GB and up",
+     "sets": [],
+     "tested": true
+    }
+   ],
+   "workflow": {
+    "path": "catalog/apps/dub/workflow.api.json",
+    "sha256": "b659cd8299b580b963a498bcaaa896cde342dd2086e44e86308ec622622f8a4c",
+    "bytes": 13370,
+    "format": "api"
+   },
+   "api_nodes": [],
+   "said": "Lip-synced"
+  }
+ ]
+}

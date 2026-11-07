@@ -93,7 +93,7 @@ pub fn closest(description: &str) -> &'static Template {
     best.1
 }
 
-static TEMPLATES: [Template; 7] = [
+static TEMPLATES: [Template; 11] = [
     Template {
         id: "social-media",
         summary: "Plan, write, edit and schedule a week of social posts, as drafts you publish yourself.",
@@ -486,6 +486,162 @@ static TEMPLATES: [Template; 7] = [
             },
         ],
     },
+    Template {
+        id: "product-ad",
+        summary: "Plan a short product ad: the shots, the camera and light for each, and the Stage commands to make them.",
+        keywords: &["product ad", "advert", "commercial", "packshot", "product shot"],
+        members: &[
+            TMember {
+                handle: "director",
+                name: "Reel",
+                instrument: "Clapperboard",
+                heavy: true,
+                may: May::Draft,
+                role: "You are the director of a small team making a short product ad from the owner's own product photos. From the product and the goal, write a shot list of 4 to 6 shots: what is in frame, the camera move, the lens, the light, and how long it runs (3 to 5 seconds each). One idea, one promise, one end card. Never invent claims about the product. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "shooter",
+                name: "Gaffer",
+                instrument: "Spotlight",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the shooter of a small product ad team. Take the director's shot list and turn each shot into Stage commands. Write each shot as one line the owner can paste, in the form: tempo-launch stage run WORKFLOW --input NAME=PATH --pedal NAME=VALUE --takes 3, using only the workflow ids and Pedal values you were given. Where a file is needed write its path as [CHECK: which file]. Use camera-photo for moves on a still, effect-clip for a playful effect, relight-photo to set the light first. Say which shot each line is for, and give --takes 3 for the hero shot only. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "cutter",
+                name: "Splice",
+                instrument: "Scissors",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the cutter of a small product ad team. Given the shots, write the cut order, the length of each clip, where the on-screen words and the end card go, and what the sound should do. Flag any shot that is likely to look wrong (hands, text on the product, fast motion). Short bullets, no preamble.",
+            },
+        ],
+        flows: &[
+            TFlow {
+                name: "product-ad",
+                goal: "Plan a product ad from the owner's photos: shot list, Stage commands for each shot, then the cut.",
+                steps: &["director", "shooter", "cutter"],
+                every: "manual",
+            },
+        ],
+    },
+    Template {
+        id: "short-film",
+        summary: "Plan a short film in a few shots: the look, the camera, and the Stage commands to shoot it, with the cut.",
+        keywords: &["short film", "film", "cinematic", "movie", "trailer", "storyboard"],
+        members: &[
+            TMember {
+                handle: "director",
+                name: "Reel",
+                instrument: "Clapperboard",
+                heavy: true,
+                may: May::Draft,
+                role: "You are the director of a tiny short film. From the idea, write a one-paragraph logline, the look (light and lens, one of each), and a shot list of 5 to 8 shots, each with the camera move and how long it runs. Keep to one place and one or two people so the shots match. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "dp",
+                name: "Gaffer",
+                instrument: "Spotlight",
+                heavy: true,
+                may: May::Draft,
+                role: "You are the cinematographer of a tiny short film. Take the shot list and make each shot a Stage command, keeping the lens and the light the same across shots so it looks like one film. Write each shot as one line the owner can paste, in the form: tempo-launch stage run WORKFLOW --input NAME=PATH --pedal NAME=VALUE --takes 3, using only the workflow ids and Pedal values you were given. Where a file is needed write its path as [CHECK: which file]. Use camera-photo to move the camera on a still frame, re-angle-video to get another angle on a clip, relight-photo to match the light between shots. Give --takes 3 for the shots that matter most. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "editor",
+                name: "Splice",
+                instrument: "Scissors",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the editor of a tiny short film. From the shot list, write the cut: the order, how long each shot holds, where a cut hides a seam, and the opening and closing shot. Say which takes to watch first, and what to try again if one does not match: another seed, a different camera Pedal, or the light set again. Short bullets, no preamble.",
+            },
+        ],
+        flows: &[
+            TFlow {
+                name: "short-film",
+                goal: "Plan a short film: the look, the shot list, a Stage command for each shot, then the edit.",
+                steps: &["director", "dp", "editor"],
+                every: "manual",
+            },
+        ],
+    },
+    Template {
+        id: "recast-clip",
+        summary: "Recast a clip: swap who is in it, check the light and the sound, and list the Stage commands in order.",
+        keywords: &["recast", "character swap", "swap the person", "replace the actor", "body double"],
+        members: &[
+            TMember {
+                handle: "producer",
+                name: "Slate",
+                instrument: "Clapperboard",
+                heavy: true,
+                may: May::Draft,
+                role: "You are the producer of a clip recast. From what the owner tells you, check the plan: do they own or have permission for the footage and the character, how long is the clip, what the new character looks like in words, and what must stay (motion, camera, sound). Say what is risky: mirrors, several people in frame, held props, fast cuts. Label the result as AI-made. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "operator",
+                name: "Gaffer",
+                instrument: "Spotlight",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the operator of a clip recast. Write the Stage commands in order: swap-character-video for the clip (or swap-character-photo for a still frame first, to try the character), then relight-photo or lip-sync-video only if needed. Write each shot as one line the owner can paste, in the form: tempo-launch stage run WORKFLOW --input NAME=PATH --pedal NAME=VALUE --takes 3, using only the workflow ids and Pedal values you were given. Where a file is needed write its path as [CHECK: which file]. Give --takes 2 for the swap. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "checker",
+                name: "Proof",
+                instrument: "Tuning-fork",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the checker of a clip recast. Write a short checklist for watching each take: the face and hair stay the same across the clip, the hands and held things, the edges around the body, the light matching the scene, and the sound lining up with the mouth. Say which fix to try for each problem, using only the workflows listed. Short bullets.",
+            },
+        ],
+        flows: &[
+            TFlow {
+                name: "recast",
+                goal: "Check the plan, write the Stage commands to recast the clip, and a checklist for judging the takes.",
+                steps: &["producer", "operator", "checker"],
+                every: "manual",
+            },
+        ],
+    },
+    Template {
+        id: "music-video",
+        summary: "Plan a music video: sections that follow the song, a shot for each, and the Stage commands to make them.",
+        keywords: &["music video", "lyric video", "visualiser", "visualizer"],
+        members: &[
+            TMember {
+                handle: "director",
+                name: "Reel",
+                instrument: "Clapperboard",
+                heavy: true,
+                may: May::Draft,
+                role: "You are the director of a small music video. From the song and the owner's idea, split the song into sections (intro, verse, chorus, bridge) with a rough length for each, and give each section one image and one camera move. Repeat a visual idea in the choruses. You cannot hear the song: ask for its tempo and section times, and mark guesses as [CHECK: ...]. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "shooter",
+                name: "Gaffer",
+                instrument: "Spotlight",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the shooter of a small music video. Turn each section into a Stage command. Write each shot as one line the owner can paste, in the form: tempo-launch stage run WORKFLOW --input NAME=PATH --pedal NAME=VALUE --takes 3, using only the workflow ids and Pedal values you were given. Where a file is needed write its path as [CHECK: which file]. Use effect-clip or camera-photo from a still, and set duration in seconds to the section's length (up to 5 s; longer sections are two clips). Use the same lens and light across the video. Stage (video and image workflows) can play these on the owner's own machines: effect-clip (a photo becomes an effect clip), camera-photo (a camera move on a photo), re-angle-video (a clip re-shot from a new angle), relight-photo, swap-character-photo, swap-character-video, paint-edit-photo, clean-plate-video, lip-sync-video. Pedals (modifiers) are camera (static, push_in, pull_out, pan_left, pan_right, orbit_left, orbit_right, crane_up, low_angle, high_angle and more), lens (24mm, 35mm, 50mm, 85mm), light (golden_hour, blue_hour, rim, noir, neon, softbox, overcast, candlelight), strength, duration and seed. You cannot run anything: you write the plan, and the owner runs each line.",
+            },
+            TMember {
+                handle: "cutter",
+                name: "Splice",
+                instrument: "Scissors",
+                heavy: false,
+                may: May::Draft,
+                role: "You are the cutter of a small music video. Write the cut against the song: for each section the clips in order and where each cut falls (on the beat, or on the first beat of a bar). Tempo and bar times come from the owner, or are marked [CHECK: ...]. Stage does not find beats itself yet. Short bullets.",
+            },
+        ],
+        flows: &[
+            TFlow {
+                name: "music-video",
+                goal: "Plan the music video: sections, a Stage command for each, then the cut against the song.",
+                steps: &["director", "shooter", "cutter"],
+                every: "manual",
+            },
+        ],
+    },
 ];
 
 #[cfg(test)]
@@ -501,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn there_are_seven_templates_with_3_to_5_members_and_1_or_2_flows() {
+    fn there_are_eleven_templates_with_3_to_5_members_and_1_or_2_flows() {
         let ids: Vec<&str> = all().iter().map(|t| t.id).collect();
         assert_eq!(
             ids,
@@ -512,7 +668,11 @@ mod tests {
                 "dev-team",
                 "research",
                 "content-creator",
-                "study"
+                "study",
+                "product-ad",
+                "short-film",
+                "recast-clip",
+                "music-video"
             ]
         );
         for t in all() {

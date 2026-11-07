@@ -287,7 +287,7 @@ pub struct Opts {
     pub enable: bool,
 }
 
-fn untar_argv(os: &str, file: &Path, dest: &Path) -> Vec<String> {
+pub(crate) fn untar_argv(os: &str, file: &Path, dest: &Path) -> Vec<String> {
     let prog = if os == "windows" {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         format!(r"{}\System32\tar.exe", root.trim_end_matches('\\'))

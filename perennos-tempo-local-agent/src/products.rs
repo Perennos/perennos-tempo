@@ -154,6 +154,18 @@ fn crate_on(home: &Path) -> bool {
         .is_some_and(|m| m.values().any(|t| t["enabled"] == true))
 }
 
+/// Whether `<home>/stage.json` has at least one workflow installed and turned on.
+fn stage_on(home: &Path) -> bool {
+    std::fs::read_to_string(home.join("stage.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["workflows"].as_object().cloned())
+        .is_some_and(|m| {
+            m.values()
+                .any(|w| w["installed"] == true && w["enabled"] == true)
+        })
+}
+
 /// Everything Tempo can connect by itself, from this machine's state.
 pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[PathBuf]) -> Found {
     let mut f = Found::default();
@@ -259,6 +271,26 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
                 );
             }
             None => f.notes.push("crate: tools are turned on but tempo-launch was not found next to Tempo, in TEMPO_BIN or on PATH".into()),
+        }
+    }
+    // Stage (video and image workflows): the ComfyUI workflows the owner added and turned on with
+    // `tempo-launch stage enable`, played through `tempo-launch stage mcp`. Every tool asks first
+    // unless the owner trusts it (`mcp_trust`), like the Crate.
+    if stage_on(&tempo_home(getenv)) {
+        match find_bin("tempo-launch", dirs) {
+            Some(b) => {
+                f.confirm.push(("stage".into(), "*".into()));
+                f.notes.push(format!("stage: {} (workflows you turned on)", s(&b)));
+                f.servers.insert(
+                    "stage".into(),
+                    ServerCfg {
+                        command: s(&b),
+                        args: vec!["stage".into(), "mcp".into()],
+                        env: BTreeMap::new(),
+                    },
+                );
+            }
+            None => f.notes.push("stage: workflows are turned on but tempo-launch was not found next to Tempo, in TEMPO_BIN or on PATH".into()),
         }
     }
     // Your own connectors (they may replace a product), then every enabled pack's (add only).
@@ -381,6 +413,41 @@ mod tests {
         } else {
             name.to_string()
         }
+    }
+
+    #[test]
+    fn stage_connects_when_a_workflow_is_turned_on_and_asks_first() {
+        let d = tmpdir("stage-connect");
+        let bin = d.join("bin");
+        touch(&bin.join(exe("tempo-launch")));
+        let home = d.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        let g = env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]);
+        // added but off, or on but not added: nothing connected
+        for text in [
+            r#"{"workflows":{"re-angle-video":{"installed":true,"enabled":false}}}"#,
+            r#"{"workflows":{"re-angle-video":{"installed":false,"enabled":true}}}"#,
+        ] {
+            std::fs::write(home.join("stage.json"), text).unwrap();
+            assert!(!discover(&cfg, &g, std::slice::from_ref(&bin))
+                .servers
+                .contains_key("stage"));
+        }
+        std::fs::write(
+            home.join("stage.json"),
+            r#"{"workflows":{"re-angle-video":{"installed":true,"enabled":true}}}"#,
+        )
+        .unwrap();
+        let f = discover(&cfg, &g, std::slice::from_ref(&bin));
+        assert_eq!(f.servers["stage"].args, ["stage", "mcp"]);
+        assert!(f.servers["stage"].command.ends_with(&exe("tempo-launch")));
+        assert!(f.confirm.contains(&("stage".to_string(), "*".to_string())));
+        // no tempo-launch to run: said, not connected
+        let f = discover(&cfg, &g, &[]);
+        assert!(
+            !f.servers.contains_key("stage") && f.notes.iter().any(|n| n.starts_with("stage:"))
+        );
     }
 
     #[test]

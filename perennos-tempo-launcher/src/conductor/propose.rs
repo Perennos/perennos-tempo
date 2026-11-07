@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn the_facts_hold_every_template_and_the_rules() {
         let j = templates_facts();
-        assert_eq!(j.arr("templates").len(), 7);
+        assert_eq!(j.arr("templates").len(), 11);
         let first = &j.arr("templates")[0];
         assert_eq!(first.str("id"), Some("social-media"));
         assert!(first.arr("members")[0].str("role").unwrap().len() > 100);

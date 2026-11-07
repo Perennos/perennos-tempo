@@ -20,6 +20,7 @@ pub mod fleet;
 pub mod home;
 pub mod retune;
 pub mod setup;
+pub mod stage;
 pub mod tempo_home;
 pub mod woodshed;
 
@@ -120,7 +121,7 @@ usage: tempo-launch [command]
   fleet invite | fleet join [--code CODE] [--controller ADDRESS] [--yes]
                     add a computer in a minute: `invite` shows a short code on the main computer, `join`
                     finds it from the new one and asks for the code (10 minutes, once, your network only)
-  fleet allow|deny comfy_image|mcp:SERVER/TOOL
+  fleet allow|deny comfy_image|stage|mcp:SERVER/TOOL
                     what this computer lets the rest of the fleet run (nothing until you say so)
   fleet init | fleet rotate | fleet serve [--quiet] | fleet send NAME \"TEXT\" | fleet inbox | fleet ping NAME
                     the messenger between your computers: a fleet key, signed frames, a durable outbox
@@ -132,6 +133,15 @@ usage: tempo-launch [command]
   crate enable ID | disable ID | folders [add|remove DIR] | review SCRIPT
                     let Tempo play a tool, on the folders you allow; approve a Blender script
   crate mcp         the Crate's tools as an MCP server for the agent (turned-on tools only)
+  stage             Stage (video and image workflows) on ComfyUI: re-angle, character swap, effects, camera moves, relight, lip sync
+  stage show ID | check [ID] | add ID [--yes] [--with PEDAL=CHOICE] | remove ID [--yes]
+                    one workflow in full, where it fits in your Fleet, set it up (sizes first, a look at
+                    any custom node's code, asks y/N), or take it out (to the trash)
+  stage enable ID | disable ID | cloud ID on|off | folder [PATH]
+                    let Tempo play it as a tool; allow a paid or cloud node for one workflow (never by default)
+  stage run ID --input NAME=PATH --pedal NAME=VALUE [--takes N] [--again] [--on MACHINE]
+                    play it; Pedals (modifiers) are camera, lens, light, strength, duration, seed
+  stage mcp         Stage's workflows as MCP tools for the agent (turned-on ones only)
   woodshed          the Woodshed (training): your local models get better at their parts from your best takes
   woodshed on|off BAND
                     start or stop keeping a band's judged takes (off until you say; `default` is the usual chat)
@@ -505,7 +515,7 @@ pub fn stamp(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}Z")
 }
 
-fn file_stamp(secs: u64) -> String {
+pub(crate) fn file_stamp(secs: u64) -> String {
     let (y, mo, d, h, mi, s) = civil(secs);
     format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
@@ -1969,6 +1979,8 @@ pub enum Cmd {
     Fleet(fleet::FleetCmd),
     /// `crate ...`: The Crate, a bank of free tools Tempo can set up and play.
     Crate(bank::BankCmd),
+    /// `stage ...`: Stage (video and image workflows) on ComfyUI, see docs/STAGE.md.
+    Stage(stage::StageCmd),
     /// `woodshed ...`: lessons, nightly LoRA training, and the Mix (see docs/WOODSHED.md).
     Woodshed(woodshed::WoodCmd),
     /// `retune ...`: Retune (weight edits), see docs/RETUNE.md.
@@ -2112,6 +2124,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
         "fleet" => Cmd::Fleet(fleet::parse_args(&rest)?),
         "crate" => Cmd::Crate(bank::parse_args(&rest)?),
+        "stage" => Cmd::Stage(stage::parse_args(&rest)?),
         "woodshed" => Cmd::Woodshed(woodshed::parse_args(&rest)?),
         "retune" => Cmd::Retune(retune::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
@@ -2182,6 +2195,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
         Cmd::Fleet(f) => Ok(fleet::run(ctx, f)),
         Cmd::Crate(c) => Ok(bank::run(ctx, c)),
+        Cmd::Stage(s) => Ok(stage::run(ctx, s)),
         Cmd::Woodshed(w) => Ok(woodshed::run(ctx, w)),
         Cmd::Retune(r) => Ok(retune::run(ctx, r)),
         Cmd::Schedule {

@@ -995,7 +995,7 @@ mod tests {
         let (t, err) = call(&s, "conductor_templates", "{}");
         assert!(!err, "{t}");
         let j = parse(&t).unwrap();
-        assert_eq!(j.arr("templates").len(), 7);
+        assert_eq!(j.arr("templates").len(), 11);
         for want in [
             "social-media",
             "dev-team",
