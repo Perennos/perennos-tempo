@@ -1,0 +1,20 @@
+[package]
+name = "perennos-tempo-vault"
+version = "0.1.0"
+edition = "2021"
+authors = ["Perennos"]
+description = "Perennos Tempo Vault: an Obsidian-compatible Markdown vault in Rust (links, backlinks, graph, search, daily notes, history, MCP, web app) with daily learning from Perennos Tempo conversations."
+
+[lib]
+name = "tempo_vault"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tempo-vault"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "=1.0.145"
+
+# Standalone: own Cargo.lock, never part of a parent workspace.
+[workspace]

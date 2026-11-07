@@ -1,0 +1,25 @@
+[package]
+name = "perennos-tempo-launcher"
+version = "0.1.0"
+edition = "2021"
+authors = ["Perennos"]
+description = "tempo-launch: opens a Perennos Tempo app from a shortcut. Starts its server hidden if it is not running, then opens it in the browser. No console window, ever."
+
+[lib]
+name = "tempo_launch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tempo-launch"
+path = "src/main.rs"
+
+# std only: this program starts others and opens a browser, nothing more.
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+
+# Standalone: own Cargo.lock, never part of a parent workspace.
+[workspace]

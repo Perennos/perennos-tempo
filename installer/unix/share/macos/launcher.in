@@ -1,0 +1,3 @@
+#!/bin/bash
+# Perennos Tempo.app: starts the apps and opens Perennos Tempo, through tempo-launch.
+exec "@LAUNCH@" "$@"

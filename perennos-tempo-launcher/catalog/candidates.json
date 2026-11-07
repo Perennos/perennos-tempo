@@ -1,0 +1,392 @@
+{
+ "about": "CANDIDATE model names for tempo-launch setup. Sizes and licences are NEVER taken from this file: setup checks each name live against the official Ollama registry (registry.ollama.ai) on the user's computer and uses the registry's real size and licence. A name that does not verify is skipped, so a wrong or missing tag is safe. roles: fast, heavy, code, vision, embed. params_b comes from the tag name. The list is in order of preference: when two models are equally big, the earlier one wins. active_params_b is the published active parameter count of a mixture-of-experts model (dense models: same as params_b); on a computer without a GPU it decides speed.",
+ "candidates": [
+  {
+   "name": "qwen3:4b",
+   "roles": [
+    "fast",
+    "heavy"
+   ],
+   "params_b": 4,
+   "about": "Qwen3 4B: small all-round model that can think step by step; the quick lane's usual choice."
+  },
+  {
+   "name": "qwen3:1.7b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 1.7,
+   "about": "Qwen3 1.7B: very small and fast; fits almost any computer."
+  },
+  {
+   "name": "qwen3:0.6b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 0.6,
+   "about": "Qwen3 0.6B: tiny; for computers with very little memory."
+  },
+  {
+   "name": "qwen3:8b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 8,
+   "about": "Qwen3 8B: good all-round thinking model for 16 GB computers."
+  },
+  {
+   "name": "qwen3:14b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 14,
+   "about": "Qwen3 14B: strong all-round thinking model for 16 to 32 GB computers."
+  },
+  {
+   "name": "qwen3:30b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 30,
+   "active_params_b": 3.3,
+   "about": "Qwen3 30B (mixture of experts, about 3B active): big model that stays quick on a strong computer."
+  },
+  {
+   "name": "qwen3:32b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 32,
+   "about": "Qwen3 32B: the strongest Qwen3 for computers with 48 GB or more."
+  },
+  {
+   "name": "qwen3-coder:30b",
+   "roles": [
+    "code"
+   ],
+   "params_b": 30,
+   "active_params_b": 3.3,
+   "about": "Qwen3 Coder 30B (mixture of experts): writes and fixes code; needs a strong computer."
+  },
+  {
+   "name": "qwen2.5-coder:1.5b",
+   "roles": [
+    "code"
+   ],
+   "params_b": 1.5,
+   "about": "Qwen2.5 Coder 1.5B: small code helper for modest computers."
+  },
+  {
+   "name": "qwen2.5-coder:3b",
+   "roles": [
+    "code"
+   ],
+   "params_b": 3,
+   "about": "Qwen2.5 Coder 3B: small code helper."
+  },
+  {
+   "name": "qwen2.5-coder:7b",
+   "roles": [
+    "code"
+   ],
+   "params_b": 7,
+   "about": "Qwen2.5 Coder 7B: capable code model for 8 to 16 GB computers."
+  },
+  {
+   "name": "qwen2.5-coder:14b",
+   "roles": [
+    "code"
+   ],
+   "params_b": 14,
+   "about": "Qwen2.5 Coder 14B: strong code model for 16 to 32 GB computers."
+  },
+  {
+   "name": "gemma3:1b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 1,
+   "about": "Gemma 3 1B: small and fast, text only."
+  },
+  {
+   "name": "gemma3:4b",
+   "roles": [
+    "fast",
+    "heavy",
+    "vision"
+   ],
+   "params_b": 4,
+   "about": "Gemma 3 4B: small all-round model that also reads images."
+  },
+  {
+   "name": "gemma3:12b",
+   "roles": [
+    "heavy",
+    "vision"
+   ],
+   "params_b": 12,
+   "about": "Gemma 3 12B: strong all-round model that also reads images."
+  },
+  {
+   "name": "gemma3:27b",
+   "roles": [
+    "heavy",
+    "vision"
+   ],
+   "params_b": 27,
+   "about": "Gemma 3 27B: Google's biggest Gemma 3; reads images too."
+  },
+  {
+   "name": "gemma3:270m",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 0.27,
+   "about": "Gemma 3 270M: tiny model for very small computers."
+  },
+  {
+   "name": "gemma3n:e2b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 2,
+   "about": "Gemma 3n E2B: built for phones and light laptops; runs in about 2B parameters of memory."
+  },
+  {
+   "name": "gemma3n:e4b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 4,
+   "about": "Gemma 3n E4B: efficient all-round model for laptops."
+  },
+  {
+   "name": "llama3.2:1b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 1,
+   "about": "Llama 3.2 1B: small and fast."
+  },
+  {
+   "name": "llama3.2:3b",
+   "roles": [
+    "fast",
+    "heavy"
+   ],
+   "params_b": 3,
+   "about": "Llama 3.2 3B: small all-round model."
+  },
+  {
+   "name": "llama3.1:8b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 8,
+   "about": "Llama 3.1 8B: well-known all-round model."
+  },
+  {
+   "name": "phi4-mini:3.8b",
+   "roles": [
+    "fast",
+    "heavy"
+   ],
+   "params_b": 3.8,
+   "about": "Phi-4 mini 3.8B: Microsoft's small model, good at reasoning for its size."
+  },
+  {
+   "name": "phi4:14b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 14,
+   "about": "Phi-4 14B: Microsoft's reasoning-strong model for 16 GB or more."
+  },
+  {
+   "name": "mistral:7b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 7,
+   "about": "Mistral 7B: well-known small all-round model."
+  },
+  {
+   "name": "mistral-nemo:12b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 12,
+   "about": "Mistral Nemo 12B: all-round model with a long memory for text."
+  },
+  {
+   "name": "mistral-small:24b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 24,
+   "about": "Mistral Small 24B: strong all-round model for 32 GB or more."
+  },
+  {
+   "name": "deepseek-r1:1.5b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 1.5,
+   "about": "DeepSeek-R1 1.5B: small reasoning model that shows its thinking."
+  },
+  {
+   "name": "deepseek-r1:7b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 7,
+   "about": "DeepSeek-R1 7B: reasoning model that shows its thinking."
+  },
+  {
+   "name": "deepseek-r1:8b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 8,
+   "about": "DeepSeek-R1 8B: reasoning model that shows its thinking."
+  },
+  {
+   "name": "deepseek-r1:14b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 14,
+   "about": "DeepSeek-R1 14B: strong reasoning model that shows its thinking."
+  },
+  {
+   "name": "deepseek-r1:32b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 32,
+   "about": "DeepSeek-R1 32B: top reasoning model of its size that shows its thinking."
+  },
+  {
+   "name": "gpt-oss:20b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 20,
+   "active_params_b": 3.6,
+   "about": "gpt-oss 20B: OpenAI's open model; good reasoning on a 16 GB card or 24 GB computer."
+  },
+  {
+   "name": "gpt-oss:120b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 120,
+   "active_params_b": 5.1,
+   "about": "gpt-oss 120B: OpenAI's big open model; needs a workstation with very large memory."
+  },
+  {
+   "name": "granite3.3:2b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 2,
+   "about": "Granite 3.3 2B: IBM's small business-friendly model."
+  },
+  {
+   "name": "granite3.3:8b",
+   "roles": [
+    "heavy"
+   ],
+   "params_b": 8,
+   "about": "Granite 3.3 8B: IBM's mid-size model for business text."
+  },
+  {
+   "name": "smollm2:135m",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 0.135,
+   "about": "SmolLM2 135M: tiny model for very small computers."
+  },
+  {
+   "name": "smollm2:360m",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 0.36,
+   "about": "SmolLM2 360M: tiny model."
+  },
+  {
+   "name": "smollm2:1.7b",
+   "roles": [
+    "fast"
+   ],
+   "params_b": 1.7,
+   "about": "SmolLM2 1.7B: small and fast."
+  },
+  {
+   "name": "llama3.2-vision:11b",
+   "roles": [
+    "vision"
+   ],
+   "params_b": 11,
+   "about": "Llama 3.2 Vision 11B: reads images and answers about them."
+  },
+  {
+   "name": "qwen2.5vl:7b",
+   "roles": [
+    "vision"
+   ],
+   "params_b": 7,
+   "about": "Qwen2.5-VL 7B: reads images, screenshots and documents."
+  },
+  {
+   "name": "embeddinggemma",
+   "roles": [
+    "embed"
+   ],
+   "params_b": 0.3,
+   "about": "EmbeddingGemma: Google's small memory (notes search) model."
+  },
+  {
+   "name": "nomic-embed-text",
+   "roles": [
+    "embed"
+   ],
+   "params_b": 0.137,
+   "about": "Nomic Embed Text: popular small memory model."
+  },
+  {
+   "name": "mxbai-embed-large",
+   "roles": [
+    "embed"
+   ],
+   "params_b": 0.335,
+   "about": "mxbai-embed-large: larger memory model with good search quality."
+  },
+  {
+   "name": "qwen3-embedding:0.6b",
+   "roles": [
+    "embed"
+   ],
+   "params_b": 0.6,
+   "about": "Qwen3 Embedding 0.6B: multilingual memory model."
+  },
+  {
+   "name": "qwen3-embedding:4b",
+   "roles": [
+    "embed"
+   ],
+   "params_b": 4,
+   "about": "Qwen3 Embedding 4B: stronger multilingual memory model."
+  },
+  {
+   "name": "qwen3-embedding:8b",
+   "roles": [
+    "embed"
+   ],
+   "params_b": 8,
+   "about": "Qwen3 Embedding 8B: strongest Qwen3 memory model."
+  }
+ ]
+}

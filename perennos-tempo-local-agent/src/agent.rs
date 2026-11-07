@@ -2290,15 +2290,17 @@ mod tests {
 
     #[test]
     fn a_machine_that_is_off_is_passed_over_and_the_conversation_stays_where_it_went() {
-        // an address nothing listens on: bind, note the port, let it go
-        let dead = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}", l.local_addr().unwrap())
-        };
         let m = Mock::start(chat_script(vec![
             text_resp("from the other machine"),
             text_resp("again"),
         ]));
+        // an address nothing listens on: bind, note the port, let it go. After the mock, so
+        // the system cannot hand the same port to the mock (Windows reuses a freed port at once).
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        assert_ne!(dead, m.url);
         let (mut a, mut conv) = agent(&m, |c| {
             c.ollama_url = dead.clone();
             c.ollama_fallbacks = vec![m.url.clone()];

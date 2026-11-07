@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tempo Room
+Comment=Your private chat rooms
+Exec="@LAUNCH@" room
+Icon=perennos-tempo-room
+Terminal=false
+Categories=Network;Chat;
+Keywords=chat;room;tempo;
+StartupNotify=false

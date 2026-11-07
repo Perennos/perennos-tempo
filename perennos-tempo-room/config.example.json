@@ -1,0 +1,43 @@
+{
+  "owner_name": "Riley",
+  "birthday": "",
+  "agent": "http://127.0.0.1:8765",
+  "vault": "",
+  "public_url": "",
+  "utc_offset": "",
+  "reply_cap": 1200,
+  "answer_secs": 300,
+  "invite_hours": 48,
+  "session_days": 180,
+  "limits": {
+    "post_per_min": 20,
+    "ask_per_member": 5,
+    "ask_member_secs": 300,
+    "ask_per_room": 20,
+    "ask_room_secs": 600,
+    "join_per_ip": 10
+  },
+  "bridges": {
+    "discord": {
+      "enabled": false,
+      "token_env": "TEMPO_DISCORD_TOKEN",
+      "channels": {"<channel id>": "family"},
+      "poll_secs": 4
+    },
+    "telegram": {
+      "enabled": false,
+      "token_env": "TEMPO_TELEGRAM_TOKEN",
+      "chats": {}
+    },
+    "whatsapp": {
+      "enabled": false,
+      "token_env": "TEMPO_WHATSAPP_TOKEN",
+      "phone_number_id": "",
+      "verify_token_env": "TEMPO_WHATSAPP_VERIFY_TOKEN",
+      "app_secret_env": "TEMPO_WHATSAPP_APP_SECRET",
+      "numbers": {"<15551234567>": "family"},
+      "webhook_port": 8768,
+      "public_host": ""
+    }
+  }
+}

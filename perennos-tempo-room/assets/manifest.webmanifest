@@ -1,0 +1,10 @@
+{
+  "name": "Perennos Tempo Room",
+  "short_name": "Tempo Room",
+  "description": "A private group chat where Perennos Tempo answers when you mention @tempo.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1b1a1b",
+  "theme_color": "#1b1a1b",
+  "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+}

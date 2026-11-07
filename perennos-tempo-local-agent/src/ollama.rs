@@ -166,6 +166,16 @@ pub fn unreachable(e: &str) -> bool {
         "unreachable",
         "timeout: connect",
         "timeout: resolve",
+        // Windows words these differently (WSAECONNREFUSED, WSAECONNRESET, WSAETIMEDOUT,
+        // WSAENETUNREACH, WSAEHOSTUNREACH)
+        "actively refused",
+        "forcibly closed",
+        "did not properly respond",
+        "os error 10061",
+        "os error 10054",
+        "os error 10060",
+        "os error 10051",
+        "os error 10065",
     ]
     .iter()
     .any(|k| e.contains(k))
@@ -408,6 +418,27 @@ pub fn embed(cfg: &Config, texts: &[String]) -> Option<Vec<Vec<f64>>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_engine_that_is_off_counts_as_unreachable_on_every_system() {
+        for e in [
+            "Connection refused (os error 111)",
+            "Connection refused (os error 61)",
+            "io: No connection could be made because the target machine actively refused it. (os error 10061)",
+            "io: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "io: A connection attempt failed because the connected party did not properly respond after a period of time (os error 10060)",
+            "timeout: connect",
+        ] {
+            assert!(unreachable(e), "{e}");
+        }
+        for e in [
+            "model 'x' not found",
+            "HTTP 500: out of memory",
+            "bad stream line",
+        ] {
+            assert!(!unreachable(e), "{e}");
+        }
+    }
+
     use super::*;
     use crate::util::testutil::*;
 

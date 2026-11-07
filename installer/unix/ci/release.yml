@@ -1,0 +1,65 @@
+# DRAFT GitHub Actions workflow for Perennos Tempo's Linux and macOS release tarballs.
+#
+# It is kept here, NOT in .github/workflows/, so nothing runs and no minutes are used. It belongs in the
+# PUBLIC repository (Perennos/perennos-tempo), where GitHub Actions is free: copy it to
+# .github/workflows/release.yml there. It builds only the source-available edition (the public repository
+# has no private crates). Nothing is published: the tarballs are uploaded as workflow artifacts.
+#
+# macos-13 (Intel) was retired by GitHub in late 2025; if the job cannot start, use macos-15-intel there.
+name: release tarballs
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (stable)
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Tests (each crate has its own Cargo.lock)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for c in perennos-tempo-launcher perennos-tempo-local-agent perennos-tempo-vault perennos-tempo-studio perennos-tempo-room; do
+            echo "::group::cargo test $c"
+            (cd "crates/$c" && cargo test --locked)
+            echo "::endgroup::"
+          done
+
+      - name: Build the source-available tarball
+        shell: bash
+        run: installer/unix/build-release.sh --edition source-available --out dist
+
+      - name: Smoke test the tarball (install, run, uninstall, in a fresh HOME)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
+          tar="$(ls dist/*.tar.gz)"
+          installer/unix/install.sh --from-release "$tar" --yes
+          "$HOME/.local/bin/tempo-launch" --version
+          TEMPO_NO_BROWSER=1 "$HOME/.local/bin/tempo-launch" status
+          installer/unix/install.sh --uninstall --yes
+          test ! -e "$HOME/.local/bin/tempo-launch"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perennos-tempo-${{ matrix.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error

@@ -1,0 +1,25 @@
+[package]
+name = "perennos-tempo-room"
+version = "0.1.0"
+edition = "2021"
+authors = ["Perennos"]
+description = "Perennos Tempo Room: a private group chat where people mention @tempo and Perennos Tempo answers in the thread, with optional Discord, Telegram and WhatsApp bridges, MCP tools and vault transcripts."
+
+[lib]
+name = "tempo_room"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tempo-room"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "=1.0.145"
+# HTTPS for the Discord, Telegram and WhatsApp bridges (pinned as in perennos-tempo-local-agent).
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+# Already in the tree through ureq's rustls: secure random tokens, SHA-256 and the
+# HMAC check on WhatsApp webhooks, none of which std provides.
+ring = "=0.17.14"
+
+# Standalone: own Cargo.lock, never part of a parent workspace.
+[workspace]

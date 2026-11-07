@@ -3756,7 +3756,9 @@ mod tests {
             "comfy_image",
             json!({"prompt": "a red barn", "width": 640, "height": 448}),
         );
-        assert_eq!(r, "image path: /out/sub/img_001.png");
+        // the path as this system writes it (\\ between folders on Windows)
+        let want = std::path::Path::new("/out").join("sub").join("img_001.png");
+        assert_eq!(r, format!("image path: {}", want.display()));
         let p = &m.bodies("/prompt")[0]["prompt"];
         assert_eq!(p["2"]["inputs"]["text"], "a red barn");
         assert_eq!(p["4"]["inputs"]["width"], 640);

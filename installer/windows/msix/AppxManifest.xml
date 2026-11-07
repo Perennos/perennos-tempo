@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Perennos Tempo: the MSIX package manifest TEMPLATE. build-msix.ps1 fills the tokens written between double at-signs and keeps or removes
+  the blocks marked with comments that start "@app:" (and "@virt"): an app that is not in the package gets no tile and no alias.
+  Do not put this file into a package by hand: it still has the placeholders.
+
+  Schema namespaces used (Microsoft's published package manifest schemas):
+    foundation (default)  http://schemas.microsoft.com/appx/manifest/foundation/windows10
+    uap                   http://schemas.microsoft.com/appx/manifest/uap/windows10             (VisualElements, DefaultTile, Protocol)
+    uap3                  http://schemas.microsoft.com/appx/manifest/uap/windows10/3           (windows.appExecutionAlias extension)
+    uap10                 http://schemas.microsoft.com/appx/manifest/uap/windows10/10          (RuntimeBehavior, TrustLevel, Parameters; Windows 10 2004, build 19041)
+    desktop               http://schemas.microsoft.com/appx/manifest/desktop/windows10         (ExecutionAlias, StartupTask)
+    desktop6              http://schemas.microsoft.com/appx/manifest/desktop/windows10/6       (FileSystemWriteVirtualization, RegistryWriteVirtualization)
+    rescap                http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities  (runFullTrust, unvirtualizedResources)
+  Reference: https://learn.microsoft.com/uwp/schemas/appxpackage/uapmanifestschema/schema-root
+
+  Applications: three with a Start menu tile (Perennos Tempo, Tempo Vault, Tempo Room; the last two run
+  tempo-launch.exe with a parameter) and several without one (AppListEntry="none") that exist only to give each
+  program its command name (execution alias) or the sign-in start.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap10 desktop desktop6 rescap">
+
+  <!-- Name and Publisher: from Partner Center (Store) or from the certificate subject CN=Perennos (own machines) -->
+  <Identity Name="@@IDENTITY_NAME@@" Publisher="@@PUBLISHER@@" Version="@@VERSION@@" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Perennos Tempo</DisplayName>
+    <PublisherDisplayName>@@PUBLISHER_DISPLAY_NAME@@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+<!--@virt-->
+    <!-- Tempo's data lives in the real %LOCALAPPDATA%\Perennos Tempo and survives an uninstall (needs unvirtualizedResources) -->
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+<!--@/virt-->
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+
+    <!-- Perennos Tempo: the Start tile. Also the command tempo-launch and the perennos-tempo: web link. -->
+    <Application Id="PerennosTempo" Executable="bin\tempo-launch.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Perennos Tempo" Description="Perennos Tempo: your local AI agent, notes and rooms. Everything stays on this computer."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png" ShortName="Tempo" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="bin\tempo-launch.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="tempo-launch.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+        <!-- the setup page's buttons: perennos-tempo:... (tempo-launch.exe gets the address as its argument) -->
+        <uap:Extension Category="windows.protocol" Executable="bin\tempo-launch.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap:Protocol Name="perennos-tempo">
+            <uap:DisplayName>Perennos Tempo</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+
+<!--@app:vault-->
+    <!-- Tempo Vault: the Start tile runs tempo-launch.exe vault (needs Windows 10 2004: uap10:Parameters) -->
+    <Application Id="TempoVault" Executable="bin\tempo-launch.exe"
+      uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL" uap10:Parameters="vault">
+      <uap:VisualElements DisplayName="Tempo Vault" Description="Your notes: plain Markdown files, links and a graph, kept on this computer."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png" ShortName="Tempo Vault" />
+      </uap:VisualElements>
+    </Application>
+<!--@/app:vault-->
+
+<!--@app:room-->
+    <!-- Tempo Room: the Start tile runs tempo-launch.exe room -->
+    <Application Id="TempoRoom" Executable="bin\tempo-launch.exe"
+      uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL" uap10:Parameters="room">
+      <uap:VisualElements DisplayName="Tempo Room" Description="A private group chat where people can mention @tempo. Runs on this computer."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png" ShortName="Tempo Room" />
+      </uap:VisualElements>
+    </Application>
+<!--@/app:room-->
+
+    <!-- Sign-in start (off until the user turns "Perennos Tempo" on in Settings > Apps > Startup or in Task Manager).
+         A startup task cannot pass a parameter, so it runs tempo-start.exe: the same program as tempo-launch.exe,
+         copied under this name by build-msix.ps1; the launcher treats that name as "tempo-launch start". -->
+    <Application Id="TempoStartup" Executable="bin\tempo-start.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Perennos Tempo (background start)" Description="Starts Perennos Tempo in the background when you sign in. Nothing opens."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="bin\tempo-start.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="PerennosTempoStart" Enabled="false" DisplayName="Perennos Tempo" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+
+    <!-- Command names for terminals: no PATH change needed. Each is hidden from the Start menu. -->
+    <Application Id="AliasAgent" Executable="bin\tempo-local-agent.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Tempo Agent (command)" Description="The tempo-local-agent command."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="bin\tempo-local-agent.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="tempo-local-agent.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+
+<!--@app:vault-->
+    <Application Id="AliasVault" Executable="bin\tempo-vault.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Tempo Vault (command)" Description="The tempo-vault command."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="bin\tempo-vault.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="tempo-vault.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+<!--@/app:vault-->
+
+<!--@app:room-->
+    <Application Id="AliasRoom" Executable="bin\tempo-room.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Tempo Room (command)" Description="The tempo-room command."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="bin\tempo-room.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="tempo-room.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+<!--@/app:room-->
+
+<!--@app:studio-->
+    <Application Id="AliasStudio" Executable="bin\tempo-studio.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Tempo Studio (command)" Description="The tempo-studio command."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="bin\tempo-studio.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="tempo-studio.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+<!--@/app:studio-->
+
+<!--@app:cli-->
+    <Application Id="AliasTempo" Executable="bin\tempo.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Tempo (command)" Description="The tempo command."
+        BackgroundColor="#16181D" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="bin\tempo.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="tempo.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+<!--@/app:cli-->
+
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+<!--@virt-->
+    <rescap:Capability Name="unvirtualizedResources" />
+<!--@/virt-->
+  </Capabilities>
+</Package>
