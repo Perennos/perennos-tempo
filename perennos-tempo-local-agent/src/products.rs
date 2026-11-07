@@ -145,6 +145,15 @@ fn connector(path: &Path) -> Result<Option<(String, ServerCfg, Vec<String>)>, St
     )))
 }
 
+/// Whether `<home>/crate.json` has at least one tool turned on.
+fn crate_on(home: &Path) -> bool {
+    std::fs::read_to_string(home.join("crate.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["tools"].as_object().cloned())
+        .is_some_and(|m| m.values().any(|t| t["enabled"] == true))
+}
+
 /// Everything Tempo can connect by itself, from this machine's state.
 pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[PathBuf]) -> Found {
     let mut f = Found::default();
@@ -231,6 +240,26 @@ pub fn discover(cfg: &Config, getenv: &dyn Fn(&str) -> Option<String>, dirs: &[P
                 env: BTreeMap::new(),
             },
         );
+    }
+    // The Crate: free tools (Blender, FFmpeg...) the owner turned on with `tempo-launch crate
+    // enable`, played through `tempo-launch crate mcp`. Nothing is connected until one is on, and
+    // every tool asks first unless the owner trusts it (`mcp_trust`).
+    if crate_on(&tempo_home(getenv)) {
+        match find_bin("tempo-launch", dirs) {
+            Some(b) => {
+                f.confirm.push(("crate".into(), "*".into()));
+                f.notes.push(format!("crate: {} (tools you turned on)", s(&b)));
+                f.servers.insert(
+                    "crate".into(),
+                    ServerCfg {
+                        command: s(&b),
+                        args: vec!["crate".into(), "mcp".into()],
+                        env: BTreeMap::new(),
+                    },
+                );
+            }
+            None => f.notes.push("crate: tools are turned on but tempo-launch was not found next to Tempo, in TEMPO_BIN or on PATH".into()),
+        }
     }
     // Your own connectors (they may replace a product), then every enabled pack's (add only).
     {
@@ -352,6 +381,40 @@ mod tests {
         } else {
             name.to_string()
         }
+    }
+
+    #[test]
+    fn the_crate_connects_when_a_tool_is_turned_on_and_asks_first() {
+        let d = tmpdir("crate-connect");
+        let bin = d.join("bin");
+        touch(&bin.join(exe("tempo-launch")));
+        let home = d.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = Config::defaults(Some(d.to_string_lossy().into_owned()));
+        let g = env(&[("TEMPO_HOME", home.to_string_lossy().into_owned())]);
+        // nothing on: nothing connected
+        std::fs::write(
+            home.join("crate.json"),
+            r#"{"tools":{"ffmpeg":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        assert!(!discover(&cfg, &g, std::slice::from_ref(&bin))
+            .servers
+            .contains_key("crate"));
+        std::fs::write(
+            home.join("crate.json"),
+            r#"{"tools":{"ffmpeg":{"enabled":true}}}"#,
+        )
+        .unwrap();
+        let f = discover(&cfg, &g, std::slice::from_ref(&bin));
+        assert_eq!(f.servers["crate"].args, ["crate", "mcp"]);
+        assert!(f.servers["crate"].command.ends_with(&exe("tempo-launch")));
+        assert!(f.confirm.contains(&("crate".to_string(), "*".to_string())));
+        // no tempo-launch to run: said, not connected
+        let f = discover(&cfg, &g, &[]);
+        assert!(
+            !f.servers.contains_key("crate") && f.notes.iter().any(|n| n.starts_with("crate:"))
+        );
     }
 
     #[test]

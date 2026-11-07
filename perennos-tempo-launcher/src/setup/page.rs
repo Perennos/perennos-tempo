@@ -2,7 +2,7 @@
 //! by it; it shows the exact command that would do it.
 
 use super::plan::{Plan, Status};
-use crate::{html_escape, MARK_SVG};
+use crate::{brand, html_escape};
 
 pub const D1_LICENCE: &str = "d1-2B is Liquid AI's model, under the LFM Open License v1.0. It is free to use only while your yearly revenue is under USD 10 million. Read the licence before you fetch it.";
 
@@ -59,24 +59,8 @@ pub fn setup_page(p: &Plan, apply_command: &str) -> String {
         format!("<h2>Ollama</h2><ul>{}</ul>", li(r.lines()))
     });
     format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Set up Perennos Tempo</title>
-<style>
-:root{{color-scheme:dark}}
-body{{margin:0;background:#16181d;color:#ece6d8;font:15px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif}}
-main{{width:min(680px,100%);box-sizing:border-box;margin:0 auto;padding:48px 28px}}
-.mark{{width:44px;height:44px;margin-bottom:30px}}
-h1{{font:500 27px/1.25 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:0 0 10px}}
-h2{{font:600 15px/1.4 system-ui,sans-serif;margin:28px 0 6px;color:#ece6d8}}
-p,li{{color:#cfc9bd}}
-ul{{padding-left:20px}}
-pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:14px 16px;overflow:auto;font:13px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:#d9dde2}}
-.small{{font-size:12.5px;color:#8a8b8f}}
-</style></head>
-<body><main>
-{mark}
-<h1>Set up Perennos Tempo for this computer</h1>
+        r#"{top}<p class="tt-kicker">Setup plan</p>
+<h1>Set up Perennos Tempo for <em>this computer</em></h1>
 <p>Tempo looked at this computer and your goals ({goals}) and chose the models below. Nothing has been fetched. {installed} of the chosen models are already installed.</p>
 <h2>This computer</h2><ul>{machine}</ul>
 <h2>What Tempo chose, and why</h2><ul>{picks}</ul>
@@ -88,9 +72,9 @@ pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:14px
 <h2>Optional: d1</h2>
 <p>d1 can route and judge work on this computer. It is not included unless you add <code>--with-d1</code>. {d1}</p>
 <p class="small">Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
-</main></body></html>
-"#,
-        mark = MARK_SVG,
+{end}"#,
+        top = brand::page_top("Set up Perennos Tempo", true, true),
+        end = brand::PAGE_END,
         goals = html_escape(&p.goals.join(", ")),
         installed = installed,
         machine = machine,

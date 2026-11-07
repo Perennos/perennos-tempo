@@ -345,7 +345,39 @@ fn soundcheck_main(mut argv: Vec<String>, mcp: bool) -> Result<u8, String> {
     Ok(code as u8)
 }
 
+/// `tempo-local-agent [--config PATH] fleet-run comfy_image`: what the fleet messenger runs
+/// here for another computer, under this computer's own rules. Arguments as JSON on standard
+/// input; one JSON line out.
+fn fleet_run_entry() -> Option<ExitCode> {
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut config = None;
+    if argv.first().map(String::as_str) == Some("--config") && argv.len() >= 2 {
+        argv.remove(0);
+        config = Some(argv.remove(0));
+    }
+    if argv.first().map(String::as_str) != Some("fleet-run") {
+        return None;
+    }
+    let tool = argv.get(1).cloned().unwrap_or_default();
+    let mut text = String::new();
+    let _ = std::io::Read::read_to_string(
+        &mut std::io::Read::take(std::io::stdin(), 1 << 16),
+        &mut text,
+    );
+    let args: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+    let getenv = |k: &str| std::env::var(k).ok();
+    let out = match Config::load(config.as_deref(), getenv("TEMPO_AGENT_CONFIG"), &getenv) {
+        Ok(cfg) => tempo_local_agent::fleet_tools::run_cli(&cfg, &tool, &args),
+        Err(e) => serde_json::json!({"ok": false, "text": e, "files": []}),
+    };
+    println!("{out}");
+    Some(ExitCode::SUCCESS)
+}
+
 fn main() -> ExitCode {
+    if let Some(code) = fleet_run_entry() {
+        return code;
+    }
     if let Some(code) = soundcheck_entry() {
         return code;
     }

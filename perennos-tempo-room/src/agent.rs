@@ -200,6 +200,65 @@ impl AgentClient {
         Ok((code, v))
     }
 
+    /// Talk to Tempo (the agent's `/agent/voice*`): one call with raw bytes in and out. Same key
+    /// rule as every other call. `limit` is the longest it may take (whisper can be slow).
+    /// Returns the status, the body and its Content-Type.
+    pub fn voice(
+        &self,
+        post: bool,
+        path: &str,
+        ctype: &str,
+        body: &[u8],
+        limit: Duration,
+    ) -> Result<(u16, Vec<u8>, String), AgentError> {
+        let once = |key: Option<&str>| -> Result<(u16, Vec<u8>, String), AgentError> {
+            let url = format!("{}{path}", self.base);
+            let a = self.http.clone();
+            let resp = if post {
+                let mut r = a
+                    .post(&url)
+                    .config()
+                    .timeout_global(Some(limit))
+                    .build()
+                    .header("Content-Type", ctype);
+                if let Some(k) = key {
+                    r = r.header("X-Tempo-Key", k);
+                }
+                r.send(body)
+            } else {
+                let mut r = a.get(&url).config().timeout_global(Some(limit)).build();
+                if let Some(k) = key {
+                    r = r.header("X-Tempo-Key", k);
+                }
+                r.call()
+            };
+            let mut resp = resp.map_err(|e| AgentError::Down(e.to_string()))?;
+            let code = resp.status().as_u16();
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            let bytes = resp
+                .body_mut()
+                .with_config()
+                .limit(16 * 1024 * 1024)
+                .read_to_vec()
+                .map_err(|e| AgentError::Down(e.to_string()))?;
+            Ok((code, bytes, ct))
+        };
+        let key = self.key();
+        let first = once(key.as_deref())?;
+        if first.0 != 401 {
+            return Ok(first);
+        }
+        match self.fresh_key(key.as_deref()) {
+            Some(k) => once(Some(&k)),
+            None => Ok(first),
+        }
+    }
+
     /// True when the agent answers its health check in time.
     pub fn health(&self, timeout: Duration) -> bool {
         let url = format!("{}/agent/health", self.base);

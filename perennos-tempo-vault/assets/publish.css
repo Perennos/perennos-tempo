@@ -1,6 +1,6 @@
 /* Perennos Tempo Vault, published pages: light by default, dark when the reader prefers it. */
-:root { --bg: #f6f3ec; --ink: #1d1f24; --muted: #646a75; --rule: #dcd6c8; --accent: #c8461f; --code: #ece7dc; color-scheme: light dark; }
-@media (prefers-color-scheme: dark) { :root { --bg: #14161a; --ink: #ece6d8; --muted: #9aa0ab; --rule: #2a2e36; --accent: #ff6a3d; --code: #1d2026; } }
+:root { --bg: #f6f3ec; --ink: #1d1f24; --muted: #646a75; --rule: #dcd6c8; --accent: #bb3610; --code: #ece7dc; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { :root { --bg: #14161a; --ink: #ece6d8; --muted: #9aa0ab; --rule: #2a2e36; --accent: #ff5b1f; --code: #1d2026; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.65 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; }
 header { padding: 14px 20px; border-bottom: 1px solid var(--rule); font: 12px/1 ui-monospace, "Cascadia Mono", Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }

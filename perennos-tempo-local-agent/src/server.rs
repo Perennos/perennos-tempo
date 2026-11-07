@@ -49,6 +49,8 @@ pub struct ServeOpts {
     pub key: Option<String>,
     /// Listening on an address other than loopback needs this (and the key still applies).
     pub allow_remote: bool,
+    /// Talk to Tempo: what is installed. None looks it up on every request (`voice.rs`).
+    pub voice: Option<crate::voice::Voice>,
 }
 
 impl Default for ServeOpts {
@@ -62,6 +64,7 @@ impl Default for ServeOpts {
             confirm_timeout: Duration::from_secs(900),
             key: None,
             allow_remote: false,
+            voice: None,
         }
     }
 }
@@ -75,6 +78,10 @@ struct ConvLog {
     busy: bool,
     /// File names the last turn's memory search used.
     used: Vec<String>,
+    /// The engine that answered the last turn (None until one has, or when it failed).
+    engine: Option<String>,
+    /// The stop switch of the turn in flight (or the last one): `POST /agent/stop` flips it.
+    meter: Option<crate::budget::Meter>,
 }
 
 type Pending = HashMap<String, (String, mpsc::Sender<bool>)>;
@@ -101,11 +108,41 @@ struct Shared {
     graph: Mutex<GraphCache>,
     /// The engines' last probe for health, reused for 15 s (probing takes seconds per host).
     hosts_seen: Mutex<Option<(Instant, Value)>>,
+    // slash menu: the connected servers' tools (filled by the worker) and the catalog, kept 5 s
+    mcp_tools: Mutex<Vec<Value>>,
+    catalog: Mutex<Option<(Instant, Value)>>,
 }
 
 struct Job {
     conv: String,
     text: String,
+    meter: crate::budget::Meter,
+}
+
+/// The budget a send asks for: none (the turn is only stoppable), the config's defaults for
+/// `"budget": {}`, or those with any of `tokens`, `wall_s`, `tool_calls`, `cloud_cents` changed.
+fn budget_of(body: &Value, cfg: &Config) -> Result<crate::budget::Budget, &'static str> {
+    use crate::budget::Budget;
+    let Some(b) = body.get("budget").filter(|b| !b.is_null()) else {
+        return Ok(Budget::unlimited());
+    };
+    let Some(o) = b.as_object() else {
+        return Err("budget: an object such as {\"tool_calls\": 20}");
+    };
+    let mut out = cfg.budget;
+    for (k, v) in o {
+        let Some(n) = v.as_u64() else {
+            return Err("budget: whole numbers only (0 is no limit)");
+        };
+        match k.as_str() {
+            "tokens" => out.tokens = n,
+            "wall_s" => out.wall_time = Duration::from_secs(n),
+            "tool_calls" => out.tool_calls = n,
+            "cloud_cents" => out.cloud_cents = n,
+            _ => return Err("budget: tokens, wall_s, tool_calls or cloud_cents"),
+        }
+    }
+    Ok(out)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -281,6 +318,21 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         rag.build_index(&cfg, false);
         lock(&shared.state).embed_ok = rag.embed_ok;
     }
+    {
+        // slash menu: what the connected servers offer, and which of it asks first
+        let mut mcp = agent.env.mcp.borrow_mut();
+        let tools: Vec<Value> = mcp
+            .load_catalog()
+            .into_iter()
+            .map(|(server, t)| {
+                let tool = t["name"].as_str().unwrap_or("");
+                json!({"server": server, "tool": tool, "name": crate::mcp::exposed(&server, tool),
+                    "description": t["description"].as_str().map(|d| crate::util::cap(d, 160)).unwrap_or_default(),
+                    "approval": mcp.needs_confirm(&server, tool)})
+            })
+            .collect();
+        *lock(&shared.mcp_tools) = tools;
+    }
     for job in rx {
         lock(&current).clone_from(&job.conv);
         let live = Rc::new(Live {
@@ -289,6 +341,7 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
             buf: RefCell::new(String::new()),
             last: Cell::new(Instant::now()),
         });
+        let mut served = None;
         match Conv::open(&cfg, Some(&job.conv)) {
             Ok(mut conv) => {
                 if lock(&shared.state)
@@ -300,10 +353,13 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
                 }
                 let tap = live.clone();
                 conv.on_event = Some(Box::new(move |ev| tap.event(ev)));
+                conv.meter = Some(job.meter.clone());
                 let mut sink = LiveSink(live.clone());
                 let _ = agent.turn(&mut conv, &job.text, &mut sink); // an error is already an event
                 live.flush();
                 conv.on_event = None;
+                conv.meter = None;
+                served = conv.served_by.take();
             }
             Err(e) => shared.push(
                 &job.conv,
@@ -316,6 +372,7 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         st.embed_ok = embed;
         if let Some(l) = st.convs.get_mut(&job.conv) {
             l.busy = false;
+            l.engine = served;
         }
         drop(st);
         shared.changed.notify_all();
@@ -383,6 +440,8 @@ pub fn start(
         streams: AtomicUsize::new(0),
         graph: Mutex::new(None),
         hosts_seen: Mutex::new(None),
+        mcp_tools: Mutex::new(vec![]),
+        catalog: Mutex::new(None),
     });
     let w = shared.clone();
     std::thread::spawn(move || worker(w, servers, rx));
@@ -483,7 +542,7 @@ fn pct_decode(s: &str) -> String {
 fn read_request(s: &TcpStream) -> Result<Req, (u16, &'static str)> {
     let bad = (400, "bad request");
     let clone = s.try_clone().map_err(|_| bad)?;
-    let mut rd = BufReader::new(clone.take((MAX_HEAD + MAX_BODY) as u64));
+    let mut rd = BufReader::new(clone.take((MAX_HEAD + crate::voice::MAX_AUDIO + 1) as u64));
     let mut line = String::new();
     rd.read_line(&mut line).map_err(|_| bad)?;
     let mut parts = line.split_whitespace();
@@ -530,7 +589,13 @@ fn read_request(s: &TcpStream) -> Result<Req, (u16, &'static str)> {
         Some(v) => v.parse().map_err(|_| bad)?,
         None => 0,
     };
-    if len > MAX_BODY {
+    // a recording may be bigger than a chat message
+    let cap = if req.path == "/agent/voice/transcribe" {
+        crate::voice::MAX_AUDIO
+    } else {
+        MAX_BODY
+    };
+    if len > cap {
         return Err((413, "body too large"));
     }
     req.body = vec![0; len];
@@ -611,6 +676,7 @@ fn check(sh: &Shared, req: &Req) -> Result<(), (u16, &'static str)> {
         return Err((405, "only GET and POST"));
     }
     if req.method == "POST"
+        && req.path != "/agent/voice/transcribe"
         && !req
             .header("content-type")
             .is_some_and(|c| c.to_ascii_lowercase().starts_with("application/json"))
@@ -647,6 +713,9 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
                 );
             }
         }
+        if api == "voice" || api.starts_with("voice/") {
+            return voice_api(sh, &req, api, s);
+        }
         let body: Value = if req.method == "POST" {
             match serde_json::from_slice(&req.body) {
                 Ok(v) => v,
@@ -675,13 +744,72 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
     }
 }
 
+/// Talk to Tempo (`voice.rs`): the audio is a raw body, not JSON, and it is only ever heard by
+/// this computer, so a connection from anywhere but loopback is refused even with the key.
+fn voice_api(sh: &Shared, req: &Req, api: &str, mut s: TcpStream) {
+    if !s.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
+        return refuse(&mut s, 403, "voice only answers on this computer");
+    }
+    let v = sh.opts.voice.clone().unwrap_or_else(|| {
+        crate::voice::Voice::discover(
+            &crate::products::tempo_home(&|k| std::env::var(k).ok()),
+            std::env::var_os("PATH"),
+            std::env::var_os("TEMPO_WHISPER_MODEL").map(PathBuf::from),
+            sh.cfg.data_dir.join("voice-tmp"),
+            sh.cfg.trash_dir.clone(),
+        )
+    });
+    let fail = |s: &mut TcpStream, (code, why): (u16, String)| refuse(s, code, &why);
+    match (req.method.as_str(), api) {
+        ("GET", "voice") => send_json(&mut s, 200, &v.status()),
+        ("POST", "voice/transcribe") => {
+            let ct = req.header("content-type").unwrap_or("");
+            match crate::voice::transcribe(&v, ct, &req.body, req.q("lang")) {
+                Ok(out) => send_json(&mut s, 200, &out),
+                Err(e) => fail(&mut s, e),
+            }
+        }
+        ("POST", "voice/speak") => {
+            let text = serde_json::from_slice::<Value>(&req.body)
+                .ok()
+                .and_then(|b| b.get("text").and_then(Value::as_str).map(str::to_string));
+            match text.map(|t| crate::voice::speak(&v, &t)) {
+                Some(Ok(wav)) => {
+                    let _ = respond(&mut s, 200, "audio/wav", &wav);
+                }
+                Some(Err(e)) => fail(&mut s, e),
+                None => refuse(&mut s, 400, "send {\"text\": \"...\"}"),
+            }
+        }
+        _ => refuse(&mut s, 404, "not found"),
+    }
+}
+
 fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream) {
     let post = req.method == "POST";
     match (post, api) {
+        (false, "catalog") => {
+            // everything the slash menu lists; built at most every 5 s
+            let v = {
+                let mut seen = lock(&sh.catalog);
+                match seen.as_ref() {
+                    Some((t, v)) if t.elapsed() < Duration::from_secs(5) => v.clone(),
+                    _ => {
+                        let mcp = lock(&sh.mcp_tools).clone();
+                        let home = crate::tempo_home::tempo_home().dir;
+                        let v = crate::catalog::build(&sh.cfg, &home, &mcp);
+                        *seen = Some((Instant::now(), v.clone()));
+                        v
+                    }
+                }
+            };
+            send_json(&mut s, 200, &v);
+        }
         (false, "convs") => send_json(&mut s, 200, &json!(convs(&sh.cfg))),
         (true, "new") => {
-            // {"model": "<tag>", "role": "<text>"}, both optional: a Room teammate's model (tried
-            // first; the config's models stay as fallbacks) and the role its owner wrote for it
+            // {"model": "<tag>", "role": "<text>", "engine": "<url>"}, all optional: a Room
+            // teammate's model (tried first; the config's models stay as fallbacks), the role its
+            // owner wrote for it and the engine to ask first (one of the configured ones)
             let model = match body.get("model").and_then(Value::as_str).map(str::trim) {
                 Some(m) if !m.is_empty() && !crate::conv::valid_model(m) => {
                     return refuse(
@@ -698,8 +826,49 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                 }
                 r => r.filter(|r| !r.is_empty()).map(util::redact),
             };
-            new_conv(sh, body["mode"] == "guest", model, role, s)
+            let engine = match body.get("engine") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(e)) if e.trim().is_empty() => None,
+                Some(Value::String(e)) => match sh.cfg.find_engine(e) {
+                    Some(found) => Some(found),
+                    None => {
+                        return refuse(
+                            &mut s,
+                            400,
+                            "engine: not one of this agent's engines (ollama_url, ollama_fallbacks or the urls of a host)",
+                        )
+                    }
+                },
+                Some(_) => return refuse(&mut s, 400, "engine: a URL as text"),
+            };
+            // "format": a JSON Schema for the answers (the Conductor's band spec uses one)
+            let format = match body.get("format") {
+                None | Some(Value::Null) => None,
+                Some(f) if f.is_object() && f.to_string().len() <= 8192 => Some(f.clone()),
+                Some(_) => {
+                    return refuse(&mut s, 400, "format: a JSON Schema object, at most 8 KB")
+                }
+            };
+            // "band" and "part": which band's part this conversation plays (the Conductor says so)
+            let slug = |k: &str| match body.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(x)) if x.is_empty() => Ok(None),
+                Some(Value::String(x)) if crate::woodshed::slug_ok(x) => Ok(Some(x.clone())),
+                Some(_) => Err(format!("{k}: lowercase letters, digits, - and _ only")),
+            };
+            let (band, part) = match (slug("band"), slug("part")) {
+                (Ok(b), Ok(p)) => (b, p),
+                (Err(e), _) | (_, Err(e)) => return refuse(&mut s, 400, &e),
+            };
+            new_conv(
+                sh,
+                body["mode"] == "guest",
+                (model, role, engine, format),
+                (band, part),
+                s,
+            )
         }
+        (true, "verdict") => verdict(sh, body, s),
 
         (true, "send") => {
             let conv = body["conv"].as_str().unwrap_or("");
@@ -707,6 +876,11 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             if !valid_id(conv) || text.is_empty() {
                 return refuse(&mut s, 400, "need conv and text");
             }
+            let budget = match budget_of(body, &sh.cfg) {
+                Ok(b) => b,
+                Err(e) => return refuse(&mut s, 400, e),
+            };
+            let meter = crate::budget::Meter::root(budget);
             let verdict = {
                 let mut st = lock(&sh.state);
                 if !sh.ensure(&mut st, conv) {
@@ -715,6 +889,7 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                     match st.convs.get_mut(conv) {
                         Some(log) if !log.busy => {
                             log.busy = true;
+                            log.meter = Some(meter.clone());
                             Ok(())
                         }
                         _ => Err((409, "busy")),
@@ -728,11 +903,30 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             let job = Job {
                 conv: conv.to_string(),
                 text: text.to_string(),
+                meter,
             };
             if lock(&sh.jobs).send(job).is_err() {
                 return refuse(&mut s, 503, "agent worker stopped");
             }
             send_json(&mut s, 200, &json!({"ok": true}));
+        }
+        (true, "stop") => {
+            // {"conv": "<id>"} ends that conversation's turn at its next step; {"all": true}
+            // ends every turn in flight. A turn that is not running has nothing to stop.
+            let (one, all) = (body["conv"].as_str().unwrap_or(""), body["all"] == true);
+            if one.is_empty() && !all {
+                return refuse(&mut s, 400, "need conv, or all: true");
+            }
+            let mut stopped = 0;
+            for (id, log) in lock(&sh.state).convs.iter() {
+                if log.busy && (all || id == one) {
+                    if let Some(m) = &log.meter {
+                        m.stop();
+                        stopped += 1;
+                    }
+                }
+            }
+            send_json(&mut s, 200, &json!({"ok": true, "stopped": stopped}));
         }
         (true, "confirm") => {
             let (conv, id) = (
@@ -755,7 +949,7 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             let mut st = lock(&sh.state);
             let v = if sh.ensure(&mut st, req.q("conv")) {
                 let log = &st.convs[req.q("conv")];
-                json!({"events": log.events.get(since..).unwrap_or(&[]), "busy": log.busy})
+                json!({"events": log.events.get(since..).unwrap_or(&[]), "busy": log.busy, "engine": log.engine})
             } else {
                 json!({"events": [], "busy": false})
             };
@@ -861,7 +1055,7 @@ fn health(sh: &Shared, keyed: bool) -> Value {
     // `auth: "key"`: every other call needs X-Tempo-Key (see `serve`).
     let auth = if sh.opts.key.is_some() { "key" } else { "none" };
     if !keyed {
-        return json!({"ok": true, "stream": true, "guest": true, "roles": true, "auth": auth});
+        return json!({"ok": true, "stream": true, "guest": true, "roles": true, "engines": true, "stop": true, "auth": auth});
     }
     let hosts = {
         let mut seen = lock(&sh.hosts_seen);
@@ -892,16 +1086,21 @@ fn health(sh: &Shared, keyed: bool) -> Value {
         }
     };
     let embed = lock(&sh.state).embed_ok;
-    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "roles": true, "auth": auth})
+    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "roles": true, "engines": true, "stop": true, "auth": auth})
 }
 
 /// A new conversation: a guest one for a chat room (no tools, memory or owner context), with the
-/// model and role a Room teammate was given, if any.
+/// model, role and engine a Room teammate was given, if any.
 fn new_conv(
     sh: &Arc<Shared>,
     guest: bool,
-    model: Option<String>,
-    role: Option<String>,
+    (model, role, engine, format): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<Value>,
+    ),
+    (band, part): (Option<String>, Option<String>),
     mut s: TcpStream,
 ) {
     match Conv::open(&sh.cfg, None) {
@@ -909,13 +1108,94 @@ fn new_conv(
             c.guest = guest;
             c.model = model;
             c.role = role;
-            if guest || c.model.is_some() || c.role.is_some() {
+            c.engine = engine;
+            c.format = format;
+            c.band = band;
+            c.part = part;
+            if guest
+                || c.model.is_some()
+                || c.role.is_some()
+                || c.engine.is_some()
+                || c.format.is_some()
+                || c.band.is_some()
+            {
                 c.save();
             }
             lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
             send_json(&mut s, 200, &json!({"conv": c.id}));
         }
         Err(e) => send_json(&mut s, 500, &json!({ "error": e })),
+    }
+}
+
+/// The owner's thumb on one answer: `{"conv": id, "n": event number, "verdict": "up"|"down"}`.
+/// It becomes a take (see docs/WOODSHED.md) only when the owner turned capture on for the
+/// conversation's band (`tempo-launch woodshed on <band>`; `default` for the usual chat), and
+/// the answer says which: `{"ok": true, "kept": false}` means it was heard and not kept.
+fn verdict(sh: &Arc<Shared>, body: &Value, mut s: TcpStream) {
+    let (id, n) = (body["conv"].as_str().unwrap_or(""), body["n"].as_u64());
+    let up = match body["verdict"].as_str() {
+        Some("up") => true,
+        Some("down") => false,
+        _ => return refuse(&mut s, 400, "verdict: up or down"),
+    };
+    let Some(n) = n.map(|n| n as usize) else {
+        return refuse(&mut s, 400, "need conv, n and verdict");
+    };
+    let events = {
+        let mut st = lock(&sh.state);
+        if !sh.ensure(&mut st, id) {
+            return refuse(&mut s, 404, "unknown conversation");
+        }
+        st.convs[id].events.clone()
+    };
+    // the thumb is on an answer, and the task is the last thing the owner asked before it
+    let kind = |i: usize| events.get(i).and_then(|e| e["type"].as_str()).unwrap_or("");
+    if kind(n) != "assistant" {
+        return refuse(&mut s, 400, "n is not an answer");
+    }
+    let Some(q) = (0..n).rev().find(|i| kind(*i) == "user") else {
+        return refuse(&mut s, 400, "that answer has no question before it");
+    };
+    let conv = match Conv::open(&sh.cfg, Some(id)) {
+        Ok(c) => c,
+        Err(e) => return refuse(&mut s, 400, &e),
+    };
+    let band = conv.band.as_deref();
+    if !crate::woodshed::capture_on(&sh.cfg.data_dir, band) {
+        return send_json(
+            &mut s,
+            200,
+            &json!({"ok": true, "kept": false, "band": crate::woodshed::key(band)}),
+        );
+    }
+    let model = conv
+        .model
+        .clone()
+        .or_else(|| sh.cfg.models.first().cloned())
+        .unwrap_or_default();
+    let engine = conv
+        .engine
+        .clone()
+        .unwrap_or_else(|| sh.cfg.ollama_url.clone());
+    let take = crate::woodshed::owner_take(
+        id,
+        band,
+        conv.part.as_deref(),
+        &model,
+        &engine,
+        events[q]["text"].as_str().unwrap_or(""),
+        q,
+        n,
+        up,
+    );
+    match crate::woodshed::append_take(&sh.cfg.data_dir, &take) {
+        Ok(()) => send_json(
+            &mut s,
+            200,
+            &json!({"ok": true, "kept": true, "take": take["take"]}),
+        ),
+        Err(e) => send_json(&mut s, 500, &json!({"error": e})),
     }
 }
 
@@ -1013,6 +1293,8 @@ fn static_file(s: &mut TcpStream, dir: &Path, rel: &str) {
         "html" => "text/html; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
+        "webp" => "image/webp",
+        "woff2" => "font/woff2",
         _ => "application/octet-stream",
     };
     match std::fs::read(&p) {
@@ -1254,6 +1536,86 @@ mod tests {
     }
 
     #[test]
+    fn stop_needs_a_target_and_a_send_can_carry_a_budget() {
+        let calls = (0..3)
+            .map(|i| call_resp("list_dir", json!({"path": format!("/no/such/dir{i}")})))
+            .collect();
+        let srv = server(calls, |_, _| {});
+        let (_, h) = get(&srv, "/agent/health");
+        assert_eq!(h["stop"], true);
+        let (c, _) = post(&srv, "/agent/stop", &json!({}));
+        assert_eq!(c, 400);
+        let (c, v) = post(&srv, "/agent/stop", &json!({"all": true}));
+        assert_eq!(
+            (c, v["stopped"].as_u64()),
+            (200, Some(0)),
+            "nothing was running"
+        );
+        let (_, v) = post(&srv, "/agent/new", &json!({}));
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let (c, _) = post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "list the folders", "budget": {"coins": 1}}),
+        );
+        assert_eq!(c, 400, "an unknown budget line is refused");
+        let (c, _) = post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "list the folders", "budget": {"tool_calls": 1}}),
+        );
+        assert_eq!(c, 200);
+        let evs = wait_idle(&srv, &conv);
+        let last = evs.iter().rev().find(|e| e["type"] == "assistant").unwrap();
+        assert!(
+            last["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Stopped at the tool-call limit (1 of 1 used)."),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn budget_lines_come_from_the_config_unless_the_send_changes_them() {
+        let mut cfg = Config::defaults(None);
+        cfg.budget.tool_calls = 7;
+        let b = budget_of(&json!({"budget": {}}), &cfg).unwrap();
+        assert_eq!(b.tool_calls, 7);
+        let b = budget_of(&json!({"budget": {"tool_calls": 3, "wall_s": 9}}), &cfg).unwrap();
+        assert_eq!((b.tool_calls, b.wall_time.as_secs()), (3, 9));
+        assert_eq!(
+            budget_of(&json!({}), &cfg).unwrap().tool_calls,
+            0,
+            "none asked: no limit"
+        );
+        assert!(budget_of(&json!({"budget": 5}), &cfg).is_err());
+        assert!(budget_of(&json!({"budget": {"tokens": -1}}), &cfg).is_err());
+    }
+
+    #[test]
+    fn the_catalog_lists_commands_tools_and_needs_the_key() {
+        let srv = server(vec![], |_, o| o.key = Some("k3y".repeat(20)));
+        let p = srv.addr.port();
+        let (c, _) = raw(
+            srv.addr,
+            &format!("GET /agent/catalog HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n"),
+        );
+        assert_eq!(c, 401);
+        let (c, b) = raw(
+            srv.addr,
+            &format!(
+                "GET /agent/catalog HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nX-Tempo-Key: {}\r\n\r\n",
+                "k3y".repeat(20)
+            ),
+        );
+        assert_eq!(c, 200);
+        let v: Value = serde_json::from_str(&b).unwrap();
+        let has = |list: &str, n: &str| v[list].as_array().unwrap().iter().any(|x| x["name"] == n);
+        assert!(has("commands", "/undo") && has("commands", "/soundcheck") && has("tools", "grep"));
+    }
+
+    #[test]
     fn guest_conversations_for_chat_rooms() {
         let srv = server(vec![text_resp("Hello from the room")], |_, _| {});
         let (_, h) = get(&srv, "/agent/health");
@@ -1338,6 +1700,78 @@ mod tests {
             .0,
             400
         );
+    }
+
+    #[test]
+    fn a_conversation_can_be_pinned_to_one_of_the_configured_engines() {
+        let other = Mock::start(chat_script(vec![text_resp(
+            "Answered on the other engine.",
+        )]));
+        let url = other.url.clone();
+        let srv = server(vec![], move |c, _| c.ollama_fallbacks = vec![url]);
+        let (_, h) = get(&srv, "/agent/health");
+        assert_eq!(h["engines"], true, "callers can see that pinning is there");
+        // an engine the agent does not know, a wrong type: refused, and no conversation is made
+        for bad in [json!("http://10.9.9.9:11434"), json!(7), json!({"url": 1})] {
+            let (c, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "engine": bad}));
+            assert_eq!(c, 400, "{bad}");
+            assert!(v["error"].as_str().unwrap().starts_with("engine:"), "{v}");
+        }
+        assert!(convs(&srv.cfg).is_empty());
+        // a configured one is taken, with or without a trailing slash, and saved as written
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "engine": format!("{}/", other.url)}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["engine"], other.url.as_str());
+        let (c, _) = post(&srv, "/agent/send", &json!({"conv": conv, "text": "hello"}));
+        assert_eq!(c, 200);
+        let evs = wait_idle(&srv, &conv);
+        assert_eq!(evs.last().unwrap()["text"], "Answered on the other engine.");
+        assert_eq!(other.bodies("/api/chat").len(), 1);
+        // the engine that answered comes with the events
+        let (_, v) = get(&srv, &format!("/agent/events?conv={conv}&since=0"));
+        assert_eq!(v["engine"], other.url.as_str());
+        // no engine, no pin
+        let (_, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "engine": ""}));
+        let conv = v["conv"].as_str().unwrap();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(saved["engine"].is_null());
+    }
+
+    #[test]
+    fn a_conversation_can_be_opened_with_a_json_schema() {
+        let srv = server(vec![text_resp("{}")], |_, _| {});
+        let schema = json!({"type": "object", "required": ["name"]});
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "format": schema}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["format"], schema);
+        for bad in [json!("json"), json!(7), json!([1])] {
+            let (c, v) = post(&srv, "/agent/new", &json!({"mode": "guest", "format": bad}));
+            assert_eq!(c, 400, "{v}");
+        }
     }
 
     #[test]
@@ -1604,6 +2038,8 @@ mod tests {
                 streams: AtomicUsize::new(0),
                 graph: Mutex::new(None),
                 hosts_seen: Mutex::new(None),
+                mcp_tools: Mutex::new(vec![]),
+                catalog: Mutex::new(None),
             };
             assert!(sh.ensure(&mut st, &conv));
             st.convs[&conv].events.clone()
@@ -1925,5 +2361,235 @@ mod tests {
         assert_eq!(pct_decode("100%"), "100%");
         assert_eq!(pct_decode("%zz"), "%zz");
         assert_eq!(pct_encode("/a b"), "%2Fa%20b");
+    }
+
+    fn saved_conv(srv: &Srv, conv: &str) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(srv.cfg.data_dir.join(format!("conversations/{conv}.json")))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_bands_lessons_go_into_its_part_system_message() {
+        let srv = server(
+            vec![text_resp("Short and plain."), text_resp("Plain again.")],
+            |_, _| {},
+        );
+        std::fs::create_dir_all(srv.cfg.data_dir.join("lessons")).unwrap();
+        std::fs::write(
+            srv.cfg.data_dir.join("lessons/social-media.prompt.txt"),
+            "- open with the number, not the adjective\n",
+        )
+        .unwrap();
+        // a bad band name is refused and nothing is made
+        let (c, _) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "band": "../x"}),
+        );
+        assert_eq!(c, 400);
+        let (c, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "band": "social-media", "part": "lead"}),
+        );
+        assert_eq!(c, 200);
+        let conv = v["conv"].as_str().unwrap().to_string();
+        let saved = saved_conv(&srv, &conv);
+        assert_eq!(
+            (saved["band"].as_str(), saved["part"].as_str()),
+            (Some("social-media"), Some("lead"))
+        );
+        post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "write a caption"}),
+        );
+        wait_idle(&srv, &conv);
+        let sent = srv._mock.bodies("/api/chat");
+        let system = sent[0]["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("open with the number"), "{system}");
+        // a guest with no band has no lessons
+        let (_, v) = post(&srv, "/agent/new", &json!({"mode": "guest"}));
+        let conv2 = v["conv"].as_str().unwrap().to_string();
+        post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv2, "text": "hello"}),
+        );
+        wait_idle(&srv, &conv2);
+        let sent = srv._mock.bodies("/api/chat");
+        assert!(!sent[1]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("LESSONS"));
+    }
+
+    #[test]
+    fn a_thumb_is_kept_only_when_capture_is_on() {
+        let srv = server(vec![text_resp("A fine caption.")], |_, _| {});
+        let (_, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "band": "social-media"}),
+        );
+        let conv = v["conv"].as_str().unwrap().to_string();
+        post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "write a caption"}),
+        );
+        let evs = wait_idle(&srv, &conv);
+        let n = evs.iter().find(|e| e["type"] == "assistant").unwrap()["n"]
+            .as_u64()
+            .unwrap();
+        let takes = srv.cfg.data_dir.join("takes/takes.jsonl");
+        // off: heard, not kept
+        let (c, v) = post(
+            &srv,
+            "/agent/verdict",
+            &json!({"conv": conv, "n": n, "verdict": "up"}),
+        );
+        assert_eq!((c, v["kept"].clone()), (200, json!(false)));
+        assert!(!takes.exists());
+        // on for the band: kept as a take
+        std::fs::write(
+            srv.cfg.data_dir.join("woodshed.json"),
+            r#"{"bands":{"social-media":{"on":true}}}"#,
+        )
+        .unwrap();
+        let (c, v) = post(
+            &srv,
+            "/agent/verdict",
+            &json!({"conv": conv, "n": n, "verdict": "up"}),
+        );
+        assert_eq!((c, v["kept"].clone()), (200, json!(true)));
+        let (_, v) = post(
+            &srv,
+            "/agent/verdict",
+            &json!({"conv": conv, "n": n, "verdict": "down"}),
+        );
+        assert_eq!(v["kept"], true);
+        let lines: Vec<Value> = std::fs::read_to_string(&takes)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["band"], "social-media");
+        assert_eq!(lines[0]["task"], "write a caption");
+        assert_eq!(lines[0]["winner"], true);
+        assert_eq!(lines[1]["checks"]["owner"], "reject");
+        assert_eq!(
+            lines[0]["answer_ref"],
+            format!("conversations/{conv}.json#{n}")
+        );
+        // not an answer, no verdict word, an unknown conversation: refused
+        assert_eq!(
+            post(
+                &srv,
+                "/agent/verdict",
+                &json!({"conv": conv, "n": 0, "verdict": "up"})
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            post(
+                &srv,
+                "/agent/verdict",
+                &json!({"conv": conv, "n": n, "verdict": "meh"})
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            post(
+                &srv,
+                "/agent/verdict",
+                &json!({"conv": "nope", "n": n, "verdict": "up"})
+            )
+            .0,
+            404
+        );
+    }
+
+    #[test]
+    fn a_part_with_faders_plays_on_the_llama_server_with_its_scales() {
+        // a stand-in for llama-server: it records the body and answers like its chat endpoint
+        let llama = Mock::start(|r: &crate::util::testutil::Req| {
+            if r.path == "/v1/chat/completions" {
+                (
+                    200,
+                    json!({"choices": [{"message": {"role": "assistant", "content": "Played with the fader."}}],
+                           "usage": {"prompt_tokens": 9, "completion_tokens": 4}})
+                    .to_string(),
+                )
+            } else {
+                (404, "{}".into())
+            }
+        });
+        let url = llama.url.clone();
+        let srv = server(vec![text_resp("Played on Ollama.")], move |c, _| {
+            c.llama_servers = vec![url]
+        });
+        std::fs::create_dir_all(srv.cfg.data_dir.join("mix")).unwrap();
+        std::fs::write(
+            srv.cfg.data_dir.join("mix/faders.json"),
+            r#"{"social-media":[{"id":0,"scale":0.7},{"id":1,"scale":0.0}]}"#,
+        )
+        .unwrap();
+        let (_, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "band": "social-media", "part": "lead"}),
+        );
+        let conv = v["conv"].as_str().unwrap().to_string();
+        post(
+            &srv,
+            "/agent/send",
+            &json!({"conv": conv, "text": "write a caption"}),
+        );
+        let evs = wait_idle(&srv, &conv);
+        assert_eq!(evs.last().unwrap()["text"], "Played with the fader.");
+        let body = &llama.bodies("/v1/chat/completions")[0];
+        assert_eq!(
+            body["lora"],
+            json!([{"id": 0, "scale": 0.7}, {"id": 1, "scale": 0.0}])
+        );
+        assert!(
+            srv._mock.bodies("/api/chat").is_empty(),
+            "Ollama was not asked"
+        );
+        // a band with no faders stays on Ollama
+        let (_, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "band": "dev-team"}),
+        );
+        let conv = v["conv"].as_str().unwrap().to_string();
+        post(&srv, "/agent/send", &json!({"conv": conv, "text": "hi"}));
+        let evs = wait_idle(&srv, &conv);
+        assert_eq!(evs.last().unwrap()["text"], "Played on Ollama.");
+        // the faders are read at every request: moved while running, heard on the next answer
+        std::fs::write(
+            srv.cfg.data_dir.join("mix/faders.json"),
+            r#"{"social-media":[{"id":0,"scale":0.2}]}"#,
+        )
+        .unwrap();
+        let (_, v) = post(
+            &srv,
+            "/agent/new",
+            &json!({"mode": "guest", "band": "social-media"}),
+        );
+        let conv = v["conv"].as_str().unwrap().to_string();
+        post(&srv, "/agent/send", &json!({"conv": conv, "text": "again"}));
+        wait_idle(&srv, &conv);
+        assert_eq!(
+            llama.bodies("/v1/chat/completions")[1]["lora"][0]["scale"],
+            0.2
+        );
     }
 }

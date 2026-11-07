@@ -1,13 +1,14 @@
 <!doctype html>
-<html lang="en" data-theme="charcoal">
+<html lang="en" data-theme="system">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#1b1a1b">
 <title>Perennos Tempo Room</title>
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-64.png" type="image/png">
 <link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/tempo-theme.css">
 <link rel="stylesheet" href="/app.css">
 <script type="module" src="/app.mjs"></script>
 </head>
@@ -16,13 +17,13 @@
   <header class="top">
     <div class="l">
       <button class="back" id="back" type="button" aria-label="Back to rooms" hidden>‹</button>
-      <span class="brand">tempo</span>
+      <span class="tt-brand"><span class="tt-ins" data-insignia><i class="tt-led"></i></span><span class="tt-wm" role="img" aria-label="perennos"></span><b>tempo</b></span>
       <span class="seg auto"><b>ROOM</b></span>
       <span class="sep" id="room-sep" hidden>·</span>
       <span class="seg" id="room-crumb" hidden><b id="room-title"></b></span>
     </div>
     <div class="r">
-      <button class="seg ghost" id="theme" type="button" title="Theme: charcoal, ink or paper"><i>theme</i></button>
+      <button class="seg ghost" id="theme" type="button" title="Theme: system, light or dark (click to change)" aria-label="Theme"><i>system</i></button>
       <span class="seg live off" id="livebox" title="Live updates"><i class="dot" id="dot"></i><b id="livestate">OFF</b></span>
     </div>
   </header>
@@ -49,16 +50,17 @@
   </aside>
 
   <main class="stage" id="stage">
+    <canvas class="stagefx" id="field" aria-hidden="true"></canvas>
     <section class="join" id="join" hidden>
-      <div class="join-box">
-        <p class="lbl">Perennos Tempo Room</p>
-        <h1>Come on in.</h1>
+      <div class="join-box tt-stagger">
+        <div class="art"><span class="tt-ins hero tilt" data-insignia><i class="tt-led"></i></span></div>
+        <p class="tt-kicker">Perennos Tempo Room</p>
+        <h1>Come on <em>in.</em></h1>
         <p class="sub">A private room where people talk, and Perennos Tempo answers when you write <b>@tempo</b>. Ask whoever runs it for the key to the room (an invite code): codes work once and expire. Already in a room and on a new device? Ask for a sign-in code instead; it needs no name.</p>
         <form id="join-form" class="join-form">
-          <label class="lbl" for="join-code">Invite or sign-in code</label>
-          <input id="join-code" class="field mono" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX" maxlength="20">
-          <label class="lbl" for="join-name">Your name in the room (not for a sign-in code)</label>
-          <input id="join-name" class="field" type="text" autocomplete="nickname" maxlength="32" placeholder="Mia">
+          <div class="tt-field"><input id="join-code" class="mono" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder=" " maxlength="20"><label for="join-code">Invite or sign-in code</label></div>
+          <div class="tt-field"><input id="join-name" type="text" autocomplete="nickname" maxlength="32" placeholder=" "><label for="join-name">Your name in the room</label></div>
+          <p class="hint">A sign-in code does not need a name.</p>
           <button class="btn go wide" type="submit">Join the room</button>
           <p class="err" id="join-err" role="alert"></p>
         </form>
@@ -100,8 +102,9 @@
     </section>
 
     <section class="empty-stage" id="empty-stage">
-      <div>
-        <p class="lbl">Perennos Tempo Room</p>
+      <div class="tt-stagger">
+        <div class="art"><span class="tt-ins hero tilt" data-insignia><i class="tt-led"></i></span></div>
+        <p class="tt-kicker">Perennos Tempo Room</p>
         <h1 id="empty-title">Pick a room.</h1>
         <p class="sub" id="empty-sub">Mention <b>@tempo</b> in any message and Perennos Tempo answers in the thread.</p>
       </div>
