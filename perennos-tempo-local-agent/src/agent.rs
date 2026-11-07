@@ -1379,7 +1379,7 @@ mod tests {
         let r = a
             .turn(
                 &mut conv,
-                "/soundcheck --no-model --sarif out.sarif",
+                "/soundcheck --scanners-only --sarif out.sarif",
                 &mut VecSink::default(),
             )
             .unwrap();
@@ -1389,7 +1389,7 @@ mod tests {
         let r = a
             .turn(
                 &mut conv,
-                &format!("/soundcheck --no-model --sarif {}", outside.display()),
+                &format!("/soundcheck --scanners-only --sarif {}", outside.display()),
                 &mut VecSink::default(),
             )
             .unwrap();

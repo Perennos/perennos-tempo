@@ -34,7 +34,7 @@ fn tool_definition() -> Value {
                 "all": {"type": "string", "description": "Audit every file under this folder, in pieces."},
                 "focus": {"type": "string", "description": "What to pay special attention to."},
                 "verbose": {"type": "boolean", "description": "Also list findings the second listen set aside."},
-                "no_model": {"type": "boolean", "description": "Scanners only; no model is asked."},
+                "scanners_only": {"type": "boolean", "description": "Skip the model passes on purpose; only the scanners run."},
                 "format": {"type": "string", "enum": ["markdown", "json"], "description": "Report format. Default markdown."}
             }
         },
@@ -108,7 +108,7 @@ impl Server<'_> {
         }
         opts.focus = Self::arg(args, "focus").unwrap_or("").to_string();
         opts.verbose = Self::flag(args, "verbose");
-        opts.no_model = Self::flag(args, "no_model");
+        opts.scanners_only = Self::flag(args, "scanners_only");
         let json = Self::arg(args, "format") == Some("json");
         Ok((
             Cli {
@@ -273,8 +273,8 @@ mod tests {
         let r = talk(
             &server,
             &[
-                call(json!({"no_model": true})),
-                call(json!({"no_model": true, "format": "json"})),
+                call(json!({"scanners_only": true})),
+                call(json!({"scanners_only": true, "format": "json"})),
             ],
         );
         let text = |v: &Value| {
@@ -324,7 +324,7 @@ mod tests {
         let r = talk(
             &server,
             &[
-                call(json!({"path": "..", "no_model": true})),
+                call(json!({"path": "..", "scanners_only": true})),
                 call(json!({"patch": "../../etc/passwd"})),
                 call(json!({"staged": true, "base": "main"})),
                 json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "other"}}),

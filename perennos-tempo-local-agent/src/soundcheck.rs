@@ -239,6 +239,9 @@ pub struct Report {
     pub files: usize,
     pub chunks: usize,
     pub model_calls: usize,
+    /// Set when the model passes were meant to run and did not (the whole sentence for the
+    /// report). The command line then exits 2.
+    pub model_down: Option<String>,
     /// Small human touches for the Markdown report only.
     pub flourishes: Vec<String>,
 }
@@ -273,7 +276,7 @@ pub struct Options {
     /// Show what the second listen set aside.
     pub verbose: bool,
     /// Scanners only: no model is asked.
-    pub no_model: bool,
+    pub scanners_only: bool,
     /// Only what changed since the last soundcheck.
     pub encore: bool,
     /// Where the last soundcheck left its note (command line and chat only).
@@ -288,7 +291,7 @@ impl Default for Options {
             source: Source::WorkingTree,
             focus: String::new(),
             verbose: false,
-            no_model: false,
+            scanners_only: false,
             encore: false,
             memory: None,
             chunk_chars: 16000,
@@ -553,6 +556,10 @@ fn gather_all(cwd: &Path, target: &Path) -> Result<Gathered, String> {
 /// Anything that can answer a system and user message with text. The real one is Ollama.
 pub trait Llm {
     fn ask(&self, system: &str, user: &str) -> Result<String, String>;
+    /// Where the model lives, for messages ("http://127.0.0.1:11434").
+    fn describe(&self) -> String {
+        String::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -582,6 +589,10 @@ impl<'a> OllamaLlm<'a> {
 }
 
 impl Llm for OllamaLlm<'_> {
+    fn describe(&self) -> String {
+        self.cfg.ollama_url.clone()
+    }
+
     fn ask(&self, system: &str, user: &str) -> Result<String, String> {
         let messages = [
             json!({"role": "system", "content": system}),
@@ -773,6 +784,8 @@ struct Listener<'a> {
     llm: &'a dyn Llm,
     calls: usize,
     strikes: usize,
+    /// Replies that fit the schema. If this stays 0 the model passes did not really run.
+    useful: usize,
 }
 
 impl Listener<'_> {
@@ -802,12 +815,17 @@ impl Listener<'_> {
     ) -> Result<T, AskError> {
         let first = self.ask(system, user)?;
         let why = match parse(&first) {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                self.useful += 1;
+                return Ok(v);
+            }
             Err(why) => why,
         };
         let again = format!("{user}\n\nYour previous reply could not be used: {why}. Reply again with only the JSON object described in the instructions, and nothing else.");
         let second = self.ask(system, &again)?;
-        parse(&second).map_err(AskError::Invalid)
+        let parsed = parse(&second).map_err(AskError::Invalid)?;
+        self.useful += 1;
+        Ok(parsed)
     }
 }
 
@@ -885,6 +903,8 @@ struct ModelResult {
     notes: Vec<String>,
     /// Some part of the listening could not finish, so "all clear" would be a guess.
     incomplete: bool,
+    /// The model passes did not run at all: the sentence for the report.
+    down: Option<String>,
 }
 
 /// One piece through one lens.
@@ -961,6 +981,7 @@ fn listen(
         llm,
         calls: 0,
         strikes: 0,
+        useful: 0,
     };
     let (chunks, cut) = diff::chunk(files, opts.chunk_chars);
     let mut res = ModelResult {
@@ -969,6 +990,7 @@ fn listen(
         calls: 0,
         notes: vec![],
         incomplete: false,
+        down: None,
     };
     if cut > 0 {
         res.notes.push(format!("{cut} very long hunk(s) were cut before the model saw them; the scanners saw all of it."));
@@ -976,6 +998,7 @@ fn listen(
     }
     let mut found: Vec<Finding> = vec![];
     let mut failures: Vec<String> = vec![];
+    let mut engine_failed = false;
     'listening: for (i, chunk) in chunks.iter().enumerate() {
         for lens in LENSES {
             if l.silent() {
@@ -989,7 +1012,10 @@ fn listen(
             ));
             match lens_pass(&mut l, lens, chunk, &opts.focus, &at) {
                 Ok(mut f) => found.append(&mut f),
-                Err(AskError::Engine(e)) => failures.push(format!("{}: {e}", lens.label())),
+                Err(AskError::Engine(e)) => {
+                    engine_failed = true;
+                    failures.push(format!("{}: {e}", lens.label()));
+                }
                 Err(AskError::Invalid(e)) => failures.push(format!(
                     "{} gave an unusable answer twice ({e})",
                     lens.label()
@@ -1045,6 +1071,19 @@ fn listen(
         }
     }
     res.calls = l.calls;
+    if l.calls > 0 && l.useful == 0 {
+        let url = llm.describe();
+        let at = if url.is_empty() {
+            String::new()
+        } else {
+            format!(" at {url}")
+        };
+        res.down = Some(if engine_failed {
+            format!("Only the scanners ran: Ollama wasn't answering{at}. Start it and run again, or pass --scanners-only to accept a scanner-only check.")
+        } else {
+            format!("Only the scanners ran: the model{at} gave no usable answers. Try another model with --model NAME, or pass --scanners-only to accept a scanner-only check.")
+        });
+    }
     res
 }
 
@@ -1162,7 +1201,7 @@ pub fn flourishes(
 // ------------------------------------------------------------------ the whole soundcheck
 
 /// Run a soundcheck on the change described by `opts`, from `cwd`. With no `llm` (or
-/// `no_model`) only the scanners listen.
+/// `scanners_only`) only the scanners listen.
 pub fn soundcheck(
     opts: &Options,
     cwd: &Path,
@@ -1197,11 +1236,12 @@ pub fn soundcheck(
         calls: 0,
         notes: vec![],
         incomplete: false,
+        down: None,
     };
-    match llm.filter(|_| !opts.no_model && !files.is_empty()) {
+    match llm.filter(|_| !opts.scanners_only && !files.is_empty()) {
         Some(llm) => model = listen(llm, &g, &files, opts, &scanned, progress),
-        None if opts.no_model => {
-            notes.push("Scanners only: no model was asked (--no-model).".into())
+        None if opts.scanners_only => {
+            notes.push("Scanners only: no model was asked (--scanners-only).".into())
         }
         None => {}
     }
@@ -1237,6 +1277,7 @@ pub fn soundcheck(
         files: files.len(),
         chunks: chunks.len(),
         model_calls: model.calls,
+        model_down: model.down,
         flourishes: flourishes(&files, standing, local_moment(), opts.encore),
     })
 }
@@ -1262,12 +1303,13 @@ OPTIONS:
     --sarif FILE        also write SARIF 2.1.0 (for GitHub code scanning) to FILE
     --fail-on LEVEL     exit 1 when a finding at LEVEL or worse stands (low|medium|high|critical)
     --verbose           also show findings the second listen set aside
-    --no-model          scanners only; no model is asked
+    --scanners-only     skip the model passes on purpose (fast checks); the exit code follows --fail-on
     --model NAME        use this Ollama model first
     --config PATH       the agent's JSON config
     -h, --help          this text
 
-Exit codes: 0 fine, 1 a finding reached --fail-on, 2 the soundcheck could not run.
+Exit codes: 0 fine, 1 a finding reached --fail-on, 2 the full check could not run (for example
+Ollama is not answering; --scanners-only is the way to ask for a scanner-only check).
 Nothing leaves this computer; the only network call is to your own Ollama.
 ";
 
@@ -1320,7 +1362,7 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         match a.as_str() {
             "--json" => cli.json = true,
             "--verbose" => cli.opts.verbose = true,
-            "--no-model" => cli.opts.no_model = true,
+            "--scanners-only" | "--no-model" => cli.opts.scanners_only = true,
             "--encore" => cli.opts.encore = true,
             "-h" | "--help" => cli.help = true,
             "--sarif" => cli.sarif = Some(value("--sarif")?.into()),
@@ -1383,6 +1425,13 @@ pub fn run_cli(
             let _ = writeln!(err, "error: {e}");
             return 2;
         }
+    }
+    if report.model_down.is_some() {
+        let _ = writeln!(
+            err,
+            "error: could not run the full check (the model passes did not run); see the report"
+        );
+        return 2;
     }
     match cli.fail_on {
         Some(level) if report.reaches(level) => 1,
@@ -1492,7 +1541,7 @@ mod tests {
             }
             None => soundcheck(
                 &Options {
-                    no_model: true,
+                    scanners_only: true,
                     ..opts
                 },
                 dir,
@@ -1569,6 +1618,7 @@ mod tests {
             llm: &llm,
             calls: 0,
             strikes: 0,
+            useful: 0,
         };
         let got = l.ask_checked("sys", "user", parse_findings);
         assert!(got.is_ok_and(|f| f.len() == 1));
@@ -1590,6 +1640,7 @@ mod tests {
             llm: &llm,
             calls: 0,
             strikes: 0,
+            useful: 0,
         };
         assert!(matches!(
             l.ask_checked("sys", "user", parse_findings),
@@ -2033,17 +2084,17 @@ mod tests {
     #[test]
     fn exit_codes_follow_fail_on() {
         let d = eval_repo(); // one scanner finding at high
-        let (code, out, _) = cli(&["--no-model"], &d);
+        let (code, out, _) = cli(&["--scanners-only"], &d);
         assert_eq!(code, 0, "without --fail-on the exit code is 0");
         assert!(out.contains("Feedback in the monitors: fix these first."));
-        assert_eq!(cli(&["--no-model", "--fail-on", "high"], &d).0, 1);
-        assert_eq!(cli(&["--no-model", "--fail-on", "medium"], &d).0, 1);
-        assert_eq!(cli(&["--no-model", "--fail-on", "low"], &d).0, 1);
-        assert_eq!(cli(&["--no-model", "--fail-on", "critical"], &d).0, 0);
+        assert_eq!(cli(&["--scanners-only", "--fail-on", "high"], &d).0, 1);
+        assert_eq!(cli(&["--scanners-only", "--fail-on", "medium"], &d).0, 1);
+        assert_eq!(cli(&["--scanners-only", "--fail-on", "low"], &d).0, 1);
+        assert_eq!(cli(&["--scanners-only", "--fail-on", "critical"], &d).0, 0);
 
         let clean = quiet_repo();
-        assert_eq!(cli(&["--no-model", "--fail-on", "low"], &clean).0, 0);
-        let (code, _, err) = cli(&["--no-model"], &tmpdir("sc-plain"));
+        assert_eq!(cli(&["--scanners-only", "--fail-on", "low"], &clean).0, 0);
+        let (code, _, err) = cli(&["--scanners-only"], &tmpdir("sc-plain"));
         assert_eq!(code, 2);
         assert!(err.contains("not a git repository"));
     }
@@ -2074,7 +2125,7 @@ mod tests {
     fn json_and_sarif_are_plain_and_complete() {
         let d = eval_repo();
         write(&d, ".env", "A=1\n");
-        let (_, out, _) = cli(&["--no-model", "--json", "--sarif", "out.sarif"], &d);
+        let (_, out, _) = cli(&["--scanners-only", "--json", "--sarif", "out.sarif"], &d);
         let v: Value = serde_json::from_str(&out).expect("--json prints JSON and nothing else");
         assert_eq!(v["verdict"], "needs_changes");
         let first = &v["findings"][0];
@@ -2285,5 +2336,68 @@ mod tests {
         }
         assert_eq!(Verdict::Ready.headline(), "All clear. Ready to play.");
         assert!(Verdict::NeedsHumanLook.plain().contains("human look"));
+    }
+
+    #[test]
+    fn when_the_model_passes_could_not_run_the_cli_exits_2_and_says_so() {
+        let d = eval_repo();
+        let mut cfg = Config::defaults(Some(tmpdir("sc-data").to_string_lossy().into_owned()));
+        cfg.ollama_url = "http://127.0.0.1:1".into();
+        cfg.models = vec!["m".into()];
+        cfg.retries = 0;
+        let llm = OllamaLlm::new(&cfg, cfg.models.clone());
+        let ask = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = run_cli(
+                &parse_args(&args).unwrap(),
+                &d,
+                Some(&llm),
+                &mut out,
+                &mut err,
+            );
+            (
+                code,
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        };
+        let (code, out, err) = ask(&[]);
+        assert_eq!(code, 2, "even with no --fail-on");
+        assert!(out.contains("Only the scanners ran: Ollama wasn't answering at http://127.0.0.1:1. Start it and run again, or pass --scanners-only to accept a scanner-only check."), "{out}");
+        assert!(
+            out.contains("eval"),
+            "the scanner findings are still reported"
+        );
+        assert!(err.contains("could not run the full check"));
+        // a finding that reaches --fail-on does not turn 2 into 1
+        assert_eq!(ask(&["--fail-on", "high"]).0, 2);
+        // JSON says it too
+        let (_, json_out, _) = ask(&["--json"]);
+        let v: Value = serde_json::from_str(&json_out).unwrap();
+        assert_eq!(v["full_check"], false);
+
+        // --scanners-only is the way to ask for exactly that; the exit code follows --fail-on
+        let (code, out, _) = ask(&["--scanners-only"]);
+        assert_eq!(code, 0);
+        assert!(!out.contains("Only the scanners ran"));
+        assert!(out.contains("Scanners only: no model was asked (--scanners-only)."));
+        assert_eq!(ask(&["--scanners-only", "--fail-on", "high"]).0, 1);
+        assert_eq!(ask(&["--scanners-only", "--fail-on", "critical"]).0, 0);
+    }
+
+    #[test]
+    fn a_model_that_only_gives_unusable_answers_also_means_the_full_check_did_not_run() {
+        let m = model(|_, _| "Ready".to_string());
+        let r = run(&quiet_repo(), Options::default(), Some(&m)).unwrap();
+        let why = r.model_down.expect("no listen produced anything usable");
+        assert!(why.starts_with("Only the scanners ran: the model at http://"));
+        assert!(why.contains("--scanners-only"));
+        // while a model that answers (even with no findings) is a full check
+        let m = model(|_, _| empty_reply());
+        assert!(run(&quiet_repo(), Options::default(), Some(&m))
+            .unwrap()
+            .model_down
+            .is_none());
     }
 }

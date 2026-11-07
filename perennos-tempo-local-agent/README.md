@@ -102,7 +102,7 @@ tempo-local-agent soundcheck --all src        # audit a whole folder, in pieces
 tempo-local-agent soundcheck --encore         # only what changed since the last soundcheck
 ```
 
-Options: `--json`, `--sarif FILE`, `--fail-on low|medium|high|critical`, `--verbose`, `--no-model` (scanners only), `--model NAME`, `--config PATH`. Words that are not options tell the model what to pay attention to. `review` works as an alias for `soundcheck`, and `/soundcheck` (or `/review`) does the same in the chat.
+Options: `--json`, `--sarif FILE`, `--fail-on low|medium|high|critical`, `--verbose`, `--scanners-only` (skip the model passes on purpose, for fast checks), `--model NAME`, `--config PATH`. Words that are not options tell the model what to pay attention to. `review` works as an alias for `soundcheck`, and `/soundcheck` (or `/review`) does the same in the chat.
 
 ### What it checks
 
@@ -147,7 +147,7 @@ tempo-local-agent soundcheck --base origin/main --fail-on high || exit 1
 
 ### CI and code scanning
 
-The exit code is 0 when all is well, 1 when a finding at the `--fail-on` level or worse stands, and 2 when the soundcheck could not run. On a runner that has Ollama (or with `--no-model` for the scanners alone):
+The exit code is 0 when all is well, 1 when a finding at the `--fail-on` level or worse stands, and 2 when the full check could not run, for example when Ollama is not answering (the report then says "Only the scanners ran"; pass `--scanners-only` to accept a scanner-only check, and the exit code then follows `--fail-on`). On a runner that has Ollama (or with `--scanners-only` for the scanners alone):
 
 ```yaml
 - run: tempo-local-agent soundcheck --base origin/${{ github.base_ref }} --fail-on high --sarif soundcheck.sarif

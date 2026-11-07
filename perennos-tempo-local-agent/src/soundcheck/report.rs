@@ -71,6 +71,9 @@ pub fn markdown(r: &Report, verbose: bool) -> String {
         r.files,
         if r.files == 1 { "" } else { "s" },
     );
+    if let Some(why) = &r.model_down {
+        out.push_str(&format!("**{why}**\n\n"));
+    }
     if r.findings.is_empty() {
         out.push_str("No findings.\n\n");
     } else {
@@ -144,6 +147,8 @@ pub fn json(r: &Report) -> Value {
         "files": r.files,
         "chunks": r.chunks,
         "model_calls": r.model_calls,
+        "full_check": r.model_down.is_none(),
+        "model_down": r.model_down,
         "findings": r.findings.iter().map(finding_json).collect::<Vec<_>>(),
         "not_confirmed": r.dropped.iter().map(finding_json).collect::<Vec<_>>(),
         "notes": r.notes,
