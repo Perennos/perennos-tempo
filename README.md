@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Perennos/perennos-tempo/releases"><img alt="Download for Windows" src="https://img.shields.io/badge/download-Windows-ff5a2a?style=flat-square&labelColor=1b1a1b"></a>
+  <a href="https://github.com/Perennos/perennos-tempo/releases/latest"><img alt="Download for Windows" src="https://img.shields.io/badge/download-Windows-ff5a2a?style=flat-square&labelColor=1b1a1b"></a>
   <a href="https://github.com/Perennos/perennos-tempo/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Perennos/perennos-tempo/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="Licence: PolyForm Shield 1.0.0" src="https://img.shields.io/badge/licence-PolyForm%20Shield%201.0.0-efe9dc?style=flat-square&labelColor=1b1a1b"></a>
   <img alt="Local first" src="https://img.shields.io/badge/local-first-a9aaad?style=flat-square&labelColor=1b1a1b">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Perennos/perennos-tempo/releases"><b>Download</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://github.com/Perennos/perennos-tempo/releases/latest"><b>Download</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
   <a href="SETUP-GUIDE.md"><b>Setup guide</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
   <a href="PROFILES-README.md"><b>Profiles</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
   <a href="https://perennos.com/tempo"><b>perennos.com/tempo</b></a>
@@ -90,12 +90,20 @@ Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.
 
 ## Quick start
 
-**The apps, from a release.** Download the file for your computer from the [latest release](https://github.com/Perennos/perennos-tempo/releases) and check it against `SHA256SUMS.txt` there:
+**The apps, from a release.** Open the [latest release](https://github.com/Perennos/perennos-tempo/releases/latest) and download the file for your computer:
 
-- **Windows:** open `PerennosTempo-Setup-<version>-x64-source-available.exe`.
-- **macOS and Linux:** unpack `perennos-tempo-source-available-<version>-<target>.tar.gz` and run `./install.sh`. On Debian and Ubuntu, `sudo apt install ./<file>.deb` works too.
+| Computer | File |
+|---|---|
+| Windows 10 and 11 (x64) | `PerennosTempo-Setup-2.0.0-x64-source-available.exe` |
+| macOS, Apple silicon | `perennos-tempo-source-available-2.0.0-aarch64-apple-darwin.tar.gz` |
+| Linux (x86_64) | `perennos-tempo-source-available-2.0.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Debian and Ubuntu (x86_64) | `perennos-tempo-source-available_2.0.0-1_amd64.deb` |
 
-Then run `tempo-launch setup`. It shows the exact plan and the free space, and downloads nothing large until you say yes. The gateway's own Windows desktop installer, `PerennosTempo-Setup-unsigned.exe`, is in the v1.0.0 release.
+- **Windows:** download the Setup file and double-click it. The installer is not code-signed, so Windows may show "Windows protected your PC": click **More info**, then **Run anyway**.
+- **macOS and Linux:** unpack the `.tar.gz` and run `./install.sh`. On Debian and Ubuntu, `sudo apt install ./<file>.deb` works too.
+- **Check a download** (optional): compare its SHA-256 with `SHA256SUMS.txt` on the release page, or run `gh attestation verify <file> --repo Perennos/perennos-tempo`, which checks that this repository's release workflow built it.
+
+Then run `tempo-launch setup`. It shows the exact plan and the free space, and downloads nothing large until you say yes.
 
 **From source (headless).** With Python 3.12 or newer, a prepared data folder and a local engine:
 
@@ -122,9 +130,9 @@ The default profile is local and has a zero hosted cost cap. Provider attachment
 
 `TEMPO_HOME` separates one workspace's data; it is not an operating-system security boundary. Use a separate OS account or machine for separate owners. The API binds to `127.0.0.1`; this release does not provide a shared office server or LAN authorization. Receipts record routing and outcome metadata; they are not proof that a response is correct.
 
-Each [release](https://github.com/Perennos/perennos-tempo/releases) records its tested Windows image, installer checksum and acceptance results. A source snapshot alone does not establish a working installation. The installer is unsigned; keep Windows security protections enabled. Multi-user security and shared office deployment are outside this core release.
+The installer is not code-signed; keep Windows security protections enabled. Check downloads against `SHA256SUMS.txt` on the [release page](https://github.com/Perennos/perennos-tempo/releases/latest). Multi-user security and shared office deployment are outside this release.
 
-The Windows installer bundles an app-local Python/Tk runtime and preserves its upstream license. Models, Ollama and Python dependencies download during first setup, which needs network access and several gigabytes of free storage. The source export contains no runtime binaries or model weights.
+Models and Ollama are fetched only after you say yes (`tempo-launch setup`), and need network access and several gigabytes of free storage. The repository contains no runtime binaries or model weights.
 
 This public core leaves out private onboarding interviews, customer or office profile packs, vertical-specific setup choices, desks and approvals UX, owner configuration and history, owner priors, benchmark data, model weights, the private resident adapter and optional workspace integrations. The export manifest records its exact file set and exclusions. See also [Deployment Options](DEPLOYMENT-OPTIONS.md) and the [Buyer Guide](BUYER-GUIDE.md).
 
