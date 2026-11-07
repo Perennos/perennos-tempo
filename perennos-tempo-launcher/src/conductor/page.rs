@@ -254,6 +254,21 @@ fn band_block(v: &BandView, engines: &[Engine]) -> String {
 
 /// The page for `bands` (one, or all), with the engines and apps as they are now.
 pub fn render(bands: &[BandView], engines: &[Engine], apps: &[AppState]) -> String {
+    render_with(bands, engines, apps, "")
+}
+
+/// `render`, with the fleet section (`fleet::page::section`) when there is one.
+pub fn render_with(
+    bands: &[BandView],
+    engines: &[Engine],
+    apps: &[AppState],
+    fleet: &str,
+) -> String {
+    let fleet = if fleet.is_empty() {
+        String::new()
+    } else {
+        format!("<h2>Fleet</h2>\n{fleet}\n")
+    };
     let title = match bands {
         [one] => format!("{} - Tempo Conductor", html_escape(&one.band.name)),
         _ => "Tempo Conductor".to_string(),
@@ -285,7 +300,7 @@ pub fn render(bands: &[BandView], engines: &[Engine], apps: &[AppState]) -> Stri
         r#"{top}<h1>{heading}</h1>
 <p class="lede">The Conductor raises the baton. Here is every engine it can cue, every band it leads, what they played last, and which apps are awake.</p>
 
-<h2>Engines</h2>
+{fleet}<h2>Engines</h2>
 <p class="small">{up} of {total} up. Heavy parts go to the strongest engine that has their model, light ones to the quickest.</p>
 <div class="cards">{engine_cards}</div>
 
@@ -331,7 +346,12 @@ pub fn write(
             runs: recent_runs(ctx, b),
         })
         .collect();
-    let html = render(&views, engines, apps);
+    let html = render_with(
+        &views,
+        engines,
+        apps,
+        &crate::fleet::page::section(&crate::fleet::store::Paths::of(ctx), true),
+    );
     write_atomic(&file, html.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", file.display()))?;
     Ok(file)

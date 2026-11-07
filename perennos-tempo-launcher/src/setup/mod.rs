@@ -62,7 +62,8 @@ pub fn write_welcome(
     exe: &std::path::Path,
 ) -> Option<PathBuf> {
     let page = ctx.home.join("welcome.html");
-    write_atomic(&page, welcome::welcome_page(m, plan, exe).as_bytes()).ok()?;
+    let html = welcome::welcome_page_with(m, plan, exe, &crate::fleet::heading_now(ctx));
+    write_atomic(&page, html.as_bytes()).ok()?;
     Some(page)
 }
 

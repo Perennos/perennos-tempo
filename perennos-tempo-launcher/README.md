@@ -39,6 +39,7 @@ tempo-launch conductor apply-proposal [NAME]
                              shows the band your AI proposed; sets it up only after y/N
 tempo-launch learn           one learning pass over the vault (what the hourly task runs)
 tempo-launch schedule [--daily | --remove | --print]
+tempo-launch fleet           your own computers: list, scan, add, remove, ssh, check, setup, serve, send, inbox, ping, page
 tempo-launch logs            opens the logs folder
 ```
 
@@ -86,6 +87,16 @@ The Conductor ties the owner to their workflows and to their engines. A *band* i
 - **`conductor page`** writes `<home>/conductor.html` (or `<home>/bands/<name>/band.html` for one band): the engines (up or down, with models), the bands (members with instrument, role and engine, flows, schedules), the last runs with links to their notes, and the apps (agent, Vault, Room, Studio) running or not. Static, with the same strict Content-Security-Policy as the welcome page, no script, and a layout that fits a phone.
 - **`conductor engines`** reads `ollama_url`, `ollama_fallbacks` and `hosts` from the agent's settings and asks each engine for `/api/tags` (two seconds, private, tailnet and loopback addresses only; any other is refused unread). The Conductor casts heavy members on the strongest reachable engine that has their model and light ones on the quickest, keeps the pick as `engine` in band.json, re-checks at every run, and notes a fallback in the run's `Index` note. When the agent's health says `"engines": true` the Conductor sends the pick as the conversation's `engine`, and the run's `Index` note says "played on <engine>" with the engine the agent reports; the agent moves a part off that engine only when it cannot be reached or lacks the model. An older agent cannot pin (it takes a model, then fails over `ollama_url` then `ollama_fallbacks`), so there the pick is only the engine the Conductor expects to answer, and the note keeps saying the agent decided.
 - **The AI's two tools** in `tempo-launch mcp`: `conductor_templates` (read-only) and `conductor_propose`, which writes `<home>/bands/proposals/<name>.json`. The owner applies it with `conductor apply-proposal`, which shows the band in plain words, labels the AI's note as the AI's, and asks y/N (there is no `--yes`).
+
+## Tempo Fleet (`tempo-launch fleet`)
+
+Tempo knows your own computers and talks between them. Code: `src/fleet/`; the long version is in `docs/TEMPO-SETUP.md` under "Tempo Fleet".
+
+- **Heading.** The fleet page (`fleet page`) and the Conductor page show "One machine, one field." / "Three machines, one field.": the real count in words, never a stock line. Each machine shows live health from its heartbeats (CPU load, memory, models loaded, last heard) and its last ssh check; a switch is the exact command under it (the pages are static). `GET /fleet.json` on the messenger's loopback side gives the GUI the same facts.
+- **`fleet scan`** finds them: the /24 around each of this computer's own 10/8, 172.16/12 and 192.168/16 addresses, the peers `tailscale status --json` lists (the 100.64/10 range is never swept), and mDNS. A 300 ms connect to Ollama (11434), the agent (8765) and the messenger (8770), at most 64 at once, then one public GET. Never a public range. It explains itself and asks y/N the first time (`--yes`); it changes nothing.
+- **`fleet add|remove|enable|disable`** choose the fleet and write the agent's `ollama_fallbacks` and `hosts` with the `link` private-address check and a backup in `<home>/trash/`. `fleet.json` keeps each machine. `tempo-launch mcp` gains `fleet_status` (read-only; labels, no names or addresses) and `fleet_propose` (applied by you with `fleet apply-proposal`).
+- **ssh, your way.** `fleet ssh|check|setup NAME` use the system `ssh` with `BatchMode=yes`, `ConnectTimeout=5` and `StrictHostKeyChecking=accept-new`: your keys and agent, and Tempo never asks for, types or stores a password or key. `fleet setup` shows the exact remote commands and asks y/N. `fleet hosts` lists your `~/.ssh/config` Host names.
+- **The messenger.** `fleet init` makes `<home>/fleet.key` (32 random bytes, 0600). `fleet serve` listens on private and tailnet addresses and 127.0.0.1 only (never 0.0.0.0); `start` and `schedule` keep it running when the fleet has more than one machine. Frames are length-prefixed with an HMAC-SHA256, a time and a nonce (replays and strangers are dropped), one persistent connection per peer, batched writes. Messages go through a SQLite (WAL) outbox and inbox, are retried with backoff and kept once by id, so nothing is lost when a laptop sleeps. Topics: `heartbeat`, `note`, `job`, `status`. `fleet send|inbox|ping` are the commands. On localhost: one message at a time p50 about 0.3 ms and p99 about 1.4 ms, in a debug build.
 
 ## Apps on other machines (`remote.json`)
 

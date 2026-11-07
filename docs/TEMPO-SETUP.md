@@ -259,6 +259,44 @@ What the agent allows: when its health says `"engines": true`, a conversation ca
 
 `tempo-launch mcp` has two more tools for the AI you already use: `conductor_templates` (read-only: the ready-made bands and the rules) and `conductor_propose`, which writes `<Tempo home>/bands/proposals/<name>.json` and returns the command for you. Nothing is set up until you run `tempo-launch conductor apply-proposal [NAME]`: it shows the band in plain words, shows the AI's note labelled as the AI's, and asks y/N (there is no `--yes`). A proposal may say `fast` or `heavy` for a member's model, or leave it out; Tempo fills in this computer's models when you apply it, and the Conductor picks each member's engine then (an `engine` written in a proposal is dropped). The proposal is checked strictly again when it is read.
 
+## Tempo Fleet: your own computers, talking
+
+Tempo knows the computers you own and talks between them. The heading of the fleet page and of the Conductor's Fleet section is never a stock line: it counts the machines you really have, in words ("One machine, one field.", "Three machines, one field."), this computer and every machine you left switched on.
+
+### Finding them: `tempo-launch fleet scan`
+
+What a scan does, in plain words. It looks at the addresses on this computer's own home or office networks (the /24 around each of its 10/8, 172.16/12 and 192.168/16 addresses), at the computers `tailscale status --json` lists when Tailscale is installed (the 100.64/10 range is never swept: only the peers it lists), and at mDNS (`_tempo._tcp`, `_ollama._tcp`). At each address it tries to open a connection, for 300 milliseconds, to Ollama's port (11434), the Tempo agent's (8765) and the fleet messenger's (8770), at most 64 at a time. Where something answers it reads one public page (`/api/tags`, or the agent's unkeyed health, or the messenger's `/hello`). It prints each computer with its address, its name (mDNS, tailscale, the messenger's own, or reverse DNS), what it runs (Ollama with its models and a rough class, a Tempo agent and its version) and whether it is already in the fleet.
+
+What it does not do. It never scans a public range, link-local addresses or the whole of 100.64/10. It sends no password and no file, and changes nothing. The first time it explains this and asks y/N (`--yes` skips the question). Finding a computer does not add it.
+
+### Choosing them: `fleet`, `add`, `remove`, `enable`, `disable`
+
+`tempo-launch fleet` lists the fleet. `fleet add ADDRESS|NAME [--role engine|agent|both] [--name NAME]` puts a computer in; an engine goes into the agent's `ollama_fallbacks` and `hosts` (so `delegate` can name it and the Conductor can cast on it), through the same private-address check as `tempo-launch link`, with the old settings copied to `<home>/trash/<date>/` first. A public address is refused and nothing is written. `fleet disable NAME` takes a computer out of the settings and out of the heading but keeps it listed; `fleet enable NAME` puts it back; `fleet remove NAME` forgets it. When `TEMPO_AGENT_CONFIG` names the settings file, Tempo leaves it alone and prints the lines to add. `<home>/fleet.json` holds each machine's name, address, role, enabled flag, last heard, last probe, last ssh check and last heartbeat, and the list of things this computer lets the others run.
+
+The AI you already use can see the fleet and propose changes through `tempo-launch mcp`: `fleet_status` (read-only: the count, and for each other computer a label such as `machine-2`, its role, whether it answers, its load and free memory; no names, no addresses) and `fleet_propose` (writes `<home>/fleet-proposal.json`). You apply a proposal with `tempo-launch fleet apply-proposal`, which shows the real names and asks y/N.
+
+### Reaching them over ssh, your way
+
+`fleet ssh NAME -- COMMAND` and `fleet check NAME` use the system `ssh` with `-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new`. They use your keys and your ssh agent. Tempo never asks for, types, reads or stores a password or a key; with `BatchMode` a missing key is an error message, not a prompt. A first host key is remembered, a changed one is refused. `fleet hosts` lists the `Host` names in `~/.ssh/config`, which are accepted as machine names.
+
+`fleet check NAME` reports the remote system, CPU threads, memory, graphics card (`nvidia-smi`, or `system_profiler` on a Mac; best effort), free disk, and whether `tempo-launch` and `ollama` are installed, with versions. The answer is kept in `fleet.json` and shown on the fleet page.
+
+`fleet setup NAME` shows the exact commands first and runs them only after a y/N (`--yes` skips the question): the fleet key goes over ssh's input (never on a command line), Ollama is made to listen on the machine's private address (`OLLAMA_HOST=<address>:11434`, as a systemd user service where there is one; otherwise it prints the steps), `tempo-launch setup --apply --yes` runs there (or it prints how to install Tempo), the messenger starts there, and the machine is linked here.
+
+### The messenger: `fleet serve`, `send`, `inbox`, `ping`
+
+`tempo-launch fleet init` makes the fleet key: 32 random bytes in `<home>/fleet.key`, readable only by you (mode 0600; on Windows an ACL that grants only you). `fleet setup` copies it to a computer over your ssh.
+
+`fleet serve` listens on this computer's private and tailnet addresses and on 127.0.0.1, never on 0.0.0.0. `tempo-launch start` starts it when the fleet has more than one machine, and `tempo-launch schedule` keeps it running (a crontab line or a Windows task that starts it every five minutes; it ends at once when one already runs; on a Mac `start` does it).
+
+Frames are length-prefixed over one persistent connection per peer: `length | HMAC-SHA256 | one JSON header line | raw body`. The HMAC (fleet key) covers the header and the body, and the header holds a millisecond time and a nonce. A frame is dropped, with no answer, when its HMAC is wrong, when its clock is more than two minutes off, when its nonce was already seen (a replay), or when it is addressed to someone else. A peer without the key gets nothing. Many frames go out in one write and their answers are read after, so a batch costs one round trip.
+
+Every message is written to a SQLite outbox (`<home>/fleet.db`, WAL) before anything is sent: `id, peer, topic, body, created, tries, delivered`. It is sent at once when the peer is up and retried with backoff (2, 4, 8 ... up to 300 seconds) when it is not, so nothing is lost when a laptop sleeps or this program restarts. The receiver keeps each id once (and answers a duplicate, so the sender stops), so a retry is never a second message. Topics: `heartbeat` (every 10 seconds: load, free memory, the models loaded, the queue depth, version; sent and forgotten, never queued; the Conductor page and the fleet page show it), `note` (text from one machine to another), `job` (the Conductor hands a member's step to the machine whose engine plays it, which runs it through its own agent; the answer comes back as `result`) and `status`.
+
+`fleet send NAME "text"`, `fleet inbox` and `fleet ping NAME` (a round trip in microseconds on the open connection) are the command line. `GET /fleet.json` on the messenger's port answers this computer only (the Host header must name 127.0.0.1 or localhost, so a web page cannot read it); `GET /hello` answers any private address with the computer's name, nothing else.
+
+Honest limits. Every computer holding the fleet key can speak as any name in the fleet: the key makes the fleet, not each computer's identity. A replayed frame is refused for the two minutes the clock allows, and the nonce list lives in memory, so right after a restart a replay inside that window is accepted by the transport, but a message is still stored once by its id. The fleet page is static; a switch is the command printed under a machine.
+
 ## Re-run it
 
 After a hardware change (more RAM, a new card), after adding models to the catalog, or after a new goal: `tempo-launch setup` shows what changed, `tempo-launch setup --apply` applies it. On each PC of a group, run it on that PC.

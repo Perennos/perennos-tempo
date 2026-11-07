@@ -13,8 +13,12 @@ path = "src/lib.rs"
 name = "tempo-launch"
 path = "src/main.rs"
 
-# std only: this program starts others and opens a browser, nothing more.
+# std first. Two crates, both for the fleet messenger: SQLite (bundled, so nothing is installed
+# beside Tempo) holds the durable outbox and inbox; getrandom is the operating system's random
+# source for the fleet key.
 [dependencies]
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+getrandom = "0.2"
 
 [profile.release]
 opt-level = "s"

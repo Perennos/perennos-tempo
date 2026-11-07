@@ -283,6 +283,24 @@ pub fn tools() -> Vec<J> {
             false,
         ),
         tool(
+            "fleet_status",
+            "The owner's fleet",
+            "How many computers the owner has in the fleet, in words, and for each other computer a label (machine-1, machine-2...), its role, whether it is in the fleet and answering, its load and free memory. No names and no addresses. Nothing is changed.",
+            none(),
+            &[],
+            true,
+        ),
+        tool(
+            "fleet_propose",
+            "Propose a fleet change",
+            "Write a proposed change to the owner's fleet for the owner to review: add computers by address (a home-network, tailnet or private address), and enable, disable or remove ones by the labels fleet_status gave. Nothing changes: it returns the command the owner runs (`tempo-launch fleet apply-proposal`), which shows the real names and asks y/N.",
+            schema(
+                r#"{"add":{"type":"array","items":{"type":"object","properties":{"addr":{"type":"string"},"name":{"type":"string"},"role":{"type":"string","enum":["engine","agent","both"]}},"required":["addr"]}},"enable":{"type":"array","items":{"type":"string"}},"disable":{"type":"array","items":{"type":"string"}},"remove":{"type":"array","items":{"type":"string"}},"note":{"type":"string","description":"One or two plain sentences for the owner: why."}}"#,
+            ),
+            &[],
+            false,
+        ),
+        tool(
             "conductor_templates",
             "Ready-made bands",
             "Tempo Conductor sets up bands for the owner: a small team of AI members for the owner's own workflow (a social media team, a release team, a study group...). This lists the ready-made bands with their members, roles and flows, and the rules a band must follow. Use it to design a band with the owner. Nothing is changed.",
@@ -344,6 +362,20 @@ impl Server<'_> {
                 Ok(format!(
                     "Proposal saved in the Tempo home folder as {file}. Nothing has been changed.\nTell the owner to run this in a terminal; it shows what would change and asks y/N:\n\n  {cmd}\n\nYou cannot apply it yourself.",
                     file = propose::PROPOSAL_FILE
+                ))
+            }
+            "fleet_status" => {
+                Ok(crate::fleet::status_facts(&crate::fleet::store::Paths::of(self.ctx)).pretty())
+            }
+            "fleet_propose" => {
+                let cmd = crate::fleet::write_proposal(
+                    &crate::fleet::store::Paths::of(self.ctx),
+                    args,
+                    args.str("note").unwrap_or(""),
+                    (self.now)(),
+                )?;
+                Ok(format!(
+                    "Fleet proposal saved in the Tempo home folder. Nothing has been changed.\nTell the owner to run this in a terminal; it shows what would change and asks y/N:\n\n  {cmd}\n\nYou cannot apply it yourself."
                 ))
             }
             "conductor_templates" | "band_templates" => {
@@ -594,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_six_tools_and_marks_the_read_only_ones() {
+    fn lists_the_tools_and_marks_the_read_only_ones() {
         let root = tmp("list");
         let ctx = ctx_in(&root);
         let host = pc();
@@ -614,6 +646,8 @@ mod tests {
                 "setup_plan",
                 "tempo_status",
                 "setup_propose",
+                "fleet_status",
+                "fleet_propose",
                 "conductor_templates",
                 "conductor_propose"
             ]
@@ -622,7 +656,10 @@ mod tests {
             let ro = x.get("annotations").unwrap().bool("readOnlyHint").unwrap();
             assert_eq!(
                 ro,
-                !matches!(x.str("name"), Some("setup_propose" | "conductor_propose")),
+                !matches!(
+                    x.str("name"),
+                    Some("setup_propose" | "fleet_propose" | "conductor_propose")
+                ),
                 "{:?}",
                 x.str("name")
             );
@@ -1051,6 +1088,61 @@ mod tests {
         );
         assert!(t.contains("not a schedule"), "{t}");
         assert!(!ctx.home.join("bands").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fleet_status_names_no_computer_and_fleet_propose_only_writes_a_proposal() {
+        let root = tmp("fleet");
+        let ctx = ctx_in(&root);
+        let p = crate::fleet::store::Paths::of(&ctx);
+        crate::fleet::store::update(&p, |f| {
+            f.me = "mainbox".into();
+            f.machines.push(crate::fleet::store::Machine::new(
+                "tower", "10.0.0.5", "engine",
+            ));
+        })
+        .unwrap();
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1_793_000_000,
+        };
+        let (t, err) = text_of(&rpc(&s, 1, "tools/call", r#"{"name":"fleet_status"}"#));
+        assert!(!err, "{t}");
+        assert!(
+            t.contains("Two machines, one field.") && t.contains("machine-1"),
+            "{t}"
+        );
+        for leak in ["tower", "10.0.0.5", "mainbox"] {
+            assert!(!t.contains(leak), "fleet_status leaks {leak}: {t}");
+        }
+        // a public address is refused; a private one only writes the proposal
+        let (t, err) = text_of(&rpc(
+            &s,
+            2,
+            "tools/call",
+            r#"{"name":"fleet_propose","arguments":{"add":[{"addr":"8.8.8.8"}]}}"#,
+        ));
+        assert!(err && t.contains("not a home-network"), "{t}");
+        let (t, err) = text_of(&rpc(
+            &s,
+            3,
+            "tools/call",
+            r#"{"name":"fleet_propose","arguments":{"add":[{"addr":"192.168.0.20","role":"engine"}],"disable":["machine-1"],"note":"it is the quiet one"}}"#,
+        ));
+        assert!(
+            !err && t.contains("tempo-launch fleet apply-proposal") && t.contains("cannot apply"),
+            "{t}"
+        );
+        assert!(p.file(crate::fleet::PROPOSAL_FILE).is_file());
+        assert_eq!(
+            crate::fleet::store::load(&p).machines.len(),
+            1,
+            "nothing was changed"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

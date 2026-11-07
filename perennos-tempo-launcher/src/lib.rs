@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod brand;
 pub mod conductor;
+pub mod fleet;
 pub mod home;
 pub mod setup;
 pub mod tempo_home;
@@ -92,6 +93,18 @@ usage: tempo-launch [command]
                     write and open the Conductor page: engines, bands, last runs, apps
   conductor apply-proposal [NAME]
                     show the band your AI proposed (see mcp) and set it up only after your y/N
+  fleet             your own computers: `fleet` lists them, with a heading that counts them in words
+  fleet scan [--yes]
+                    find them on your own networks (asks y/N the first time; private addresses only)
+  fleet add ADDRESS|NAME [--role engine|agent|both] [--name NAME]
+  fleet remove NAME | fleet enable NAME | fleet disable NAME
+                    choose which are in the fleet (writes the agent's settings, keeps a backup)
+  fleet ssh NAME -- COMMAND | fleet check NAME | fleet setup NAME [--yes] | fleet hosts
+                    reach one with your own ssh (BatchMode, nothing stored): run a command, look at it,
+                    or set it up (shows the commands first, asks y/N)
+  fleet init | fleet serve [--quiet] | fleet send NAME \"TEXT\" | fleet inbox | fleet ping NAME
+                    the messenger between your computers: a fleet key, signed frames, a durable outbox
+  fleet page        write and open the fleet page; fleet apply-proposal applies what your AI proposed
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1880,6 +1893,8 @@ pub enum Cmd {
     },
     /// `conductor ...` (also `band ...`): Tempo Conductor.
     Conductor(conductor::ConductorCmd),
+    /// `fleet ...`: the person's own computers.
+    Fleet(fleet::FleetCmd),
     Help,
     Version,
 }
@@ -2017,6 +2032,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             }
         }
         "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
+        "fleet" => Cmd::Fleet(fleet::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2083,6 +2099,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
             setup::mcp::run_stdio(ctx)
         }),
         Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
+        Cmd::Fleet(f) => Ok(fleet::run(ctx, f)),
         Cmd::Schedule {
             remove,
             print,
@@ -2388,6 +2405,7 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
             Err(p) => ctx.note(&format!("{}: {}", p.title, p.what)),
         }
     }
+    fleet::autostart(ctx);
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut failed = 0;
     for l in waiting {
@@ -2920,6 +2938,7 @@ fn schedule(ctx: &Ctx, remove: bool, print: bool, daily: bool) -> Result<i32, Pr
     };
     ctx.note(&format!("schedule: {done}"));
     println!("{done}");
+    fleet::schedule(ctx, &exe, remove);
     Ok(0)
 }
 

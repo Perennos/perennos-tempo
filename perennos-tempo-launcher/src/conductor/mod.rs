@@ -759,6 +759,10 @@ impl Chat for RealChat<'_> {
     }
 
     fn say_on(&self, engine: &str, model: &str, role: &str, text: &str) -> Result<Said, String> {
+        // an engine that is a fleet machine with its own Tempo plays the step itself
+        if let Some(r) = crate::fleet::jobs::try_remote(self.ctx, engine, model, role, text) {
+            return r;
+        }
         self.agent()?.say_on(engine, model, role, text)
     }
 }

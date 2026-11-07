@@ -64,7 +64,23 @@ pub fn code_command(exe: &Path) -> String {
     format!("claude mcp add {ENTRY_NAME} -- {} mcp", command_path(exe))
 }
 
+/// Step 6: the fleet, headed by the real number of machines.
+pub fn fleet_block(heading: &str) -> String {
+    let pre = |s: &str| format!("<pre>{}</pre>", html_escape(s));
+    format!(
+        "<h2>6. Your own computers</h2>\n<h3 class=\"bandname\">{}</h3>\n<p>Tempo can know every computer you own and talk between them. It looks for them on your own network only (never the internet) after you say yes, you choose which ones are in the fleet, and it can set one up over your own ssh. Nothing is sent anywhere else.</p>\n<p class=\"step\">Look for them (it explains what it does first and asks y/N):</p>\n{}<p class=\"step\">Add one, and see them all:</p>\n{}",
+        html_escape(heading),
+        pre("tempo-launch fleet scan"),
+        pre("tempo-launch fleet add <address or name>\ntempo-launch fleet page"),
+    )
+}
+
 pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
+    welcome_page_with(m, p, exe, &crate::fleet::heading(1))
+}
+
+/// `welcome_page`, with the fleet heading for the number of machines this person really has.
+pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str) -> String {
     let li = |items: Vec<String>| -> String {
         items
             .into_iter()
@@ -154,6 +170,8 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 {band_run}
 <p>Your own AI can design a band with you too: the setup helper from step 3 has <code>conductor_templates</code> (read-only) and <code>conductor_propose</code>, and you set a proposal up yourself with <code>tempo-launch conductor apply-proposal</code>.</p>
 
+{fleet}
+
 <p class="small">The longer plan, with sizes and licences, is in <code>setup.html</code> in the Tempo folder (<code>tempo-launch setup</code> shows it in the terminal). This page can be opened again with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
 {end}"#,
         top = brand::page_top("Welcome to Perennos Tempo", true, true),
@@ -181,5 +199,6 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
         ),
         band_run = pre("tempo-launch conductor run social-media weekly-plan\ntempo-launch conductor page"),
         band_engines = pre("tempo-launch conductor engines"),
+        fleet = fleet_block(fleet_heading),
     )
 }
