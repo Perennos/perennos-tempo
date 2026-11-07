@@ -17,7 +17,7 @@
   "netDown": "Offline",
   "hosts": "Machines",
   "none": "none reachable",
-  "empty": "Ask anything. Tempo answers from your memory and notes, runs tools, makes images and can hand work to other machines.",
+  "empty": "What's your tempo?",
   "busy": "Working",
   "failed": "The local agent did not answer. Start it with the Perennos Tempo (offline) shortcut.",
   "memory": "Memory",
