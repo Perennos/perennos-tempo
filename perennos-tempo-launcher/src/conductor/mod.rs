@@ -798,6 +798,15 @@ fn run_flow_cmd(ctx: &Ctx, cmd: ConductorCmd, d: &Deps, out: &mut dyn Write) -> 
             band.name
         );
     }
+    // a retune linked to this band (`retune check --band`) plays the parts that play its base model
+    let retuned = crate::retune::apply_retuned(ctx, &mut band);
+    if !retuned.is_empty() {
+        let _ = writeln!(
+            out,
+            "A retuned model plays for: {}. (`tempo-launch retune undo MODEL` goes back.)",
+            retuned.join(", ")
+        );
+    }
     let names: Vec<&str> = band.flows.iter().map(|f| f.name.as_str()).collect();
     let chosen = match flow.as_deref() {
         Some(f) => band.flow(f),

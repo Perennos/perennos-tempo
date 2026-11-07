@@ -110,7 +110,7 @@ fn mib_in(gpu: &str) -> Option<f64> {
         .map(|m| (m / 1024.0 * 10.0).round() / 10.0)
 }
 
-fn node_of(name: &str, target: String, probe: &J) -> Option<Node> {
+pub fn node_of(name: &str, target: String, probe: &J) -> Option<Node> {
     let gpu = probe.str("gpu").unwrap_or("");
     let os = probe.str("os").unwrap_or("");
     if gpu.to_ascii_lowercase().contains("nvidia") {

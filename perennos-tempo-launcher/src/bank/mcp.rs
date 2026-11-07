@@ -1230,7 +1230,7 @@ pub fn execute(j: &Job, cwd: &Path) -> Result<String, String> {
 
 // ---- the server
 
-fn o(pairs: Vec<(&str, J)>) -> J {
+pub fn o(pairs: Vec<(&str, J)>) -> J {
     J::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
@@ -1348,33 +1348,43 @@ impl Server<'_> {
         }
     }
 
-    pub fn run(&self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let out = match parse(&line) {
-                Ok(m @ J::Obj(_)) => self.handle(&m),
-                _ => Some(o(vec![
-                    ("jsonrpc", J::s("2.0")),
-                    ("id", J::Null),
-                    (
-                        "error",
-                        o(vec![
-                            ("code", J::n(-32700.0)),
-                            ("message", J::s("parse error")),
-                        ]),
-                    ),
-                ])),
-            };
-            if let Some(out) = out {
-                writeln!(output, "{}", out.compact())?;
-                output.flush()?;
-            }
-        }
-        Ok(())
+    pub fn run(&self, input: impl BufRead, output: impl Write) -> std::io::Result<()> {
+        serve(input, output, &|m| self.handle(m))
     }
+}
+
+/// One JSON-RPC message per line in, one answer per line out, until the client closes the input.
+/// The Crate's server and the Retune bench both speak through this.
+pub fn serve(
+    input: impl BufRead,
+    mut output: impl Write,
+    handle: &dyn Fn(&J) -> Option<J>,
+) -> std::io::Result<()> {
+    for line in input.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let out = match parse(&line) {
+            Ok(m @ J::Obj(_)) => handle(&m),
+            _ => Some(o(vec![
+                ("jsonrpc", J::s("2.0")),
+                ("id", J::Null),
+                (
+                    "error",
+                    o(vec![
+                        ("code", J::n(-32700.0)),
+                        ("message", J::s("parse error")),
+                    ]),
+                ),
+            ])),
+        };
+        if let Some(out) = out {
+            writeln!(output, "{}", out.compact())?;
+            output.flush()?;
+        }
+    }
+    Ok(())
 }
 
 /// `tempo-launch crate mcp`: serve on stdin and stdout until the client closes them.

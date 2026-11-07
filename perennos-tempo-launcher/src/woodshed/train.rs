@@ -382,6 +382,9 @@ fn rehearse_version(
     );
     let base = eval::score(d.gen, &m.base, held)?;
     let tuned = eval::score(d.gen, &try_model, held)?;
+    if let Some(w) = eval::loops_words(&m.base, &base) {
+        let _ = writeln!(out, "{w}");
+    }
     let g = eval::gate(&base, &tuned, set.margin(), set.canary_slack());
     m.base_scores = Some(base);
     m.adapter_scores = Some(tuned);

@@ -47,7 +47,7 @@ pub struct Manifest {
     pub adapter_file: String,
 }
 
-fn scores_j(s: &Option<Scores>) -> J {
+pub fn scores_j(s: &Option<Scores>) -> J {
     match s {
         None => J::Null,
         Some(s) => J::Obj(vec![
@@ -55,17 +55,20 @@ fn scores_j(s: &Option<Scores>) -> J {
             ("n_eval".into(), J::n(s.n_eval as f64)),
             ("canary".into(), J::n(s.canary)),
             ("n_canary".into(), J::n(s.n_canary as f64)),
+            ("loops".into(), J::n(s.loops)),
         ]),
     }
 }
 
-fn scores_of(j: Option<&J>) -> Option<Scores> {
+pub fn scores_of(j: Option<&J>) -> Option<Scores> {
     let j = j?;
     Some(Scores {
         eval: j.f64("eval")?,
         n_eval: j.f64("n_eval")? as usize,
         canary: j.f64("canary")?,
         n_canary: j.f64("n_canary")? as usize,
+        // older versions did not count loops
+        loops: j.f64("loops").unwrap_or(0.0),
     })
 }
 
@@ -311,12 +314,14 @@ mod tests {
                 n_eval: 15,
                 canary: 75.0,
                 n_canary: 12,
+                ..Scores::default()
             }),
             adapter_scores: Some(Scores {
                 eval: 38.5,
                 n_eval: 15,
                 canary: 75.0,
                 n_canary: 12,
+                ..Scores::default()
             }),
             margin: 5.0,
             gate: Some(Gate {

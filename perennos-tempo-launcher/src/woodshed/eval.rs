@@ -14,6 +14,15 @@ use std::time::Duration;
 /// Something that answers: Ollama in the program, a stand-in in tests.
 pub trait Gen {
     fn answer(&self, model: &str, messages: &[(String, String)]) -> Result<String, String>;
+    /// The answer, and whether the model ran into the token limit (a loop that never found its
+    /// way out looks like that). Stand-ins that only know the text say false.
+    fn answer_full(
+        &self,
+        model: &str,
+        messages: &[(String, String)],
+    ) -> Result<(String, bool), String> {
+        self.answer(model, messages).map(|a| (a, false))
+    }
 }
 
 /// This computer's Ollama, one answer at a time, no sampling noise (temperature 0).
@@ -23,6 +32,14 @@ pub struct OllamaGen {
 
 impl Gen for OllamaGen {
     fn answer(&self, model: &str, messages: &[(String, String)]) -> Result<String, String> {
+        self.answer_full(model, messages).map(|a| a.0)
+    }
+
+    fn answer_full(
+        &self,
+        model: &str,
+        messages: &[(String, String)],
+    ) -> Result<(String, bool), String> {
         let body = J::Obj(vec![
             ("model".into(), J::s(model)),
             (
@@ -62,11 +79,47 @@ impl Gen for OllamaGen {
                 j.str("error").unwrap_or("an error")
             ));
         }
-        Ok(j.get("message")
-            .and_then(|m| m.str("content"))
-            .unwrap_or("")
-            .to_string())
+        Ok((
+            j.get("message")
+                .and_then(|m| m.str("content"))
+                .unwrap_or("")
+                .to_string(),
+            j.str("done_reason") == Some("length"),
+        ))
     }
+}
+
+/// The stretch of words that, said three times, counts as a loop.
+pub const LOOP_WINDOW: usize = 8;
+
+/// An answer loops when it ran into the token limit, or when one run of `LOOP_WINDOW` words shows
+/// up three or more times in it. Plain counting, so a stand-in and the real thing agree.
+pub fn looping(answer: &str, hit_limit: bool) -> bool {
+    if hit_limit {
+        return true;
+    }
+    let w = words(answer);
+    if w.len() < LOOP_WINDOW * 3 {
+        return false;
+    }
+    let mut seen: std::collections::HashMap<&[String], usize> = std::collections::HashMap::new();
+    w.windows(LOOP_WINDOW).any(|win| {
+        let c = seen.entry(win).or_insert(0);
+        *c += 1;
+        *c >= 3
+    })
+}
+
+/// The one sentence Rehearsal says when a model loops often (from this share of answers up).
+pub const LOOPS_WORTH_SAYING: f64 = 10.0;
+
+pub fn loops_words(model: &str, s: &Scores) -> Option<String> {
+    (s.loops >= LOOPS_WORTH_SAYING).then(|| {
+        format!(
+            "{model} loops on {:.0}% of answers. A retune might fix that (`tempo-launch retune plan {model}`).",
+            s.loops
+        )
+    })
 }
 
 fn words(s: &str) -> Vec<String> {
@@ -139,6 +192,9 @@ pub struct Scores {
     /// Canary answers right, as a percentage.
     pub canary: f64,
     pub n_canary: usize,
+    /// Answers that looped (hit the token limit, or said the same stretch of words over and over),
+    /// as a percentage of every answer given, held-out and canary.
+    pub loops: f64,
 }
 
 /// Most held-out examples scored in one run: a night's run should not turn into a day's.
@@ -151,14 +207,19 @@ pub fn score(
     held_out: &[(Vec<(String, String)>, String)],
 ) -> Result<Scores, String> {
     let mut sum = 0.0;
+    let mut looped = 0usize;
     let held = &held_out[..held_out.len().min(MAX_EVAL)];
     for (messages, reference) in held {
-        sum += f1(&g.answer(model, messages)?, reference);
+        let (a, cut) = g.answer_full(model, messages)?;
+        looped += usize::from(looping(&a, cut));
+        sum += f1(&a, reference);
     }
     let mut right = 0usize;
     for (prompt, any) in CANARY {
         let m = vec![("user".to_string(), prompt.to_string())];
-        if canary_right(&g.answer(model, &m)?, any) {
+        let (a, cut) = g.answer_full(model, &m)?;
+        looped += usize::from(looping(&a, cut));
+        if canary_right(&a, any) {
             right += 1;
         }
     }
@@ -172,6 +233,7 @@ pub fn score(
         n_eval: held.len(),
         canary: r(right as f64 * 100.0 / CANARY.len() as f64),
         n_canary: CANARY.len(),
+        loops: r(looped as f64 * 100.0 / (held.len() + CANARY.len()) as f64),
     })
 }
 
@@ -228,6 +290,52 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| self.1.clone()))
         }
+    }
+
+    struct Looper;
+    impl Gen for Looper {
+        fn answer(&self, m: &str, q: &[(String, String)]) -> Result<String, String> {
+            self.answer_full(m, q).map(|a| a.0)
+        }
+        fn answer_full(&self, _: &str, q: &[(String, String)]) -> Result<(String, bool), String> {
+            let q = &q.last().unwrap().1;
+            Ok(if q.contains("banana") {
+                // says the same ten words forever
+                ("wait let me think about it again so ".repeat(8), false)
+            } else if q.contains("capital") {
+                ("Paris".into(), true) // cut off by the token limit
+            } else {
+                ("fine".into(), false)
+            })
+        }
+    }
+
+    #[test]
+    fn looping_is_the_token_limit_or_a_window_said_three_times() {
+        assert!(looping("short", true));
+        assert!(!looping("short and fine", false));
+        let four = "one two three four five six seven eight nine ten ".repeat(4);
+        assert!(looping(&four, false));
+        // twice is a refrain, not a loop
+        let two = format!(
+            "{}then something new entirely follows here and goes on",
+            "one two three four five six seven eight nine ten ".repeat(2)
+        );
+        assert!(!looping(&two, false));
+        // long and never repeating
+        let long: String = (0..200).map(|i| format!("w{i} ")).collect();
+        assert!(!looping(&long, false));
+    }
+
+    #[test]
+    fn a_model_that_loops_is_counted_and_told() {
+        let s = score(&Looper, "m", &[]).unwrap();
+        // two of the twelve canary answers loop: the one that repeats, and the one that was cut off
+        assert_eq!(s.loops, 16.7);
+        assert!(loops_words("m", &s)
+            .unwrap()
+            .contains("loops on 17% of answers"));
+        assert!(loops_words("m", &Scores::default()).is_none());
     }
 
     #[test]
@@ -301,6 +409,7 @@ mod tests {
             n_eval: n,
             canary,
             n_canary: 12,
+            ..Scores::default()
         }
     }
 
