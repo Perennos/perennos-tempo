@@ -32,6 +32,9 @@ pub struct Opts {
     /// `--ollama`: fetch and check only Tempo's own Ollama (when this computer has none), and start
     /// it once to see that it answers. No models are looked up or pulled, no settings are written.
     pub ollama: bool,
+    /// `--apply-proposal`: show what the proposal an AI wrote (`tempo-launch mcp`) would change in
+    /// the agent's settings, ask y/N, and only then write it. Always asks; takes no `--yes`.
+    pub apply_proposal: bool,
     pub goals: Vec<String>,
     /// `--preferred-prefix P`: save P as this computer's preferred prefix in `<home>/setup.json` (an
     /// empty value clears it) and use it now.
@@ -49,6 +52,7 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
             "--with-d1" => o.with_d1 = true,
             "--page" => o.page = true,
             "--ollama" => o.ollama = true,
+            "--apply-proposal" => o.apply_proposal = true,
             "--goal" => {
                 i += 1;
                 o.goals.push(
@@ -86,6 +90,19 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
             other => return Err(format!("setup: unknown argument {other}")),
         }
         i += 1;
+    }
+    if o.apply_proposal
+        && (o.apply
+            || o.yes
+            || o.page
+            || o.json
+            || o.ollama
+            || o.with_d1
+            || !o.goals.is_empty()
+            || o.prefer_set
+            || o.preferred_prefix.is_some())
+    {
+        return Err("setup: --apply-proposal stands alone, and always asks".into());
     }
     if o.ollama
         && (o.apply
@@ -775,6 +792,15 @@ pub fn run(
     confirm: &mut dyn FnMut(&str) -> bool,
     start_ollama: &mut dyn FnMut(&Path) -> bool,
 ) -> i32 {
+    if o.apply_proposal {
+        return super::propose::apply_proposal(
+            ctx,
+            super::propose::real_pinned(),
+            now,
+            out,
+            confirm,
+        );
+    }
     if o.ollama {
         return run_ollama_only(ctx, host, o, port, now, out, confirm, start_ollama);
     }

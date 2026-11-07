@@ -57,10 +57,20 @@ usage: tempo-launch [command]
         [--prefer preferred|mainstream|quality] [--preferred-prefix P] [--json]
                     look at this computer and your goals, show which models fit, and with
                     --apply (and your yes) fetch what is missing and set up the agent
+  setup --apply-proposal
+                    show what the proposal your AI wrote (see mcp) would change in the agent's
+                    settings, and apply it only after your y/N
   setup --page      only write the plan to <home>\\setup.html (opened once at the first start)
   setup --ollama [--yes]
                     only fetch Tempo's own Ollama (checked against a pinned SHA-256) when this
                     computer has none, and start it; no models are fetched
+  welcome           the first-run page: what the scan found, one computer or several, and how to
+                    let your AI help (opened by itself the first time, then `tempo-launch welcome`)
+  link URL          add another computer's Ollama (a tailnet or home-network address) to the
+                    agent's ollama_fallbacks; nothing is contacted
+  mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
+                    the plan and the status, and write a proposal you apply yourself;
+                    --scan prints the scan facts to paste into any AI
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1857,6 +1867,14 @@ pub enum Cmd {
     OpenRemote(String),
     /// `setup`: recommend models for this computer and your goals; `--apply` fetches them.
     Setup(setup::apply::Opts),
+    /// `welcome`: write and open the first-run page.
+    Welcome,
+    /// `link URL`: add another computer's Ollama to the agent's `ollama_fallbacks`.
+    Link(String),
+    /// `mcp`: the setup helper as an MCP server on stdio; `--scan` prints the scan facts.
+    Mcp {
+        scan: bool,
+    },
     Help,
     Version,
 }
@@ -1979,6 +1997,20 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             Cmd::Logs
         }
         "setup" => Cmd::Setup(setup::apply::parse_args(&rest)?),
+        "welcome" => {
+            only(&[])?;
+            Cmd::Welcome
+        }
+        "link" => match rest.as_slice() {
+            [u] if !u.starts_with("--") => Cmd::Link(u.to_string()),
+            _ => return Err("link takes one address, like http://192.168.1.20:11434".into()),
+        },
+        "mcp" => {
+            only(&["--scan"])?;
+            Cmd::Mcp {
+                scan: rest.contains(&"--scan"),
+            }
+        }
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2027,6 +2059,23 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Learn => learn(ctx),
         Cmd::OpenRemote(id) => open_remote(ctx, &id),
         Cmd::Setup(o) => Ok(setup::run_setup(ctx, &o)),
+        Cmd::Welcome => {
+            setup::run_welcome(ctx, &setup::probe::RealHost, setup::apply::ollama_port())
+                .map(|_| 0)
+                .map_err(|e| Problem::other("The welcome page could not be opened", e))
+        }
+        Cmd::Link(url) => Ok(setup::propose::link(
+            ctx,
+            setup::propose::real_pinned(),
+            &url,
+            unix_now(),
+            &mut io::stdout(),
+        )),
+        Cmd::Mcp { scan } => Ok(if scan {
+            setup::mcp::print_scan(ctx)
+        } else {
+            setup::mcp::run_stdio(ctx)
+        }),
         Cmd::Schedule {
             remove,
             print,
@@ -3125,6 +3174,7 @@ mod tests {
             ("start", Cmd::Start),
             ("stop", Cmd::Stop),
             ("learn", Cmd::Learn),
+            ("welcome", Cmd::Welcome),
             ("logs", Cmd::Logs),
             ("--help", Cmd::Help),
             ("--version", Cmd::Version),
@@ -4412,7 +4462,7 @@ mod tests {
     }
 
     #[test]
-    fn first_start_writes_the_plan_page_once_and_fetches_nothing() {
+    fn first_start_opens_the_welcome_page_once_and_fetches_nothing() {
         use setup::probe::tests::Fake;
         let root = tmp("firststart");
         let ctx = ctx_in(&root);
@@ -4425,17 +4475,38 @@ mod tests {
             ..Fake::default()
         };
         let page = setup::first_start(&ctx, &host, 1).unwrap();
-        assert_eq!(page, ctx.home.join("setup.html"));
+        assert_eq!(page, ctx.home.join("welcome.html"));
         let html = fs::read_to_string(&page).unwrap();
+        assert!(html.contains("Just this computer") && html.contains("Several computers"));
         assert!(html.contains("tempo-launch setup --apply"));
+        assert!(html.contains("tempo-launch link http://"));
         assert!(html.contains("8 GB RAM, no GPU: qwen3:4b (2.5 GB)"));
-        assert!(html.contains("USD 10 million") && html.contains("--with-d1"));
-        assert!(html.contains("never downloaded"));
+        assert!(html.contains("claude mcp add tempo-setup --"));
+        assert!(html.contains("claude_desktop_config.json") && html.contains("mcpServers"));
+        assert!(html.contains("only the scan facts") || html.contains("Only the scan facts"));
+        // offline and strict: no outside address, no script, no form, a locked-down policy
+        assert!(html.contains("default-src 'none'"));
+        for bad in [
+            "<script",
+            "<link",
+            "<form",
+            "<iframe",
+            "src=\"http",
+            "href=\"http",
+            "url(http",
+        ] {
+            assert!(!html.contains(bad), "{bad}");
+        }
+        // the plan page is there too, and the welcome page was the one opened
+        let plan_html = fs::read_to_string(ctx.home.join("setup.html")).unwrap();
+        assert!(plan_html.contains("USD 10 million") && plan_html.contains("--with-d1"));
+        assert!(plan_html.contains("never downloaded"));
         assert_eq!(ctx.opened.borrow().len(), 1);
+        assert!(ctx.opened.borrow()[0].ends_with("welcome.html"));
         // the second start: nothing more
         assert!(setup::first_start(&ctx, &host, 1).is_none());
         assert_eq!(ctx.opened.borrow().len(), 1);
-        // a page the installer wrote with `setup --page` is opened once too, and not rewritten
+        // a plan page the installer wrote with `setup --page` is kept as it is
         let root3 = tmp("firststart3");
         let ctx3 = ctx_in(&root3);
         let mut out = Vec::new();
@@ -4451,9 +4522,14 @@ mod tests {
             &mut |_| false,
         );
         assert_eq!(code, 0);
-        assert!(ctx3.home.join("setup.html").is_file() && ctx3.opened.borrow().is_empty());
+        let written = fs::read_to_string(ctx3.home.join("setup.html")).unwrap();
+        assert!(ctx3.opened.borrow().is_empty());
         assert!(setup::first_start(&ctx3, &host, 1).is_some());
         assert_eq!(ctx3.opened.borrow().len(), 1);
+        assert_eq!(
+            fs::read_to_string(ctx3.home.join("setup.html")).unwrap(),
+            written
+        );
         assert!(setup::first_start(&ctx3, &host, 1).is_none());
         let _ = fs::remove_dir_all(root3);
         // with settings already there it never runs at all
@@ -4462,9 +4538,86 @@ mod tests {
         fs::create_dir_all(&ctx2.agent_data).unwrap();
         fs::write(ctx2.agent_data.join("config.json"), "{}").unwrap();
         assert!(setup::first_start(&ctx2, &host, 1).is_none());
-        assert!(!ctx2.home.join("setup.html").exists());
+        assert!(!ctx2.home.join("welcome.html").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(root2);
+    }
+
+    #[test]
+    fn welcome_link_and_mcp_parse_and_the_link_is_checked() {
+        assert_eq!(parse(&s(&["welcome"])), Ok(Cmd::Welcome));
+        assert!(parse(&s(&["welcome", "x"])).is_err());
+        assert_eq!(
+            parse(&s(&["link", "http://192.168.1.20:11434"])),
+            Ok(Cmd::Link("http://192.168.1.20:11434".into()))
+        );
+        assert!(parse(&s(&["link"])).is_err() && parse(&s(&["link", "a", "b"])).is_err());
+        assert_eq!(parse(&s(&["mcp"])), Ok(Cmd::Mcp { scan: false }));
+        assert_eq!(parse(&s(&["mcp", "--scan"])), Ok(Cmd::Mcp { scan: true }));
+        assert!(parse(&s(&["mcp", "--write"])).is_err());
+        let Ok(Cmd::Setup(o)) = parse(&s(&["setup", "--apply-proposal"])) else {
+            panic!()
+        };
+        assert!(o.apply_proposal);
+        assert!(parse(&s(&["setup", "--apply-proposal", "--yes"])).is_err());
+        assert!(parse(&s(&["setup", "--apply-proposal", "--apply"])).is_err());
+
+        let root = tmp("link");
+        let ctx = ctx_in(&root);
+        let run = |url: &str, pinned: Option<PathBuf>| {
+            let mut out = Vec::new();
+            let code = setup::propose::link(&ctx, pinned, url, 1_793_000_000, &mut out);
+            (code, String::from_utf8(out).unwrap())
+        };
+        // a public address is refused, and nothing is written
+        for bad in [
+            "http://example.com:11434",
+            "https://8.8.8.8",
+            "http://user@10.0.0.2",
+            "10.0.0.2",
+            "http://10.0.0.2/x",
+        ] {
+            assert_eq!(run(bad, None).0, 2, "{bad}");
+        }
+        assert!(!ctx.agent_data.join("config.json").exists());
+        // a private one is added, with the default port, into a new file
+        let (code, said) = run("http://192.168.1.20", None);
+        assert_eq!(code, 0, "{said}");
+        let cfg = ctx.agent_data.join("config.json");
+        let j = setup::json::parse(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(j.strs("ollama_fallbacks"), ["http://192.168.1.20:11434"]);
+        // a second one is appended, other keys and the old file are kept, a repeat changes nothing
+        fs::write(
+            &cfg,
+            r#"{"models":["a:1b"],"ollama_fallbacks":["http://10.0.0.5:11434"]}"#,
+        )
+        .unwrap();
+        assert_eq!(run("http://tower.local:11434/", None).0, 0);
+        let j = setup::json::parse(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(j.strs("models"), ["a:1b"]);
+        assert_eq!(
+            j.strs("ollama_fallbacks"),
+            ["http://10.0.0.5:11434", "http://tower.local:11434"]
+        );
+        assert!(ctx.home.join("trash").is_dir());
+        let before = fs::read_to_string(&cfg).unwrap();
+        let (code, said) = run("http://tower.local:11434", None);
+        assert_eq!(code, 0);
+        assert!(said.contains("already"));
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), before);
+        // a tailnet address works; a file TEMPO_AGENT_CONFIG names is left alone
+        assert_eq!(run("http://100.101.102.103:11434", None).0, 0);
+        let pinned = root.join("pinned.json");
+        fs::write(&pinned, "{}").unwrap();
+        let (code, said) = run("http://10.1.1.1:11434", Some(pinned.clone()));
+        assert_eq!(code, 0);
+        assert!(said.contains("\"ollama_fallbacks\": [\"http://10.1.1.1:11434\"]"));
+        assert_eq!(fs::read_to_string(&pinned).unwrap(), "{}");
+        // a settings file that is not an object is never overwritten
+        fs::write(&cfg, "[1]").unwrap();
+        assert_eq!(run("http://10.1.1.1:11434", None).0, 1);
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), "[1]");
+        let _ = fs::remove_dir_all(root);
     }
 
     // ---- Tempo's own Ollama

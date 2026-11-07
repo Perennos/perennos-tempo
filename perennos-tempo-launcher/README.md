@@ -21,6 +21,10 @@ tempo-launch open ID         opens an app on another machine listed in remote.js
 tempo-launch setup [--apply [--yes]] [--with-d1] [--goal chat,code,...] [--json | --page]
                              recommends models for this computer and your goals; with --apply and your yes it
                              fetches what is missing and writes the agent's settings (docs/TEMPO-SETUP.md)
+tempo-launch welcome         the first-run page: scan, one or several computers, how to let your AI help (opened once by itself)
+tempo-launch link URL        adds another computer's Ollama (private or tailnet address) to ollama_fallbacks
+tempo-launch mcp [--scan]    stdio MCP server for your AI (scan, plan, status, propose); --scan prints the scan facts
+tempo-launch setup --apply-proposal  shows what your AI's proposal would change; applies it only after y/N
 tempo-launch learn           one learning pass over the vault (what the hourly task runs)
 tempo-launch schedule [--daily | --remove | --print]
 tempo-launch logs            opens the logs folder
