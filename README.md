@@ -75,7 +75,7 @@ A profile never declassifies a request, and a public label does not anonymize co
 
 | Product | What it gives you | Start it |
 |---|---|---|
-| **Tempo Agent** | A local AI agent for your own computer: it reads and edits files, runs commands and reads web pages, asking before anything that matters; `/undo` puts its last changes back. Projects can give it standing instructions (`AGENTS.md`, `CLAUDE.md`). | `tempo-local-agent`, or `tempo-launch open agent` |
+| **Tempo Agent** | A local AI agent for your own computer: it reads and edits files, runs commands and reads web pages, asking before anything that matters; `/undo` puts its last changes back, your own hooks run around its steps, and `/stop` ends its background commands. Projects can give it standing instructions (`AGENTS.md`, `CLAUDE.md`). | `tempo-local-agent`, or `tempo-launch open agent` |
 | **Tempo Vault** | Your notes as plain Markdown files, Obsidian-compatible. The agent reads and links them; Tempo learns from them on your computer. | `tempo-launch open vault` |
 | **Tempo Studio** | Mixing and mastering: loudness, analysis and REAPER sessions, through the agent or its own commands. | `tempo-studio` |
 | **Tempo Room** | A private group chat on your computer. Invite family or a team with a one-time link; anyone in the room can ask `@tempo`. Guests never get tools, files or your memory. | `tempo-launch open room` |
