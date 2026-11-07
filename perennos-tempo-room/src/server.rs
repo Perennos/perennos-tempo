@@ -40,6 +40,9 @@ const REQUEST_DEADLINE: Duration = if cfg!(test) {
 pub const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub const APP_JS: &str = include_str!("../assets/app.mjs");
 pub const APP_CSS: &str = include_str!("../assets/app.css");
+/// Talk to Tempo: the mic (see `voice.rs`); the same two files the chat surface uses.
+pub const VOICE_JS: &str = include_str!("../assets/voice.mjs");
+pub const VOICE_CSS: &str = include_str!("../assets/voice.css");
 /// The slow three.js field behind the join and empty screens, and the three.js build it imports
 /// (0.170.0 from npm, MIT, unmodified; imported only when WebGL works).
 pub const FIELD_JS: &str = include_str!("../assets/field.mjs");
@@ -429,7 +432,7 @@ fn read_request(s: &TcpStream) -> Result<Req, (u16, &'static str)> {
         s: clone,
         until: Instant::now() + REQUEST_DEADLINE,
     };
-    let mut rd = BufReader::new(timed.take((MAX_HEAD + MAX_BODY) as u64));
+    let mut rd = BufReader::new(timed.take((MAX_HEAD + crate::voice::MAX_AUDIO + 1) as u64));
     let mut line = String::new();
     rd.read_line(&mut line).map_err(read_err)?;
     let mut parts = line.split_whitespace();
@@ -482,7 +485,13 @@ fn read_request(s: &TcpStream) -> Result<Req, (u16, &'static str)> {
         Some(v) => v.parse().map_err(|_| bad)?,
         None => 0,
     };
-    if len > MAX_BODY {
+    // a recording may be bigger than a message
+    let cap = if req.path == "/room/voice/transcribe" {
+        crate::voice::MAX_AUDIO
+    } else {
+        MAX_BODY
+    };
+    if len > cap {
         return Err((413, "body too large"));
     }
     req.body = vec![0; len];
@@ -573,6 +582,7 @@ fn check(sh: &Shared, req: &Req) -> Result<(), (u16, &'static str)> {
         return Err((405, "only GET and POST"));
     }
     if req.method == "POST"
+        && req.path != "/room/voice/transcribe"
         && !req
             .header("content-type")
             .is_some_and(|c| c.to_ascii_lowercase().starts_with("application/json"))
@@ -684,6 +694,9 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
         if req.method == "GET" && api == "events" {
             return events(sh, s, &req);
         }
+        if api == "voice" || api.starts_with("voice/") {
+            return voice_api(sh, &req, api, s);
+        }
         let body: Value = if req.method == "POST" {
             match serde_json::from_slice(&req.body) {
                 Ok(v) => v,
@@ -707,7 +720,7 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
         ("Content-Security-Policy", APP_CSP.to_string()),
         (
             "Permissions-Policy",
-            "camera=(), microphone=(), geolocation=()".to_string(),
+            "camera=(), microphone=(self), geolocation=()".to_string(),
         ),
     ];
     let _ = match req.path.as_str() {
@@ -746,6 +759,20 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
             THREE_LICENSE.as_bytes(),
             &[],
         ),
+        "/voice.mjs" => respond(
+            &mut s,
+            200,
+            "text/javascript; charset=utf-8",
+            VOICE_JS.as_bytes(),
+            &[],
+        ),
+        "/voice.css" => respond(
+            &mut s,
+            200,
+            "text/css; charset=utf-8",
+            VOICE_CSS.as_bytes(),
+            &[],
+        ),
         "/app.css" => respond(
             &mut s,
             200,
@@ -782,6 +809,109 @@ fn handle(sh: &Arc<Shared>, mut s: TcpStream) {
 }
 
 type Fail = (u16, Value);
+
+/// Talk to Tempo: the mic in a room. The audio is a raw body (not JSON) and goes straight to the
+/// agent's whisper.cpp on this machine; nothing is kept here. The owner at the machine may use it
+/// anywhere; a member only where the owner turned it on for that room.
+fn voice_api(sh: &Arc<Shared>, req: &Req, api: &str, mut s: TcpStream) {
+    let v = viewer(sh, req);
+    let room = if api == "voice/speak" || api == "voice/guests" {
+        serde_json::from_slice::<Value>(&req.body)
+            .ok()
+            .and_then(|b| b["room"].as_str().map(str::to_string))
+            .unwrap_or_default()
+    } else {
+        req.q("room").to_string()
+    };
+    let owner = v == Viewer::Owner;
+    let may = owner || (sees(sh, &v, &room) && crate::voice::allowed(&sh.hub.lock().dir, &room));
+    let limit = Duration::from_secs(200);
+    let agent = &sh.hub.agent;
+    let pass =
+        |s: &mut TcpStream, r: Result<(u16, Vec<u8>, String), crate::agent::AgentError>| match r {
+            Ok((code, body, ct)) => {
+                let _ = respond(s, code, &ct, &body, &[]);
+            }
+            Err(_) => refuse(
+                s,
+                503,
+                "Tempo's agent isn't answering. Start it, then try again.",
+            ),
+        };
+    match (req.method.as_str(), api) {
+        ("GET", "voice") => {
+            if !may {
+                // a member where the owner hasn't turned it on: the page just hides the mic
+                return send_json(&mut s, 200, &json!({"allowed": false}), &[]);
+            }
+            match agent.voice(false, "/agent/voice", "", b"", Duration::from_secs(10)) {
+                Ok((200, body, _)) => {
+                    let mut j: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    j["allowed"] = json!(true);
+                    j["owner"] = json!(owner);
+                    j["guests"] = json!(crate::voice::allowed(&sh.hub.lock().dir, &room));
+                    send_json(&mut s, 200, &j, &[]);
+                }
+                Ok(_) | Err(_) => send_json(&mut s, 200, &json!({"allowed": false}), &[]),
+            }
+        }
+        ("POST", "voice/transcribe") | ("POST", "voice/speak") if !may => refuse(
+            &mut s,
+            403,
+            "The owner hasn't turned voice on for this room.",
+        ),
+        ("POST", "voice/transcribe") => {
+            let ct = req
+                .header("content-type")
+                .unwrap_or("audio/wav")
+                .to_string();
+            let lang: String = req
+                .q("lang")
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .take(8)
+                .collect();
+            let path = format!("/agent/voice/transcribe?lang={lang}");
+            pass(&mut s, agent.voice(true, &path, &ct, &req.body, limit))
+        }
+        ("POST", "voice/speak") => {
+            let text = serde_json::from_slice::<Value>(&req.body)
+                .ok()
+                .and_then(|b| b["text"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            let b = json!({"text": text}).to_string();
+            pass(
+                &mut s,
+                agent.voice(
+                    true,
+                    "/agent/voice/speak",
+                    "application/json",
+                    b.as_bytes(),
+                    limit,
+                ),
+            )
+        }
+        ("POST", "voice/guests") => {
+            if !owner {
+                return refuse(&mut s, 403, "Only the owner, at the machine, can do that.");
+            }
+            let on = serde_json::from_slice::<Value>(&req.body)
+                .ok()
+                .and_then(|b| b["on"].as_bool())
+                .unwrap_or(false);
+            let dir = sh.hub.lock().dir.clone();
+            let known = sh.hub.lock().rooms.iter().any(|r| r.id == room);
+            if !known {
+                return refuse(&mut s, 404, "No such room.");
+            }
+            match crate::voice::set(&dir, &room, on) {
+                Ok(()) => send_json(&mut s, 200, &json!({"ok": true, "guests": on}), &[]),
+                Err(e) => refuse(&mut s, 500, &e),
+            }
+        }
+        _ => refuse(&mut s, 404, "not found"),
+    }
+}
 
 fn fail(code: u16, why: impl Into<String>) -> Fail {
     (code, json!({ "error": why.into() }))
@@ -3225,6 +3355,52 @@ mod tests {
 
     fn tools_of(hub: &Hub, room: &str) -> bool {
         hub.lock().room(room).unwrap().tools
+    }
+
+    #[test]
+    fn members_get_the_mic_only_where_the_owner_turned_it_on() {
+        let (hub, _) = hub_at(&dead_url(), "srv-voice", json!({}));
+        let r = start(hub.clone(), opts()).unwrap();
+        let a = r.addr;
+        let owner = owner_cookie(&hub);
+        let (mia, _) = join_as(&hub, a, &owner, "family", "Mia");
+        let audio = |cookie: &str, len: usize| {
+            let head = format!(
+                "POST /room/voice/transcribe?room=family HTTP/1.1\r\nHost: {a}\r\nOrigin: http://{a}\r\nCookie: {cookie}\r\nContent-Type: audio/wav\r\nContent-Length: {len}\r\n\r\n"
+            );
+            http(a, &head)
+        };
+        // off for members by default: the page is told to hide the mic, and the audio is refused
+        let (c, j) = get(a, "/room/voice?room=family", &mia);
+        assert_eq!((c, &j["allowed"]), (200, &json!(false)));
+        let (c, _, b) = audio(&mia, 0);
+        assert_eq!(c, 403, "{b}");
+        assert_eq!(audio("", 0).0, 403, "a stranger never");
+        // only the owner at the machine can switch it
+        let on = json!({"room": "family", "on": true});
+        assert_eq!(post(a, "/room/voice/guests", &mia, &on).0, 403);
+        assert_eq!(post(a, "/room/voice/guests", "", &on).0, 403);
+        assert_eq!(post(a, "/room/voice/guests", &owner, &on).0, 200);
+        // now a member gets through the gate (the agent here is not running, so it says so)
+        let (c, _, b) = audio(&mia, 0);
+        assert_eq!(c, 503, "{b}");
+        assert!(b.contains("agent isn't answering"));
+        // a recording over the cap is refused before it is read
+        assert_eq!(audio(&mia, crate::voice::MAX_AUDIO + 1).0, 413);
+        // off again
+        let off = json!({"room": "family", "on": false});
+        assert_eq!(post(a, "/room/voice/guests", &owner, &off).0, 200);
+        assert_eq!(audio(&mia, 0).0, 403);
+        // the page may use the microphone (and nothing else)
+        let (_, head, _) = with_headers(a, "GET", "/", "", "");
+        assert!(
+            head.contains("microphone=(self)") && head.contains("camera=()"),
+            "{head}"
+        );
+        let (c, _, js) = with_headers(a, "GET", "/voice.mjs", "", "");
+        assert!(c == 200 && js.contains("mountVoice"));
+        r.stop();
+        hub.shutdown();
     }
 
     #[test]

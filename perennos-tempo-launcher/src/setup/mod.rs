@@ -13,6 +13,7 @@ pub mod propose;
 pub mod registry;
 pub mod runtime;
 pub mod sha256;
+pub mod voice;
 pub mod welcome;
 
 use crate::{write_atomic, Ctx};

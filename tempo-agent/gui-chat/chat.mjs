@@ -8,6 +8,7 @@
 // when /agent/health says the server has it (the Rust server does), else by polling.
 // The agent's key comes from #key=... when Perennos Tempo opens this page; it is kept for this tab
 // only (sessionStorage), cleared from the address bar, and sent as X-Tempo-Key on every call.
+import { mountVoice } from './voice.mjs'; // talk to Tempo: speech is heard on this computer (see voice.mjs)
 const h = (tag, a = {}, ...kids) => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(a)) {
@@ -114,7 +115,7 @@ export async function mount(el, ctx) {
     laneV.dataset.lane = l;
     laneV.textContent = (l === 'heavy' ? c.heavy : c.fast) + (model ? ' · ' + model : '');
   }
-  let live = null;
+  let live = null, voice = null;
   function render(e) {
     if (e.type === 'delta') {
       graph?.setThinking(true);
@@ -125,7 +126,7 @@ export async function mount(el, ctx) {
     }
     if (live && e.type !== 'status') { live.remove(); live = null; }
     if (e.type === 'user') row('ch-user', c.you, e.text);
-    else if (e.type === 'assistant') { graph?.ripple(); row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text); }
+    else if (e.type === 'assistant') { graph?.ripple(); row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text); if (busy) voice?.say(e.text); }
     else if (e.type === 'assistant_partial') row('ch-bot', c.tempo, e.text);
     else if (e.type === 'tool_call') {
       empty.remove();
@@ -453,11 +454,13 @@ export async function mount(el, ctx) {
   // Settings and About: the theme, pause motion, and who made this
   const themeBtns = THEMES.map(t => h('button', { type: 'button', 'data-theme': t, text: c[t], onclick: () => setTheme(t) }));
   const pauseBtn = h('button', { class: 'ch-btn', type: 'button', 'aria-pressed': String(paused), text: c.pause, onclick: () => setPaused(!paused) });
+  const voiceSlot = h('div', { class: 'vx-slot' });
   const pop = h('div', { class: 'ch-pop', role: 'dialog', 'aria-label': c.settings, hidden: true },
     h('h2', { text: c.settings }),
     lab(c.theme), h('div', { class: 'tt-seg', role: 'group', 'aria-label': c.theme }, ...themeBtns),
     pauseBtn,
     reducedMotion() ? h('p', { text: c.motionNote }) : null,
+    voiceSlot,
     lab(c.about), h('p', { text: c.madeIn }));
   const closePop = () => { pop.hidden = true; setBtn.removeAttribute('aria-expanded'); };
   setBtn.addEventListener('click', () => { pop.hidden = !pop.hidden; setBtn.setAttribute('aria-expanded', String(!pop.hidden)); });
@@ -500,6 +503,8 @@ export async function mount(el, ctx) {
     h('header', { class: 'ch-top' }, brand, h('span', { class: 'ch-where' }, dot, whereText)),
     rail, h('div', { class: 'ch-views' }, brainPane, dash), pop);
   el.append(root);
+  // the mic in the composer, its settings in the Settings popover, the LED that follows your voice
+  voice = mountVoice({ comp: dash.querySelector('.ch-comp'), anchor: sendBtn, input, send, endpoint: '/agent/voice', headers: keyHeaders, led: root.querySelector('.tt-led'), settings: voiceSlot, store, copy: ctx.copy?.voice });
   showTab(saved.tab || 'chats');
   paintTheme();
   setView(view);
@@ -517,7 +522,7 @@ export async function mount(el, ctx) {
   const ht = setInterval(health, 30000);
   return {
     unmount() {
-      dead = true; slash?.detach(); es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
+      dead = true; slash?.detach(); voice?.unmount(); es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
       document.removeEventListener('keydown', onKey); links.forEach(l => l.remove()); root.remove();
     },
   };

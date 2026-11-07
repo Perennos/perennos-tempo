@@ -35,6 +35,11 @@ pub struct Opts {
     /// `--apply-proposal`: show what the proposal an AI wrote (`tempo-launch mcp`) would change in
     /// the agent's settings, ask y/N, and only then write it. Always asks; takes no `--yes`.
     pub apply_proposal: bool,
+    /// `--voice`: fetch whisper.cpp and a model that fits (and with `--piper`, Piper and a voice) so
+    /// you can talk to Tempo. Asks y/N first. `--multilingual` picks the models that are not English-only.
+    pub voice: bool,
+    pub piper: bool,
+    pub multilingual: bool,
     pub goals: Vec<String>,
     /// `--preferred-prefix P`: save P as this computer's preferred prefix in `<home>/setup.json` (an
     /// empty value clears it) and use it now.
@@ -53,6 +58,9 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
             "--page" => o.page = true,
             "--ollama" => o.ollama = true,
             "--apply-proposal" => o.apply_proposal = true,
+            "--voice" => o.voice = true,
+            "--piper" => o.piper = true,
+            "--multilingual" => o.multilingual = true,
             "--goal" => {
                 i += 1;
                 o.goals.push(
@@ -91,6 +99,22 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
         }
         i += 1;
     }
+    if (o.piper || o.multilingual) && !o.voice {
+        return Err("setup: --piper and --multilingual go with --voice".into());
+    }
+    if o.voice
+        && (o.apply
+            || o.page
+            || o.json
+            || o.ollama
+            || o.with_d1
+            || o.apply_proposal
+            || !o.goals.is_empty()
+            || o.prefer_set
+            || o.preferred_prefix.is_some())
+    {
+        return Err("setup: --voice stands alone; add --piper, --multilingual or --yes".into());
+    }
     if o.apply_proposal
         && (o.apply
             || o.yes
@@ -115,8 +139,8 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
     {
         return Err("setup: --ollama only fetches Ollama; use it alone, or with --yes".into());
     }
-    if o.yes && !o.apply && !o.ollama {
-        return Err("setup: --yes goes with --apply or --ollama".into());
+    if o.yes && !o.apply && !o.ollama && !o.voice {
+        return Err("setup: --yes goes with --apply, --ollama or --voice".into());
     }
     if o.page && (o.apply || o.json) {
         return Err("setup: --page cannot be combined with --apply or --json".into());
@@ -865,6 +889,22 @@ pub fn run(
             ctx,
             super::propose::real_pinned(),
             now,
+            out,
+            confirm,
+        );
+    }
+    if o.voice {
+        let f = host.fetcher();
+        return super::voice::run(
+            ctx,
+            host,
+            &super::voice::Catalog::embedded(),
+            f.as_deref(),
+            port,
+            now,
+            o.piper,
+            o.multilingual,
+            o.yes,
             out,
             confirm,
         );

@@ -19,3 +19,4 @@ pub mod soundcheck_mcp;
 pub mod tempo_home;
 pub mod tools;
 pub mod util;
+pub mod voice;

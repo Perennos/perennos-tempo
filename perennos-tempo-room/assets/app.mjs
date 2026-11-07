@@ -1,5 +1,6 @@
 // Perennos Tempo Room: the app. No framework, no build step, no inline script or style, and no
 // innerHTML with anything a person typed: every message is built from text nodes.
+import { mountVoice, addressTo } from '/voice.mjs'; // talk to Tempo: heard on the owner's computer (see voice.mjs)
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -13,6 +14,8 @@ const save = (k, v) => { try { localStorage.setItem('tempo-room:' + k, v); } cat
 const wide = () => window.matchMedia('(min-width: 860px)').matches;
 const coarse = () => window.matchMedia('(pointer: coarse)').matches;
 
+let voice = null; // the mic (voice.mjs)
+const voiceGuests = new Map(); // room -> may members use the mic
 const S = {
   me: null,
   rooms: [],
@@ -369,6 +372,7 @@ async function openRoom(id, push) {
   $('text').value = load('draft:' + id) || '';
   autosize();
   const j = await api('messages?room=' + enc(id) + '&limit=60');
+  voice?.refresh();
   S.msgs.set(id, j.messages);
   S.more.set(id, j.more !== false);
   if (j.thinking) {
@@ -722,6 +726,7 @@ function onMessage(room, m) {
   r.last = m;
   r.count = Math.max(r.count, m.id);
   addMsg(m);
+  if (m.kind === 'tempo' && room === S.room && S.askedByVoice && Date.now() - S.askedByVoice < 180000) { S.askedByVoice = 0; voice?.say(m.text); }
   const away = room !== S.room || document.hidden;
   if (away && !isMine(m) && m.kind !== 'system') S.unread.set(room, (S.unread.get(room) || 0) + 1);
   renderRoomsSoon();
@@ -1003,8 +1008,10 @@ async function openPeople() {
       list.append(d);
     }
     box.append(list);
+    if (!owner) voiceSection(box, r, false);
     if (owner) {
       toolsSection(box, r);
+      voiceSection(box, r, true);
       teamSection(box, r, team);
       box.append(el('p', 'lbl sec', "Tempo's tone here"));
       const tone = el('div', 'seg-row');
@@ -1047,6 +1054,25 @@ async function openPeople() {
 }
 
 // ---- Tools: Tempo works with its tools while the owner is alone in the room (owner only)
+
+// Talk to Tempo: the owner's per-room switch for members, and everyone's own voice options.
+function voiceSection(box, r, owner) {
+  if (!voice?.settings || voice.settings.hidden) return;
+  box.append(el('p', 'lbl sec', 'Talk to Tempo'));
+  if (owner) {
+    const label = el('label', 'switch');
+    const input = el('input');
+    input.type = 'checkbox';
+    input.setAttribute('role', 'switch');
+    input.checked = !!voiceGuests.get(r.id);
+    label.append(input, el('span', null, 'Let members use the mic here. What they say is heard by this computer, and goes nowhere else.'));
+    input.addEventListener('change', async () => {
+      try { await api('voice/guests', { room: r.id, on: input.checked }); voiceGuests.set(r.id, input.checked); } catch (e) { toast(e.message, 6000); input.checked = !input.checked; }
+    });
+    box.append(label);
+  }
+  box.append(voice.settings);
+}
 
 function toolsSection(box, r) {
   box.append(el('p', 'lbl sec', 'Tools'));
@@ -1403,6 +1429,16 @@ function wire() {
   $('people').addEventListener('click', openPeople);
   $('invite').addEventListener('click', openInvite);
   $('send').addEventListener('click', send);
+  voice = mountVoice({
+    comp: $('composer'), anchor: $('send'), input: $('text'),
+    send: async () => { S.askedByVoice = Date.now(); await send(); },
+    endpoint: '/room/voice', query: () => '&room=' + enc(S.room || ''),
+    address: (t) => addressTo(t, { mention: '@tempo', names: suggestions('').concat('tempo') }),
+    led: document.querySelector('[data-insignia]'),
+    store: { get: (k, d) => load(k) ?? d, set: save },
+    canUse: () => !!S.me && S.me.role !== 'guest',
+    onStatus: (c) => { if (S.room && c.owner) voiceGuests.set(S.room, !!c.guests); },
+  });
   $('text').addEventListener('input', onInput);
   $('text').addEventListener('keydown', onKey);
   $('text').addEventListener('blur', () => setTimeout(closeSuggest, 150));
