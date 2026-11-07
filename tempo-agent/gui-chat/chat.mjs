@@ -1,6 +1,8 @@
 // CHAT surface: the local agent loop (Ollama engine, MCP tools, memory RAG, delegate, workflow file).
 // Talks only to the same origin at /agent/*. Every visible string comes from copy.json.
-// The second-brain graph (memgraph.mjs, three.js) is imported only when it is opened.
+// The second-brain graph (memgraph.mjs, three.js) is imported only when the Brain or Both view opens.
+// One look (tempo-theme.css): Brain, Dashboard or Both, and Light, Dark or System, are remembered
+// in localStorage (wrapped in try/catch). Keys: B brain, D dashboard, Shift+B both, C W M panels, P pause motion, comma settings.
 // Events arrive over /agent/stream (server-sent events, read with fetch so the key can go along)
 // when /agent/health says the server has it (the Rust server does), else by polling.
 // The agent's key comes from #key=... when Perennos Tempo opens this page; it is kept for this tab
@@ -39,21 +41,44 @@ const api = (p, b) => fetch('/agent/' + p, b
 });
 const KINDS = ['current', 'core', 'memory', 'pack'];
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('tempo-chat:' + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('tempo-chat:' + k, v); } catch { /* private window: fine */ } },
+};
+const VIEWS = ['brain', 'dashboard', 'both'], THEMES = ['system', 'light', 'dark'];
+// Strings the newer views need; the host's copy.json overrides them.
+const DEFAULT_COPY = {
+  wordmark: 'perennos tempo', brain: 'Brain', dashboard: 'Dashboard', both: 'Both', view: 'View', panels: 'Panels', settings: 'Settings',
+  theme: 'Theme', system: 'System', light: 'Light', dark: 'Dark', pause: 'Pause motion', motionNote: 'Your system asks for less motion, so the sphere holds still.',
+  working: 'Working', idle: 'Idle', machinesUp: 'Machines up', memoryFiles: 'Memory files', chatCount: 'Chats', brainTitle: 'The second brain, as a field.', about: 'About', madeIn: 'Built and maintained in the Cayman Islands',
+};
+// Count a number up to its value (a few hundred ms); straight to it when motion is off.
+function countTo(el, to, calm) {
+  const from = Number(el.dataset.shown || 0);
+  el.dataset.shown = String(to);
+  cancelAnimationFrame(el._raf || 0);
+  if (calm || from === to) { el.textContent = String(to); return; }
+  const t0 = performance.now(), dur = 700;
+  const step = now => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = String(Math.round(from + (to - from) * e));
+    if (k < 1) el._raf = requestAnimationFrame(step);
+  };
+  el._raf = requestAnimationFrame(step);
+}
 
 export async function mount(el, ctx) {
-  const c = ctx.copy;
-  if (!c?.title) return { unmount() {} };
-  const link = h('link', { rel: 'stylesheet', href: new URL('./chat.css', import.meta.url).href });
-  const loaded = new Promise(r => { link.onload = link.onerror = r; });
-  document.head.append(link);
-  await loaded;
+  if (!ctx.copy?.title) return { unmount() {} };
+  const c = { ...DEFAULT_COPY, ...ctx.copy };
+  const links = ['./tempo-theme.css', './chat.css'].map(f => h('link', { rel: 'stylesheet', href: new URL(f, import.meta.url).href }));
+  await Promise.all(links.map(l => new Promise(r => { l.onload = l.onerror = r; document.head.append(l); })));
 
   const saved = ctx.view ? (ctx.view.chat ??= {}) : {};
   let conv = saved.conv || null, since = 0, busy = false, dead = false, timer = 0;
   let heavyModel = '', lane = null, lastTool = null, memUsed = new Set(), memFiles = [], graph = null;
   let sse = false, es = null;
 
-  const lab = t => h('span', { class: 't-label', text: t });
+  const lab = t => h('span', { class: 'tt-lbl', text: t });
   const log = h('div', { class: 'ch-log', role: 'log', 'aria-live': 'polite' });
   const empty = h('p', { class: 'ch-empty', text: c.empty });
   log.append(empty);
@@ -69,23 +94,12 @@ export async function mount(el, ctx) {
   const memSearch = h('input', { class: 'ch-in ch-search', type: 'search', placeholder: c.search, 'aria-label': c.searchMemory });
   const memList = h('div', { class: 'ch-mem' });
   const memRead = h('div', { class: 'ch-read', hidden: true });
-  const graphBtn = h('button', { class: 'ch-btn', type: 'button', text: c.graph });
+  const graphBtn = h('button', { class: 'ch-btn', type: 'button', text: c.brain });
   const panes = {
     chats: h('div', { class: 'ch-pane' }, newBtn, list),
     tasks: h('div', { class: 'ch-pane' }, wf),
     memory: h('div', { class: 'ch-pane' }, h('div', { class: 'ch-row' }, memSearch, graphBtn), memList, memRead),
   };
-  const tabs = h('div', { class: 'ch-tabs', role: 'tablist' });
-  function showTab(name) {
-    saved.tab = name;
-    for (const [k, p] of Object.entries(panes)) p.hidden = k !== name;
-    for (const b of tabs.children) b.setAttribute('aria-selected', String(b.dataset.tab === name));
-    if (name === 'memory') loadMemory();
-  }
-  for (const [k, t] of [['chats', c.chats], ['tasks', c.tasks], ['memory', c.memory]]) {
-    tabs.append(h('button', { class: 'ch-tab', type: 'button', role: 'tab', 'data-tab': k, text: t, onclick: () => showTab(k) }));
-  }
-
   function row(cls, who, text) {
     empty.remove();
     const d = h('div', { class: 'ch-m ' + cls }, who ? lab(who) : null, h('div', { class: 'ch-t', text }));
@@ -101,6 +115,7 @@ export async function mount(el, ctx) {
   let live = null;
   function render(e) {
     if (e.type === 'delta') {
+      graph?.busy(true);
       if (!live) { live = row('ch-bot ch-live', c.tempo, ''); }
       live.querySelector('.ch-t').textContent += e.text;
       log.scrollTop = log.scrollHeight;
@@ -108,7 +123,7 @@ export async function mount(el, ctx) {
     }
     if (live && e.type !== 'status') { live.remove(); live = null; }
     if (e.type === 'user') row('ch-user', c.you, e.text);
-    else if (e.type === 'assistant') row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text);
+    else if (e.type === 'assistant') { graph?.ripple(); row('ch-bot', c.tempo + (e.model ? ' / ' + e.model : ''), e.text); }
     else if (e.type === 'assistant_partial') row('ch-bot', c.tempo, e.text);
     else if (e.type === 'tool_call') {
       empty.remove();
@@ -140,7 +155,15 @@ export async function mount(el, ctx) {
       d.append(...btns);
     }
   }
-  const setBusy = b => { busy = b; sendBtn.disabled = busy; sendBtn.textContent = busy ? c.busy : c.send; };
+  const setBusy = b => {
+    const was = busy;
+    busy = b;
+    sendBtn.disabled = busy; sendBtn.textContent = busy ? c.busy : c.send; sendBtn.classList.toggle('working', busy);
+    root.dataset.busy = String(!!b); // the insignia's circuit runs faster and brighter while an engine works
+    dot.className = 'tt-dot ' + (b ? 'run' : 'idle'); whereText.textContent = b ? c.working : c.idle;
+    graph?.busy(b);
+    if (was && !b) graph?.burst(); // a run finished
+  };
   const refreshWf = () => api('workflow?conv=' + conv).then(w => { wf.textContent = (w.text.split('## Log')[0] || '').trim() || c.noTasks; }).catch(() => {});
   let polling = false;
   async function poll() {
@@ -207,6 +230,7 @@ export async function mount(el, ctx) {
   async function convs() {
     try {
       const l = await api('convs');
+      setNum('chats', l.length);
       list.replaceChildren(...l.slice(0, 8).map(id => h('button', { class: 'ch-conv', type: 'button', 'aria-current': id === conv ? 'true' : null, text: id, onclick: () => open_(id) })));
     } catch (e) { list.replaceChildren(h('p', { class: 'ch-empty', text: e.status === 401 ? (c.signIn || e.message) : c.failed })); }
   }
@@ -218,21 +242,39 @@ export async function mount(el, ctx) {
     await api('send', { conv, text: t });
     if (es) setBusy(true); else poll();
   }
+  // Numbers in the status strip count up when the dashboard first shows them (and ease between values after).
+  const nums = {};
+  const num = (key, label) => {
+    const v = h('span', { class: 'ch-num', text: '0' });
+    nums[key] = v;
+    return h('span', { class: 'ch-pair' }, lab(label), v);
+  };
+  const pairs = h('span', { class: 'ch-pairs' });
+  const kpis = h('span', { class: 'ch-kpis' }, num('up', c.machinesUp), num('mem', c.memoryFiles), num('chats', c.chatCount));
+  strip.append(pairs, kpis);
+  const setNum = (key, n) => {
+    const el = nums[key];
+    el.dataset.want = String(n);
+    if (view !== 'brain') countTo(el, n, calm());
+  };
+  const revealNums = () => { for (const el of Object.values(nums)) if (el.dataset.want != null && el.dataset.shown !== el.dataset.want) countTo(el, Number(el.dataset.want), calm()); };
+
   async function health() {
     try {
       const x = await api('health');
       heavyModel = x.models[0];
       sse = x.stream === true && 'ReadableStream' in window;
       const up = Object.entries(x.hosts).filter(([, v]) => v === 'up').map(([k]) => k);
-      strip.replaceChildren(
+      setNum('up', up.length);
+      pairs.replaceChildren(
         h('span', { class: 'ch-pair' }, lab(c.engine), h('span', { class: 'ch-v', text: x.models[0] })),
         h('span', { class: 'ch-pair' }, lab(c.lane), laneV),
         h('span', { class: 'ch-pair' }, lab(c.net), h('span', { class: 'ch-v', text: x.net ? c.netUp : c.netDown })),
         h('span', { class: 'ch-pair' }, lab(c.hosts), h('span', { class: 'ch-v', text: up.join(', ') || c.none })));
-    } catch { strip.replaceChildren(h('span', { class: 'ch-v', text: c.failed })); }
+    } catch { pairs.replaceChildren(h('span', { class: 'ch-v', text: c.failed })); }
   }
 
-  // ---- second brain: file list, excerpts, graph
+  // ---- second brain: file list, excerpts
   const kindLabel = k => (c.kinds && c.kinds[k]) || k;
   function drawMemory() {
     const q = memSearch.value.trim().toLowerCase();
@@ -253,10 +295,11 @@ export async function mount(el, ctx) {
     try {
       const r = await api('memory' + (conv ? '?conv=' + encodeURIComponent(conv) : ''));
       memFiles = r.files; memUsed = new Set(r.used);
+      setNum('mem', memFiles.length);
       drawMemory();
     } catch { memList.replaceChildren(h('p', { class: 'ch-empty', text: c.failed })); }
   }
-  function refreshUsed() { if (saved.tab === 'memory' || graph) loadMemory().then(() => { if (graph) openGraph(); }); }
+  function refreshUsed() { if (saved.tab === 'memory' || graph) loadMemory().then(() => { if (graph) { closeBrain(); openBrain(); } }); }
   async function readFile(src) {
     showTab('memory');
     try {
@@ -268,50 +311,186 @@ export async function mount(el, ctx) {
         ...r.chunks.map(t => h('pre', { class: 'ch-wf ch-chunk', text: t })),
         r.total > r.chunks.length ? h('p', { class: 'ch-empty', text: `+${r.total - r.chunks.length} ${c.moreChunks}` }) : null);
       memList.hidden = true; memRead.hidden = false; memRead.scrollTop = 0;
+      if (view === 'brain') setView('both');
     } catch { /* stale index: ignore */ }
   }
+
+  // ---- the Brain: the lattice sphere (memgraph.mjs), in its own pane
   const stage = h('div', { class: 'mg-stage' });
   const legend = h('div', { class: 'mg-legend' });
   const hint = h('span', { class: 'mg-hint', text: c.graphHint });
-  const overlay = h('div', { class: 'mg', hidden: true, role: 'dialog', 'aria-label': c.graphTitle },
-    h('div', { class: 'mg-head' }, lab(c.graphTitle), hint, legend,
-      h('button', { class: 'ch-btn', type: 'button', text: c.close, onclick: () => closeGraph() })),
-    stage);
-  async function openGraph() {
-    if (graph) graph.close();
-    overlay.hidden = false;
+  const brainNote = h('p', { class: 'mg-note', hidden: true });
+  const brainPane = h('section', { class: 'ch-brain', 'aria-label': c.graphTitle },
+    stage, h('div', { class: 'mg-hd' }, lab(c.graphTitle), h('h1', { text: c.brainTitle }), legend, hint), brainNote);
+  let opening = false;
+  async function openBrain() {
+    if (graph || opening) return;
+    opening = true;
     legend.replaceChildren(...['current', 'core', 'memory', 'pack', 'used'].map(k => h('span', { class: 'mg-key', 'data-kind': k, text: k === 'used' ? c.used : kindLabel(k) })));
+    let g = { nodes: [], edges: [] }, why = '';
     try {
       if (!memFiles.length) await loadMemory();
-      const g = await api('memory/graph' + (conv ? '?conv=' + encodeURIComponent(conv) : ''));
-      if (!g.nodes.length) { stage.replaceChildren(h('p', { class: 'ch-empty', text: c.graphEmpty })); return; }
+      g = await api('memory/graph' + (conv ? '?conv=' + encodeURIComponent(conv) : ''));
+      if (!g.nodes) { g = { nodes: [], edges: [] }; why = c.failed; }
+      else if (!g.nodes.length) why = c.graphEmpty;
+    } catch (e) { why = e.status === 401 ? (c.signIn || e.message) : c.failed; }
+    try {
       const { openGraph: draw } = await import(new URL('./memgraph.mjs', import.meta.url).href);
+      if (view === 'dashboard' || dead) return;
+      stage.replaceChildren();
       graph = await draw(stage, g, { used: memUsed, reduced: reducedMotion(), flatLabel: c.graphTitle, onPick: src => readFile(src) });
-      overlay.dataset.mode = graph.mode;
+      graph.busy(busy); graph.pause(paused);
       hint.textContent = graph.mode === 'flat' ? c.graphHintFlat : c.graphHint;
-    } catch { stage.replaceChildren(h('p', { class: 'ch-empty', text: c.failed })); }
+      brainNote.hidden = !why;
+      brainNote.textContent = why;
+    } catch { brainNote.hidden = false; brainNote.textContent = c.failed; } finally { opening = false; }
   }
-  function closeGraph() { graph?.close(); graph = null; overlay.hidden = true; }
-  graphBtn.addEventListener('click', openGraph);
-  memSearch.addEventListener('input', drawMemory);
+  function closeBrain() { graph?.close(); graph = null; }
 
+  // ---- view (Brain, Dashboard, Both), theme (System, Light, Dark), pause motion; all remembered
+  let view = VIEWS.includes(store.get('view', 'dashboard')) ? store.get('view', 'dashboard') : 'dashboard';
+  let theme = THEMES.includes(store.get('theme', 'system')) ? store.get('theme', 'system') : 'system';
+  let paused = store.get('motion', '') === 'still';
+  const calm = () => reducedMotion() || paused;
+  // A View Transition where the browser has one (the panes slide and cross-fade); the panes' own rise
+  // animation is the fallback. Never while motion is off.
+  function swap(change) {
+    if (document.startViewTransition && !calm()) {
+      root.classList.add('vt');
+      const t = document.startViewTransition(() => { change(); });
+      t.finished.finally(() => root.classList.remove('vt'));
+    } else change();
+  }
+  function setView(v) {
+    if (!VIEWS.includes(v)) v = 'dashboard';
+    view = v;
+    store.set('view', v);
+    swap(() => {
+      root.dataset.view = v;
+      for (const b of viewBtns) b.setAttribute('aria-pressed', String(b.dataset.view === v));
+      moveBars();
+    });
+    if (v === 'dashboard') closeBrain(); else openBrain();
+    if (v !== 'brain') revealNums();
+  }
+  function paintTheme() {
+    root.dataset.theme = theme;
+    for (const b of themeBtns) b.setAttribute('aria-pressed', String(b.dataset.theme === theme));
+    graph?.retheme();
+  }
+  function setTheme(t) {
+    if (!THEMES.includes(t)) t = 'system';
+    theme = t;
+    store.set('theme', t);
+    if (document.startViewTransition && !calm()) document.startViewTransition(paintTheme);
+    else if (!calm()) { root.classList.add('tt-fading'); paintTheme(); setTimeout(() => root.classList.remove('tt-fading'), 400); } else paintTheme();
+  }
+  function setPaused(p) {
+    paused = p;
+    store.set('motion', p ? 'still' : '');
+    root.dataset.motion = p ? 'still' : '';
+    pauseBtn.setAttribute('aria-pressed', String(p));
+    graph?.pause(p);
+  }
+  function openTab(name) {
+    const sameOpen = saved.tab === name && dash.dataset.side === 'open';
+    showTab(name);
+    if (view === 'brain') setView('dashboard');
+    dash.dataset.side = sameOpen ? 'closed' : 'open';
+  }
+  function showTab(name) {
+    saved.tab = name;
+    for (const [k, p] of Object.entries(panes)) p.hidden = k !== name;
+    for (const b of tabBtns) b.setAttribute('aria-current', String(b.dataset.tab === name));
+    if (name === 'memory') loadMemory();
+    moveBars();
+  }
+  // The orange bars slide to the current rail items (transform only).
+  function moveBars() {
+    for (const [bar, sel] of [[barView, '[data-view][aria-pressed=true]'], [barTab, '[data-tab][aria-current=true]']]) {
+      const cur = rail.querySelector(sel);
+      if (!cur) continue;
+      bar.style.height = `${cur.offsetHeight}px`;
+      bar.style.transform = `translateY(${cur.offsetTop}px)`;
+    }
+  }
+
+  const railBtn = (attrs, kbd, text) => h('button', { type: 'button', ...attrs }, h('kbd', { text: kbd }), text);
+  const viewBtns = [railBtn({ 'data-view': 'brain', title: c.brain }, 'B', c.brain), railBtn({ 'data-view': 'dashboard', title: c.dashboard }, 'D', c.dashboard), railBtn({ 'data-view': 'both', title: c.both }, '⇧B', c.both)];
+  const tabBtns = [['chats', 'C', c.chats], ['tasks', 'W', c.tasks], ['memory', 'M', c.memory]].map(([k, key, t]) => railBtn({ 'data-tab': k }, key, t));
+  const barView = h('i', { class: 'ch-bar', 'aria-hidden': 'true' }), barTab = h('i', { class: 'ch-bar', 'aria-hidden': 'true' });
+  const setBtn = railBtn({ 'aria-haspopup': 'dialog', title: c.settings }, ',', c.settings);
+  const rail = h('nav', { class: 'ch-rail', 'aria-label': c.view }, barView, barTab,
+    h('div', { class: 'sub', text: c.view }), ...viewBtns, h('div', { class: 'sub', text: c.panels }), ...tabBtns, h('div', { class: 'gap' }), setBtn);
+  for (const b of viewBtns) b.addEventListener('click', () => setView(b.dataset.view));
+  for (const b of tabBtns) b.addEventListener('click', () => openTab(b.dataset.tab));
+
+  // Settings and About: the theme, pause motion, and who made this
+  const themeBtns = THEMES.map(t => h('button', { type: 'button', 'data-theme': t, text: c[t], onclick: () => setTheme(t) }));
+  const pauseBtn = h('button', { class: 'ch-btn', type: 'button', 'aria-pressed': String(paused), text: c.pause, onclick: () => setPaused(!paused) });
+  const pop = h('div', { class: 'ch-pop', role: 'dialog', 'aria-label': c.settings, hidden: true },
+    h('h2', { text: c.settings }),
+    lab(c.theme), h('div', { class: 'tt-seg', role: 'group', 'aria-label': c.theme }, ...themeBtns),
+    pauseBtn,
+    reducedMotion() ? h('p', { text: c.motionNote }) : null,
+    lab(c.about), h('p', { text: c.madeIn }));
+  const closePop = () => { pop.hidden = true; setBtn.removeAttribute('aria-expanded'); };
+  setBtn.addEventListener('click', () => { pop.hidden = !pop.hidden; setBtn.setAttribute('aria-expanded', String(!pop.hidden)); });
+
+  // ---- the thread's events drive the sphere and the insignia (see also render and setBusy)
   sendBtn.addEventListener('click', send);
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
   newBtn.addEventListener('click', async () => open_((await api('new', {})).conv));
-  const onKey = e => { if (e.key === 'Escape' && graph) closeGraph(); };
+  memSearch.addEventListener('input', drawMemory);
+  graphBtn.addEventListener('click', () => setView(view === 'dashboard' ? 'both' : 'brain'));
+  const onKey = e => {
+    if (e.key === 'Escape') { if (!pop.hidden) return closePop(); if (view === 'brain') return setView('dashboard'); return; }
+    if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    if (e.target?.closest?.('input, textarea, select, [contenteditable]')) return;
+    const k = e.key;
+    if (k === 'B') setView('both');
+    else if (k === 'b') setView('brain');
+    else if (k === 'd' || k === 'D') setView('dashboard');
+    else if (k === 'c') openTab('chats');
+    else if (k === 'w') openTab('tasks');
+    else if (k === 'm') openTab('memory');
+    else if (k === 'p') setPaused(!paused);
+    else if (k === ',') setBtn.click();
+    else return;
+    e.preventDefault();
+  };
   document.addEventListener('keydown', onKey);
 
-  const root = h('div', { class: 'ch' },
+  const dash = h('section', { class: 'ch-dash', 'data-side': 'closed', 'aria-label': c.dashboard },
     strip,
     h('div', { class: 'ch-body' },
-      h('aside', { class: 'ch-side' }, tabs, ...Object.values(panes)),
-      h('section', { class: 'ch-main' }, log, h('div', { class: 'ch-comp' }, input, sendBtn), overlay)));
+      h('aside', { class: 'ch-side' }, ...Object.values(panes)),
+      h('div', { class: 'ch-main' }, log, h('div', { class: 'ch-comp' }, input, sendBtn))));
+  // The insignia is mounted in ONE element: replace this span to swap in a live version (see README).
+  const brand = h('span', { class: 'tt-brand' },
+    h('span', { class: 'tt-ins tilt', 'data-insignia': '' }, h('i', { class: 'tt-led' })),
+    h('span', { class: 'tt-wm', role: 'img', 'aria-label': 'perennos' }), h('b', { text: 'tempo' }));
+  const dot = h('i', { class: 'tt-dot idle' }), whereText = h('b', { text: c.idle });
+  const root = h('div', { class: 'ch tempo', 'data-view': view, 'data-theme': theme, 'data-motion': paused ? 'still' : '', 'data-busy': 'false' },
+    h('header', { class: 'ch-top' }, brand, h('span', { class: 'ch-where' }, dot, whereText)),
+    rail, h('div', { class: 'ch-views' }, brainPane, dash), pop);
   el.append(root);
   showTab(saved.tab || 'chats');
+  paintTheme();
+  setView(view);
+  requestAnimationFrame(moveBars);
+  const ro = new ResizeObserver(moveBars);
+  ro.observe(root);
   const ready = health();
+  loadMemory();
   convs();
   if (conv) open_(conv);
   timer = setInterval(poll, 1200);
   const ht = setInterval(health, 30000);
-  return { unmount() { dead = true; es?.close(); closeGraph(); clearInterval(timer); clearInterval(ht); document.removeEventListener('keydown', onKey); link.remove(); } };
+  return {
+    unmount() {
+      dead = true; es?.close(); closeBrain(); ro.disconnect(); clearInterval(timer); clearInterval(ht);
+      document.removeEventListener('keydown', onKey); links.forEach(l => l.remove()); root.remove();
+    },
+  };
 }

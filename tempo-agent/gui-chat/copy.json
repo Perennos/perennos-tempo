@@ -44,5 +44,25 @@
     "memory": "Notes",
     "pack": "Knowledge pack"
   },
-  "signIn": "This page needs Tempo's key. Open it from Perennos Tempo (or run tempo-launch open agent)."
+  "signIn": "This page needs Tempo's key. Open it from Perennos Tempo (or run tempo-launch open agent).",
+  "brain": "Brain",
+  "dashboard": "Dashboard",
+  "both": "Both",
+  "view": "View",
+  "panels": "Panels",
+  "settings": "Settings",
+  "theme": "Theme",
+  "system": "System",
+  "light": "Light",
+  "dark": "Dark",
+  "pause": "Pause motion",
+  "working": "Working",
+  "idle": "Idle",
+  "machinesUp": "Machines up",
+  "memoryFiles": "Memory files",
+  "chatCount": "Chats",
+  "brainTitle": "The second brain, as a field.",
+  "about": "About",
+  "madeIn": "Built and maintained in the Cayman Islands",
+  "motionNote": "Your system asks for less motion, so the sphere holds still."
 }

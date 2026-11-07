@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod brand;
 pub mod conductor;
 pub mod home;
 pub mod setup;
@@ -1481,8 +1482,6 @@ impl Problem {
     }
 }
 
-const MARK_SVG: &str = r##"<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#23262d"/><path d="M18 46V18h11a9 9 0 0 1 0 18H24" fill="none" stroke="#ECE6D8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="44" cy="44" r="5" fill="#E8552F"/></svg>"##;
-
 /// The page shown when an app could not be opened: what happened, what to try, the log's last lines.
 pub fn problem_page(p: &Problem, tail: &str, when: u64) -> String {
     let tips: String = p
@@ -1503,35 +1502,19 @@ pub fn problem_page(p: &Problem, tail: &str, when: u64) -> String {
         None => String::new(),
     };
     format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} · Perennos Tempo</title>
-<style>
-:root{{color-scheme:dark}}
-body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#16181d;color:#ece6d8;font:15px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif}}
-main{{width:min(640px,100%);box-sizing:border-box;padding:48px 28px}}
-.mark{{width:44px;height:44px;margin-bottom:30px}}
-h1{{font:500 27px/1.25 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:0 0 10px;letter-spacing:.005em}}
-p,li{{color:#cfc9bd}}
-p{{margin:0 0 14px}}
-ul{{margin:0 0 24px;padding-left:20px}}
-li{{margin:4px 0}}
-pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:14px 16px;overflow:auto;max-height:340px;font:12.5px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:#a9aaad;white-space:pre-wrap;word-break:break-word}}
-code{{font:12.5px ui-monospace,"Cascadia Mono",Consolas,monospace;color:#d9dde2}}
-.small{{font-size:12.5px;color:#8a8b8f}}
-.dot{{display:inline-block;width:7px;height:7px;border-radius:50%;background:#e8552f;margin-right:8px;vertical-align:1px}}
-</style></head>
-<body><main>
-{mark}
-<h1>{title}</h1>
+        r#"{top}<h1>{title}</h1>
 <p>{what}</p>
 <ul>{tips}</ul>
 {log}
 <p class="small"><span class="dot"></span>Nothing was changed or lost. {when}</p>
-</main></body></html>
-"#,
+{end}"#,
+        top = brand::page_top(
+            &format!("{} · Perennos Tempo", html_escape(&p.title)),
+            true,
+            false
+        ),
+        end = brand::PAGE_END,
         title = html_escape(&p.title),
-        mark = MARK_SVG,
         what = html_escape(&p.what),
         tips = tips,
         log = log,
@@ -4522,7 +4505,7 @@ mod tests {
         assert!(html.contains("default-src 'none'"));
         for bad in [
             "<script",
-            "<link",
+            "<link rel=\"stylesheet\"",
             "<form",
             "<iframe",
             "src=\"http",

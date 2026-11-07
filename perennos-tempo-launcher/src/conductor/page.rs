@@ -9,7 +9,7 @@
 use super::engines::{size_words, Engine};
 use super::run::{recent_runs, RunInfo};
 use super::spec::{what_it_does, Band, May, Member};
-use crate::{html_escape, write_atomic, Ctx, MARK_SVG};
+use crate::{brand, html_escape, write_atomic, Ctx};
 use std::path::{Path, PathBuf};
 
 /// A `file:` address for a path on this computer, so a link opens the note.
@@ -282,52 +282,7 @@ pub fn render(bands: &[BandView], engines: &[Engine], apps: &[AppState]) -> Stri
     };
     let apps_html: String = apps.iter().map(app_card).collect();
     format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>{title}</title>
-<style>
-:root{{color-scheme:dark}}
-*{{box-sizing:border-box}}
-body{{margin:0;background:#16181d;color:#ece6d8;font:15px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif}}
-main{{width:min(1040px,100%);margin:0 auto;padding:48px 24px 64px}}
-.mark{{width:44px;height:44px;margin-bottom:28px}}
-h1{{font:500 30px/1.25 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:0 0 10px;overflow-wrap:anywhere}}
-h2{{font:500 21px/1.3 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:44px 0 12px}}
-h3{{font:600 16px/1.4 system-ui,sans-serif;margin:0 0 4px;overflow-wrap:anywhere}}
-h3.bandname{{font:500 20px/1.3 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:22px 0 4px}}
-h3.sub{{margin:20px 0 8px;color:#e6d9bd}}
-p,li{{color:#cfc9bd}}
-.lede{{font-size:16.5px;max-width:62ch;margin:6px 0 12px}}
-code{{font:13px ui-monospace,"Cascadia Mono",Consolas,monospace;color:#e6d9bd;overflow-wrap:anywhere}}
-pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:10px 14px;margin:8px 0 0;overflow:auto;font:13px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:#d9dde2;user-select:all;white-space:pre}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(230px,100%),1fr));gap:16px}}
-.card,.flow{{background:#1b1e24;border:1px solid #2a2c31;border-radius:14px;padding:16px 18px;min-width:0}}
-.card p{{margin:6px 0 0}}
-.card.down{{border-color:#5a3328}}
-.inst{{font:600 12px/1.2 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#E8552F;margin:0 0 6px!important}}
-.inst.up{{color:#8fcf9a}}
-.inst.down{{color:#f08a6a}}
-.handle{{font:13px ui-monospace,"Cascadia Mono",Consolas,monospace;color:#e6d9bd;overflow-wrap:anywhere}}
-.models{{margin:8px 0 0;padding-left:18px}}
-.models li{{overflow-wrap:anywhere}}
-.band{{margin-bottom:30px}}
-.flow{{margin-bottom:14px}}
-.flow p{{margin:6px 0 0}}
-.chip{{display:inline-block;background:#23262d;border:1px solid #2a2c31;border-radius:999px;padding:1px 12px;color:#ece6d8}}
-.arrow{{color:#8a8b8f}}
-.steps{{overflow-wrap:anywhere}}
-.small{{font-size:12.5px;color:#8a8b8f}}
-.room{{background:#1d2027;border:1px solid #2a2c31;border-left:3px solid #E8552F;border-radius:10px;padding:14px 16px;color:#ece6d8;margin-top:14px}}
-.room p{{margin:0 0 6px;color:#ece6d8}}
-.runs{{padding-left:0;list-style:none;margin:0}}
-.runs li{{background:#1b1e24;border:1px solid #2a2c31;border-radius:12px;padding:10px 14px;margin-bottom:10px;overflow-wrap:anywhere}}
-a{{color:#f0b9a6}}
-@media (max-width:720px){{main{{padding:32px 16px 48px}}h1{{font-size:25px}}}}
-</style></head>
-<body><main>
-{mark}
-<h1>{heading}</h1>
+        r#"{top}<h1>{heading}</h1>
 <p class="lede">The Conductor raises the baton. Here is every engine it can cue, every band it leads, what they played last, and which apps are awake.</p>
 
 <h2>Engines</h2>
@@ -344,9 +299,9 @@ a{{color:#f0b9a6}}
 <div class="cards">{apps_html}</div>
 
 <p class="small">Nothing here leaves this computer. Members only talk and write drafts into your Vault: they never post, send, buy or delete anything. This page is static and can be rewritten any time with <code>tempo-launch conductor page</code>.</p>
-</main></body></html>
-"#,
-        mark = MARK_SVG,
+{end}"#,
+        top = brand::page_top(&title, true, true),
+        end = brand::PAGE_END,
         heading = if bands.len() == 1 {
             html_escape(&bands[0].band.name)
         } else {

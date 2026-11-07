@@ -8,7 +8,7 @@ use super::plan::{Plan, Run};
 use super::probe::Machine;
 use super::propose::{APPLY_COMMAND, OLLAMA_DEFAULT_PORT};
 use crate::conductor::templates;
-use crate::{html_escape, MARK_SVG};
+use crate::{brand, html_escape};
 use std::path::Path;
 
 /// The name the AI's tool entry is saved under.
@@ -88,36 +88,7 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
         })
         .collect();
     format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>Welcome to Perennos Tempo</title>
-<style>
-:root{{color-scheme:dark}}
-*{{box-sizing:border-box}}
-body{{margin:0;background:#16181d;color:#ece6d8;font:15px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif}}
-main{{width:min(960px,100%);margin:0 auto;padding:48px 24px 64px}}
-.mark{{width:44px;height:44px;margin-bottom:28px}}
-h1{{font:500 30px/1.25 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:0 0 10px}}
-h2{{font:500 21px/1.3 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:44px 0 8px}}
-h3{{font:600 15px/1.4 system-ui,sans-serif;margin:0 0 6px}}
-p,li{{color:#cfc9bd}}
-.lede{{font-size:16.5px;max-width:62ch}}
-ul{{padding-left:20px}}
-code{{font:13px ui-monospace,"Cascadia Mono",Consolas,monospace;color:#e6d9bd}}
-pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:12px 14px;margin:8px 0 14px;overflow:auto;font:13px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:#d9dde2;user-select:all;white-space:pre}}
-.verdict{{background:#1d2027;border:1px solid #2a2c31;border-left:3px solid #E8552F;border-radius:10px;padding:14px 16px;color:#ece6d8}}
-.choices{{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:14px;align-items:start}}
-.card{{background:#1b1e24;border:1px solid #2a2c31;border-radius:14px;padding:18px 18px 6px;min-width:0}}
-.card p{{margin:0 0 8px}}
-.step{{font-size:13px;color:#a9a597;margin:10px 0 0}}
-.small{{font-size:12.5px;color:#8a8b8f}}
-.share{{border:1px solid #2a2c31;border-radius:12px;padding:6px 18px 8px;background:#1b1e24}}
-@media (max-width:720px){{main{{padding:32px 16px 48px}}.choices{{grid-template-columns:1fr}}h1{{font-size:25px}}}}
-</style></head>
-<body><main>
-{mark}
-<h1>Welcome to Perennos Tempo</h1>
+        r#"{top}<h1>Welcome to Perennos Tempo</h1>
 <p class="lede">Tempo has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
 
 <h2>1. What this computer can run</h2>
@@ -184,9 +155,9 @@ pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:12px
 <p>Your own AI can design a band with you too: the setup helper from step 3 has <code>conductor_templates</code> (read-only) and <code>conductor_propose</code>, and you set a proposal up yourself with <code>tempo-launch conductor apply-proposal</code>.</p>
 
 <p class="small">The longer plan, with sizes and licences, is in <code>setup.html</code> in the Tempo folder (<code>tempo-launch setup</code> shows it in the terminal). This page can be opened again with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
-</main></body></html>
-"#,
-        mark = MARK_SVG,
+{end}"#,
+        top = brand::page_top("Welcome to Perennos Tempo", true, true),
+        end = brand::PAGE_END,
         verdict = html_escape(&verdict(p)),
         fits = fits,
         note = note,

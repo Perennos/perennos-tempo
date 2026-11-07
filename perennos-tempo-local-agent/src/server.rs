@@ -1036,6 +1036,8 @@ fn static_file(s: &mut TcpStream, dir: &Path, rel: &str) {
         "html" => "text/html; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
+        "webp" => "image/webp",
+        "woff2" => "font/woff2",
         _ => "application/octet-stream",
     };
     match std::fs::read(&p) {
