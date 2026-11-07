@@ -1,0 +1,102 @@
+name: Something went wrong
+description: An error, a crash, a hang, or something that did not do what it said.
+title: "[bug] "
+labels: [bug, beta]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Perennos Tempo early. A few minutes here saves us hours.
+
+        **Before you paste anything:** leave out keys, passwords, your name, your
+        email, file paths that show your user name, and your home network
+        addresses. Write `<removed>` instead. Logs can contain them, so read before
+        you paste.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where did it happen?
+      options:
+        - Installing (the Setup wizard, or install.sh / the .deb)
+        - First start (the welcome page, the scan, setting up models)
+        - Tempo Agent (the chat, tools, approvals, /undo, background commands)
+        - Tempo Vault (notes, search, the graph)
+        - Tempo Studio (mixing, mastering, analysis)
+        - Tempo Room (rooms, guests, teammates)
+        - tempo-launch (start, stop, status, link, mcp)
+        - Tempo Soundcheck (code review)
+        - Somewhere else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw, in your own words. A screenshot helps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we make it happen again?
+      placeholder: |
+        1. Opened Perennos Tempo from the Start menu
+        2. Asked it to ...
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`tempo-launch --version`, or the number in the Setup file name."
+      placeholder: "2.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple silicon)
+        - Linux (x86_64)
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Your computer, roughly
+      description: Memory, graphics card, and whether this is one computer or several (no host names or addresses).
+      placeholder: "32 GB RAM, RTX 4070 12 GB, one computer"
+  - type: dropdown
+    id: ollama
+    attributes:
+      label: Ollama
+      options:
+        - Tempo downloaded its own Ollama during install
+        - I already had Ollama
+        - No Ollama
+        - Not sure
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional, read them first)
+      description: |
+        The logs are in the `logs` folder of your Tempo home:
+        Windows `%LOCALAPPDATA%\Perennos Tempo\logs`, Linux and macOS `~/.tempo/logs`.
+        Paste only the lines around the problem, with anything personal replaced by `<removed>`.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed keys, passwords, names, emails, personal paths and home addresses from everything above.
+          required: true

@@ -142,6 +142,8 @@ Perennos-authored files are offered under the [PolyForm Shield License 1.0.0](LI
 
 ## Contributing and security
 
+**Trying the beta?** [TESTING.md](TESTING.md) says what to try and how to report what you find.
+
 Contributions are welcome. They come in under Apache-2.0 with a sign-off (`git commit -s`), so they can go into every edition of Perennos Tempo; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md). What the apps keep and what leaves your computer: [PRIVACY.md](PRIVACY.md).
 
 <br>
