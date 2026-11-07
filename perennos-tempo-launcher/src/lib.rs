@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod bank;
 pub mod brand;
 pub mod conductor;
 pub mod home;
@@ -92,6 +93,13 @@ usage: tempo-launch [command]
                     write and open the Conductor page: engines, bands, last runs, apps
   conductor apply-proposal [NAME]
                     show the band your AI proposed (see mcp) and set it up only after your y/N
+  crate             The Crate, a bank of free tools (Blender, FFmpeg, Pandoc and more): which are here
+  crate show ID | check | add ID [--yes] [--enable] | remove ID [--yes]
+                    one tool in full, detect them all, set one up (shows the exact command, asks
+                    y/N, never runs sudo for you), or take one away
+  crate enable ID | disable ID | folders [add|remove DIR] | review SCRIPT
+                    let Tempo play a tool, on the folders you allow; approve a Blender script
+  crate mcp         the Crate's tools as an MCP server for the agent (turned-on tools only)
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1881,6 +1889,8 @@ pub enum Cmd {
     },
     /// `conductor ...` (also `band ...`): Tempo Conductor.
     Conductor(conductor::ConductorCmd),
+    /// `crate ...`: The Crate, a bank of free tools Tempo can set up and play.
+    Crate(bank::BankCmd),
     Help,
     Version,
 }
@@ -2018,6 +2028,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             }
         }
         "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
+        "crate" => Cmd::Crate(bank::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2084,6 +2095,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
             setup::mcp::run_stdio(ctx)
         }),
         Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
+        Cmd::Crate(c) => Ok(bank::run(ctx, c)),
         Cmd::Schedule {
             remove,
             print,

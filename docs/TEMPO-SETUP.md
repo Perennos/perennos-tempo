@@ -259,6 +259,30 @@ What the agent allows: when its health says `"engines": true`, a conversation ca
 
 `tempo-launch mcp` has two more tools for the AI you already use: `conductor_templates` (read-only: the ready-made bands and the rules) and `conductor_propose`, which writes `<Tempo home>/bands/proposals/<name>.json` and returns the command for you. Nothing is set up until you run `tempo-launch conductor apply-proposal [NAME]`: it shows the band in plain words, shows the AI's note labelled as the AI's, and asks y/N (there is no `--yes`). A proposal may say `fast` or `heavy` for a member's model, or leave it out; Tempo fills in this computer's models when you apply it, and the Conductor picks each member's engine then (an `engine` written in a proposal is dropped). The proposal is checked strictly again when it is read.
 
+## The Crate: free tools Tempo can set up and play
+
+The Crate is a bank of free third-party tools, like a record crate you dig through: the best free one in each class, set up for you and played by Tempo. (Plain meaning: tools you can configure. The command is `tempo-launch crate`.) The catalog is `catalog/crate.json`, with 23 tools, each with its licence named: Blender (GPL-3.0-or-later), ComfyUI (GPL-3.0-only), FFmpeg (LGPL-2.1-or-later, GPL in fuller builds), ImageMagick (the ImageMagick License), Inkscape (GPL-3.0-or-later), GIMP (GPL-3.0-or-later), SoX (GPL-2.0-or-later), whisper.cpp (MIT), Piper (GPL-3.0-or-later), Pandoc (GPL-2.0-or-later), LibreOffice (MPL-2.0), Tesseract (Apache-2.0), yt-dlp (Unlicense), OBS Studio (GPL-2.0-or-later), Godot (MIT), FreeCAD (LGPL-2.0-or-later), OpenSCAD (GPL-2.0-or-later), KiCad (GPL-3.0-or-later), Ollama (MIT), ripgrep (Unlicense or MIT), fd (MIT or Apache-2.0), ExifTool (Artistic or GPL) and Audacity (GPL-2.0-or-later, listed as an app only). GIMP is the pick over Krita because `gimp -i -b` batch scripting is the better headless story.
+
+```
+tempo-launch crate                  what is here and what is not, with versions
+tempo-launch crate show ID          one tool in full: licence, size, the install command, what Tempo can do
+tempo-launch crate check            look for every tool and remember it in <home>/crate.json
+tempo-launch crate add ID           show the exact command, ask y/N, run it, then ask whether Tempo may play it
+tempo-launch crate remove ID        show the uninstall command, ask y/N, run it
+tempo-launch crate enable ID        let Tempo play a tool (disable turns it off)
+tempo-launch crate folders          the folders the tools may touch (add DIR, remove DIR)
+tempo-launch crate review SCRIPT    read a Blender script and approve exactly that text
+tempo-launch crate mcp              the MCP server the agent starts
+```
+
+**Your own package manager.** `add` picks winget on Windows, Homebrew on Mac, apt on Linux, or pipx (Piper), whichever you have, and prints the command before it asks. apt needs admin rights, so Tempo prints that command and you run it; Tempo never runs sudo. A pinned download (the catalog supports one, with its SHA-256) is checked before anything is unpacked or run, and a file that does not match goes to `<home>/trash`. No pinned download ships yet: I could not fetch release files to hash them from here, so every tool uses a package manager, or a by-hand note where none has it (whisper.cpp on Windows and Linux, Godot on Linux, ComfyUI). `remove` for something Tempo fetched itself moves it to the trash; nothing is deleted.
+
+**What was checked.** winget ids and Homebrew names were checked against the winget-pkgs and Homebrew trees on 2026-11-07, and Piper's licence against PyPI. apt names and install folders were not tried on a real machine. A tool with a guess in it says `"verified": false` and why: ComfyUI, GIMP, whisper.cpp, Piper, Godot, FreeCAD and KiCad.
+
+**How Tempo plays them.** `crate mcp` serves only tools that are installed and turned on: `blender_render`, `blender_script`, `ffmpeg_convert`, `ffmpeg_trim`, `image_resize`, `image_convert`, `svg_export`, `ocr`, `doc_convert` (Pandoc or LibreOffice), `transcribe`, `speak`, `audio_normalize`, `exif_read`, `text_search`, `openscad_export`. Each runs the real program with a fixed argument list: no shell, no free-form command. Paths must sit inside the workbench (`<home>/crate/work`), a folder you added, `TEMPO_CRATE_ROOTS`, or the agent's own write folders; `..` and odd characters are refused; inputs have size limits; an output never replaces a file; a run that hangs is stopped. Reading tools (`ocr`, `transcribe`, `exif_read`, `text_search`) carry `readOnlyHint`; writing tools carry `destructiveHint: false`. The exception is `blender_script`, which can do anything a script can, so it is marked destructive, runs only a file in `<home>/crate/scripts` whose SHA-256 you approved with `crate review`, and refuses it again if the file changes. `whisper.cpp` and Piper need a model or voice file in `<home>/crate/models`.
+
+The agent connects the Crate by itself, the way it connects Vault, Studio and Room: when `<home>/crate.json` has a tool turned on and `tempo-launch` is next to Tempo, it adds a `crate` server whose every tool asks first unless you trust it (`mcp_trust`). The setup helper (`tempo-launch mcp`) also has `crate_list` (read-only) and `crate_propose`, which only writes a suggestion and gives you the command to run. The welcome page lists the best picks for this computer.
+
 ## Re-run it
 
 After a hardware change (more RAM, a new card), after adding models to the catalog, or after a new goal: `tempo-launch setup` shows what changed, `tempo-launch setup --apply` applies it. On each PC of a group, run it on that PC.

@@ -1,0 +1,868 @@
+{
+ "about": "The Crate: free tools in their class, set up for you and played by Tempo. winget ids and Homebrew names were checked against the winget-pkgs and Homebrew trees on 2026-11-07. apt names and install folders were not tried on a real machine; a tool whose names or folders are a guess carries verified:false and says why. Each licence is the project's own, as Homebrew lists it where it does. No pinned downloads ship yet: they need a SHA-256 copied from a release. The code that checks one is in, and the tests run it.",
+ "verified_at": "2026-11-07",
+ "tools": [
+  {
+   "id": "blender",
+   "name": "Blender",
+   "for": "3D modelling, animation and rendering. Tempo renders scenes with no window.",
+   "category": "3D",
+   "licence": "GPL-3.0-or-later",
+   "homepage": "https://www.blender.org/",
+   "install": {
+    "windows": {
+     "winget": "BlenderFoundation.Blender"
+    },
+    "macos": {
+     "brew": "blender",
+     "cask": true
+    },
+    "linux": {
+     "apt": "blender"
+    }
+   },
+   "detect": {
+    "bins": [
+     "blender"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\Blender Foundation\\Blender *\\blender.exe"
+     ],
+     "macos": [
+      "/Applications/Blender.app/Contents/MacOS/Blender"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 400,
+   "tempo": "Renders a scene to an image with `blender -b`, or runs a Python script you have read and approved.",
+   "tools": [
+    "blender_render",
+    "blender_script"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. The apt package is Debian's own, older than the current release."
+  },
+  {
+   "id": "comfyui",
+   "name": "ComfyUI",
+   "for": "Make images from a prompt with local diffusion models.",
+   "category": "Images",
+   "licence": "GPL-3.0-only",
+   "homepage": "https://github.com/comfyanonymous/ComfyUI",
+   "install": {
+    "windows": {
+     "manual": "ComfyUI has no package. Download the portable build from the releases page of the homepage and unpack it."
+    },
+    "macos": {
+     "manual": "Follow the install steps on the homepage (it runs from a Python environment)."
+    },
+    "linux": {
+     "manual": "Follow the install steps on the homepage (it runs from a Python environment)."
+    }
+   },
+   "detect": {
+    "agent_setting": "comfy_url"
+   },
+   "mb": 6000,
+   "tempo": "Already wired in: the agent's `comfy_image` tool makes one image and gives the graphics card back after. Set `comfy_url` in the agent's config to switch it on.",
+   "tools": [],
+   "verified": false,
+   "note": "No package manager has it, so `crate add` only points at the install steps. Size is ComfyUI plus one checkpoint. Detection is the agent's `comfy_url` setting, not a program on PATH."
+  },
+  {
+   "id": "ffmpeg",
+   "name": "FFmpeg",
+   "for": "Convert, cut and fix any video or audio file.",
+   "category": "Video and audio",
+   "licence": "LGPL-2.1-or-later (GPL-2.0-or-later or GPL-3.0 in builds with more codecs)",
+   "homepage": "https://ffmpeg.org/",
+   "install": {
+    "windows": {
+     "winget": "Gyan.FFmpeg"
+    },
+    "macos": {
+     "brew": "ffmpeg"
+    },
+    "linux": {
+     "apt": "ffmpeg"
+    }
+   },
+   "detect": {
+    "bins": [
+     "ffmpeg"
+    ],
+    "version": [
+     "-version"
+    ]
+   },
+   "mb": 120,
+   "tempo": "Converts between formats with three presets, and trims a clip by time.",
+   "tools": [
+    "ffmpeg_convert",
+    "ffmpeg_trim"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. Homebrew's build is GPL-3.0-or-later."
+  },
+  {
+   "id": "imagemagick",
+   "name": "ImageMagick",
+   "for": "Resize and convert pictures in bulk, from the command line.",
+   "category": "Images",
+   "licence": "ImageMagick License (Apache-2.0 style)",
+   "homepage": "https://imagemagick.org/",
+   "install": {
+    "windows": {
+     "winget": "ImageMagick.ImageMagick"
+    },
+    "macos": {
+     "brew": "imagemagick"
+    },
+    "linux": {
+     "apt": "imagemagick"
+    }
+   },
+   "detect": {
+    "bins": [
+     "magick",
+     "convert"
+    ],
+    "bins_windows": [
+     "magick"
+    ],
+    "version": [
+     "-version"
+    ]
+   },
+   "mb": 100,
+   "tempo": "Resizes a picture to a width or height, and converts between PNG, JPEG, WebP and more.",
+   "tools": [
+    "image_resize",
+    "image_convert"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. On Windows only `magick` counts, because `convert` is a different program there. Debian ships ImageMagick 6, where the program is `convert`."
+  },
+  {
+   "id": "inkscape",
+   "name": "Inkscape",
+   "for": "Draw and edit vector graphics (logos, icons, diagrams).",
+   "category": "Vector",
+   "licence": "GPL-3.0-or-later",
+   "homepage": "https://inkscape.org/",
+   "install": {
+    "windows": {
+     "winget": "Inkscape.Inkscape"
+    },
+    "macos": {
+     "brew": "inkscape",
+     "cask": true
+    },
+    "linux": {
+     "apt": "inkscape"
+    }
+   },
+   "detect": {
+    "bins": [
+     "inkscape"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\Inkscape\\bin\\inkscape.com"
+     ],
+     "macos": [
+      "/Applications/Inkscape.app/Contents/MacOS/inkscape"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 300,
+   "tempo": "Exports an SVG to PNG or PDF at the size you ask for.",
+   "tools": [
+    "svg_export"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew cask checked on 2026-11-07."
+  },
+  {
+   "id": "gimp",
+   "name": "GIMP",
+   "for": "Edit photos and paint, with scripts for batch work.",
+   "category": "Images",
+   "licence": "GPL-3.0-or-later",
+   "homepage": "https://www.gimp.org/",
+   "install": {
+    "windows": {
+     "winget": "GIMP.GIMP.3"
+    },
+    "macos": {
+     "brew": "gimp",
+     "cask": true
+    },
+    "linux": {
+     "apt": "gimp"
+    }
+   },
+   "detect": {
+    "bins": [
+     "gimp-console",
+     "gimp"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\GIMP 3\\bin\\gimp-console*.exe"
+     ],
+     "macos": [
+      "/Applications/GIMP.app/Contents/MacOS/gimp-console"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 350,
+   "tempo": "Listed for now: GIMP runs scripts with `gimp -i -b`, which suits batch edits, but Tempo does not drive it yet. Krita has no comparable batch mode, so GIMP is the pick.",
+   "tools": [],
+   "verified": false,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. The program name differs by version and OS, so the detection names and paths are a guess until tried on each."
+  },
+  {
+   "id": "sox",
+   "name": "SoX",
+   "for": "Clean up, trim and normalise sound files.",
+   "category": "Audio",
+   "licence": "GPL-2.0-or-later (libraries LGPL-2.1-or-later)",
+   "homepage": "https://sox.sourceforge.net/",
+   "install": {
+    "windows": {
+     "winget": "ChrisBagwell.SoX"
+    },
+    "macos": {
+     "brew": "sox"
+    },
+    "linux": {
+     "apt": "sox"
+    }
+   },
+   "detect": {
+    "bins": [
+     "sox"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles(x86)%\\sox-*\\sox.exe"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 10,
+   "tempo": "Brings a recording to a steady peak level.",
+   "tools": [
+    "audio_normalize"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. The Windows package is the old 14.4.2 build."
+  },
+  {
+   "id": "whisper-cpp",
+   "name": "whisper.cpp",
+   "for": "Turn speech into text on your own computer, nothing uploaded.",
+   "category": "Speech",
+   "licence": "MIT",
+   "homepage": "https://github.com/ggml-org/whisper.cpp",
+   "install": {
+    "windows": {
+     "manual": "No winget package. Download the Windows zip (whisper-bin-x64) from the releases page of the homepage."
+    },
+    "macos": {
+     "brew": "whisper.cpp"
+    },
+    "linux": {
+     "manual": "No apt package that Tempo has checked. Build it from the homepage, or download a release."
+    }
+   },
+   "detect": {
+    "bins": [
+     "whisper-cli",
+     "whisper-cpp"
+    ]
+   },
+   "mb": 30,
+   "tempo": "Writes out what is said in an audio file. It needs one model file in the Crate's models folder (the base English one is about 150 MB).",
+   "tools": [
+    "transcribe"
+   ],
+   "verified": false,
+   "note": "Homebrew formula `whisper.cpp` checked on 2026-11-07 (MIT). Nothing found for winget or apt, so Windows and Linux are by hand. The program is `whisper-cli` in current releases."
+  },
+  {
+   "id": "piper",
+   "name": "Piper",
+   "for": "Read text aloud with a natural local voice.",
+   "category": "Speech",
+   "licence": "GPL-3.0-or-later",
+   "homepage": "https://github.com/OHF-voice/piper1-gpl",
+   "install": {
+    "windows": {
+     "pipx": "piper-tts"
+    },
+    "macos": {
+     "pipx": "piper-tts"
+    },
+    "linux": {
+     "pipx": "piper-tts"
+    }
+   },
+   "detect": {
+    "bins": [
+     "piper"
+    ]
+   },
+   "mb": 60,
+   "tempo": "Turns a short text into a WAV file. It needs one voice file in the Crate's models folder (about 60 MB).",
+   "tools": [
+    "speak"
+   ],
+   "verified": false,
+   "note": "PyPI package `piper-tts` 1.8.0 checked on 2026-11-07 (GPL-3.0-or-later). Needs Python and pipx first. The `piper` program name and its `-m`/`-f` flags were not run here."
+  },
+  {
+   "id": "pandoc",
+   "name": "Pandoc",
+   "for": "Turn documents into other documents: Markdown, Word, HTML, EPUB.",
+   "category": "Documents",
+   "licence": "GPL-2.0-or-later",
+   "homepage": "https://pandoc.org/",
+   "install": {
+    "windows": {
+     "winget": "JohnMacFarlane.Pandoc"
+    },
+    "macos": {
+     "brew": "pandoc"
+    },
+    "linux": {
+     "apt": "pandoc"
+    }
+   },
+   "detect": {
+    "bins": [
+     "pandoc"
+    ],
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 150,
+   "tempo": "Converts a document between Markdown, Word, OpenDocument, HTML, EPUB and plain text.",
+   "tools": [
+    "doc_convert"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. PDF output needs a LaTeX engine, so Tempo hands PDFs to LibreOffice when it has it."
+  },
+  {
+   "id": "libreoffice",
+   "name": "LibreOffice",
+   "for": "Open, edit and convert Word, Excel and PowerPoint files, free.",
+   "category": "Documents",
+   "licence": "MPL-2.0",
+   "homepage": "https://www.libreoffice.org/",
+   "install": {
+    "windows": {
+     "winget": "TheDocumentFoundation.LibreOffice"
+    },
+    "macos": {
+     "brew": "libreoffice",
+     "cask": true
+    },
+    "linux": {
+     "apt": "libreoffice"
+    }
+   },
+   "detect": {
+    "bins": [
+     "soffice",
+     "libreoffice"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\LibreOffice\\program\\soffice.exe"
+     ],
+     "macos": [
+      "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 350,
+   "tempo": "Converts office files to PDF and other formats with no window.",
+   "tools": [
+    "doc_convert"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew cask checked on 2026-11-07."
+  },
+  {
+   "id": "tesseract",
+   "name": "Tesseract",
+   "for": "Read the text in a scan or a screenshot (OCR).",
+   "category": "Documents",
+   "licence": "Apache-2.0",
+   "homepage": "https://github.com/tesseract-ocr/tesseract",
+   "install": {
+    "windows": {
+     "winget": "UB-Mannheim.TesseractOCR"
+    },
+    "macos": {
+     "brew": "tesseract"
+    },
+    "linux": {
+     "apt": "tesseract-ocr"
+    }
+   },
+   "detect": {
+    "bins": [
+     "tesseract"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\Tesseract-OCR\\tesseract.exe"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 60,
+   "tempo": "Reads the text out of a picture and hands it back. Read-only.",
+   "tools": [
+    "ocr"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. English comes with it; other languages are separate downloads."
+  },
+  {
+   "id": "yt-dlp",
+   "name": "yt-dlp",
+   "for": "Download video or audio you have the right to keep.",
+   "category": "Video and audio",
+   "licence": "Unlicense",
+   "homepage": "https://github.com/yt-dlp/yt-dlp",
+   "install": {
+    "windows": {
+     "winget": "yt-dlp.yt-dlp"
+    },
+    "macos": {
+     "brew": "yt-dlp"
+    },
+    "linux": {
+     "apt": "yt-dlp"
+    }
+   },
+   "detect": {
+    "bins": [
+     "yt-dlp"
+    ],
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 20,
+   "tempo": "Listed only: you run it yourself, on media you have the right to download. Tempo does not drive it.",
+   "tools": [],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. Sites change often, so it needs updating more than most; the apt package lags behind."
+  },
+  {
+   "id": "obs",
+   "name": "OBS Studio",
+   "for": "Record your screen or stream, with scenes and sources.",
+   "category": "Video and audio",
+   "licence": "GPL-2.0-or-later",
+   "homepage": "https://obsproject.com/",
+   "install": {
+    "windows": {
+     "winget": "OBSProject.OBSStudio"
+    },
+    "macos": {
+     "brew": "obs",
+     "cask": true
+    },
+    "linux": {
+     "apt": "obs-studio"
+    }
+   },
+   "detect": {
+    "bins": [
+     "obs"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\obs-studio\\bin\\64bit\\obs64.exe"
+     ],
+     "macos": [
+      "/Applications/OBS.app/Contents/MacOS/OBS"
+     ]
+    }
+   },
+   "mb": 120,
+   "tempo": "App only: you press record. Tempo does not drive it.",
+   "tools": [],
+   "verified": true,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. It has no version command that is safe to run, so only 'installed' is shown."
+  },
+  {
+   "id": "godot",
+   "name": "Godot",
+   "for": "Make 2D and 3D games with a free engine.",
+   "category": "Games",
+   "licence": "MIT",
+   "homepage": "https://godotengine.org/",
+   "install": {
+    "windows": {
+     "winget": "GodotEngine.GodotEngine"
+    },
+    "macos": {
+     "brew": "godot",
+     "cask": true
+    },
+    "linux": {
+     "manual": "Download the Linux build from the homepage (Debian only packages the older Godot 3)."
+    }
+   },
+   "detect": {
+    "bins": [
+     "godot",
+     "godot4",
+     "Godot"
+    ],
+    "paths": {
+     "macos": [
+      "/Applications/Godot.app/Contents/MacOS/Godot"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 150,
+   "tempo": "Listed for now: Godot can export projects from the command line, but Tempo does not drive it yet.",
+   "tools": [],
+   "verified": false,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. The Windows program name after install was not checked."
+  },
+  {
+   "id": "freecad",
+   "name": "FreeCAD",
+   "for": "Design parts you can build, with parametric 3D CAD.",
+   "category": "CAD",
+   "licence": "LGPL-2.0-or-later",
+   "homepage": "https://www.freecad.org/",
+   "install": {
+    "windows": {
+     "winget": "FreeCAD.FreeCAD"
+    },
+    "macos": {
+     "brew": "freecad",
+     "cask": true
+    },
+    "linux": {
+     "apt": "freecad"
+    }
+   },
+   "detect": {
+    "bins": [
+     "freecadcmd",
+     "FreeCADCmd",
+     "freecad"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\FreeCAD *\\bin\\FreeCADCmd.exe"
+     ],
+     "macos": [
+      "/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 800,
+   "tempo": "Listed for now: FreeCAD scripts in Python, which Tempo does not run yet.",
+   "tools": [],
+   "verified": false,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. Install folder names are a guess."
+  },
+  {
+   "id": "openscad",
+   "name": "OpenSCAD",
+   "for": "Describe a 3D part in code and get a printable model.",
+   "category": "CAD",
+   "licence": "GPL-2.0-or-later",
+   "homepage": "https://openscad.org/",
+   "install": {
+    "windows": {
+     "winget": "OpenSCAD.OpenSCAD"
+    },
+    "macos": {
+     "brew": "openscad",
+     "cask": true
+    },
+    "linux": {
+     "apt": "openscad"
+    }
+   },
+   "detect": {
+    "bins": [
+     "openscad"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\OpenSCAD\\openscad.exe"
+     ],
+     "macos": [
+      "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 80,
+   "tempo": "Turns a .scad file into an STL, 3MF or picture.",
+   "tools": [
+    "openscad_export"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. Both of those are the 2021.01 release; Debian's is newer. The licence is GPL-2.0-or-later with a linking exception for CGAL."
+  },
+  {
+   "id": "kicad",
+   "name": "KiCad",
+   "for": "Design circuit boards, from schematic to fabrication files.",
+   "category": "Electronics",
+   "licence": "GPL-3.0-or-later",
+   "homepage": "https://www.kicad.org/",
+   "install": {
+    "windows": {
+     "winget": "KiCad.KiCad"
+    },
+    "macos": {
+     "brew": "kicad",
+     "cask": true
+    },
+    "linux": {
+     "apt": "kicad"
+    }
+   },
+   "detect": {
+    "bins": [
+     "kicad-cli"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\KiCad\\*\\bin\\kicad-cli.exe"
+     ],
+     "macos": [
+      "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+     ]
+    },
+    "version": [
+     "version"
+    ]
+   },
+   "mb": 2000,
+   "tempo": "Listed for now: `kicad-cli` can export Gerbers and PDFs, which Tempo does not drive yet.",
+   "tools": [],
+   "verified": false,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. The install folder names are a guess."
+  },
+  {
+   "id": "ollama",
+   "name": "Ollama",
+   "for": "Run language models on your own computer.",
+   "category": "Language models",
+   "licence": "MIT",
+   "homepage": "https://ollama.com/",
+   "install": {
+    "windows": {
+     "winget": "Ollama.Ollama"
+    },
+    "macos": {
+     "brew": "ollama"
+    },
+    "linux": {
+     "manual": "Run `tempo-launch setup --ollama`: Tempo fetches its own pinned copy and checks its SHA-256."
+    }
+   },
+   "detect": {
+    "bins": [
+     "ollama"
+    ],
+    "paths": {
+     "windows": [
+      "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe"
+     ]
+    },
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 1500,
+   "tempo": "Already the engine: `tempo-launch setup` picks models for it. See setup for the pinned copy Tempo can fetch itself.",
+   "tools": [],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. Linked to Tempo's own setup (catalog/runtime.json)."
+  },
+  {
+   "id": "ripgrep",
+   "name": "ripgrep",
+   "for": "Search every file in a folder in a blink.",
+   "category": "Search",
+   "licence": "Unlicense OR MIT",
+   "homepage": "https://github.com/BurntSushi/ripgrep",
+   "install": {
+    "windows": {
+     "winget": "BurntSushi.ripgrep.MSVC"
+    },
+    "macos": {
+     "brew": "ripgrep"
+    },
+    "linux": {
+     "apt": "ripgrep"
+    }
+   },
+   "detect": {
+    "bins": [
+     "rg"
+    ],
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 6,
+   "tempo": "Finds text in your files, with line numbers. Read-only.",
+   "tools": [
+    "text_search"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. Homebrew lists only the Unlicense; the project is dual-licensed."
+  },
+  {
+   "id": "fd",
+   "name": "fd",
+   "for": "Find files by name, fast.",
+   "category": "Search",
+   "licence": "MIT OR Apache-2.0",
+   "homepage": "https://github.com/sharkdp/fd",
+   "install": {
+    "windows": {
+     "winget": "sharkdp.fd"
+    },
+    "macos": {
+     "brew": "fd"
+    },
+    "linux": {
+     "apt": "fd-find"
+    }
+   },
+   "detect": {
+    "bins": [
+     "fd",
+     "fdfind"
+    ],
+    "version": [
+     "--version"
+    ]
+   },
+   "mb": 4,
+   "tempo": "Listed only: a quicker way to find files for you, not driven by Tempo.",
+   "tools": [],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07. Debian calls the program `fdfind`."
+  },
+  {
+   "id": "exiftool",
+   "name": "ExifTool",
+   "for": "Read and fix the hidden details inside photos, videos and audio.",
+   "category": "Metadata",
+   "licence": "Artistic-1.0-Perl OR GPL-1.0-or-later",
+   "homepage": "https://exiftool.org/",
+   "install": {
+    "windows": {
+     "winget": "OliverBetz.ExifTool"
+    },
+    "macos": {
+     "brew": "exiftool"
+    },
+    "linux": {
+     "apt": "libimage-exiftool-perl"
+    }
+   },
+   "detect": {
+    "bins": [
+     "exiftool"
+    ],
+    "version": [
+     "-ver"
+    ]
+   },
+   "mb": 30,
+   "tempo": "Reads the camera, date and location details out of a file. Read-only.",
+   "tools": [
+    "exif_read"
+   ],
+   "verified": true,
+   "note": "winget id and Homebrew formula checked on 2026-11-07."
+  },
+  {
+   "id": "audacity",
+   "name": "Audacity",
+   "for": "Record and edit sound by hand.",
+   "category": "Audio",
+   "licence": "GPL-2.0-or-later",
+   "homepage": "https://www.audacityteam.org/",
+   "install": {
+    "windows": {
+     "winget": "Audacity.Audacity"
+    },
+    "macos": {
+     "brew": "audacity",
+     "cask": true
+    },
+    "linux": {
+     "apt": "audacity"
+    }
+   },
+   "detect": {
+    "bins": [
+     "audacity"
+    ],
+    "paths": {
+     "windows": [
+      "%ProgramFiles%\\Audacity\\audacity.exe"
+     ],
+     "macos": [
+      "/Applications/Audacity.app/Contents/MacOS/Audacity"
+     ]
+    }
+   },
+   "mb": 70,
+   "tempo": "App only: Audacity has no command line worth driving. For batch audio, use SoX.",
+   "tools": [],
+   "verified": true,
+   "note": "winget id and Homebrew cask checked on 2026-11-07. Version 4 is a GPL-3.0 release; the project says GPL-2.0-or-later for earlier ones."
+  }
+ ]
+}
