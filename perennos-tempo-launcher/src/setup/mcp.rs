@@ -6,6 +6,10 @@
 //! an answer. What it can do: write a proposal into the Tempo home (`setup_propose`); the person
 //! applies it with `tempo-launch setup --apply-proposal`, after a diff and a y/N. The AI never
 //! changes a setting itself.
+//!
+//! Two more tools let the AI design a Tempo Band with the owner: `band_templates` (read-only: the
+//! ready-made bands and the rules) and `band_propose` (writes a proposal; the owner sets it up
+//! with `tempo-launch band apply-proposal`, after a y/N).
 
 use super::apply::{self, Opts};
 use super::json::{parse, J};
@@ -13,7 +17,7 @@ use super::plan::{Run, Status};
 use super::probe::{Gpu, Host, Machine};
 use super::propose;
 use super::runtime::RuntimePlan;
-use crate::{answers, Ctx, APPS};
+use crate::{answers, band, Ctx, APPS};
 use std::io::{BufRead, Write};
 
 pub const SERVER_NAME: &str = "tempo-setup";
@@ -276,7 +280,41 @@ pub fn tools() -> Vec<J> {
             &["settings"],
             false,
         ),
+        tool(
+            "band_templates",
+            "Ready-made bands",
+            "Tempo Band is a small team of AI members for the owner's own workflow (a social media team, a release team, a study group...). This lists the ready-made bands with their members, roles and flows, and the rules a band must follow. Use it to design a band with the owner. Nothing is changed.",
+            none(),
+            &[],
+            true,
+        ),
+        tool(
+            "band_propose",
+            "Propose a band",
+            "Write a proposed band for the owner to review. Nothing is set up: it returns the command the owner runs (`tempo-launch band apply-proposal`), which shows the band in plain words and asks y/N before anything is saved, added to Room or scheduled. Members have no tools: they only talk and write drafts. Every problem with the band is returned so you can fix it and propose again.",
+            o(vec![
+                (
+                    "band",
+                    schema(
+                        r#"{"type":"object","description":"The band. Use band_templates for the shape and the rules.","properties":{"name":{"type":"string","description":"2 to 40 lowercase letters, digits, hyphens"},"about":{"type":"string","description":"one line, at most 200 characters"},"members":{"type":"array","items":{"type":"object","properties":{"handle":{"type":"string"},"name":{"type":"string"},"instrument":{"type":"string","description":"one fun word, like Metronome"},"role":{"type":"string","description":"the member's instruction, at most 2000 characters"},"may":{"type":"string","enum":["talk","draft"]},"model":{"type":"string","description":"fast, heavy, or leave out"}},"required":["handle","name","instrument","role","may"],"additionalProperties":false}},"flows":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array","items":{"type":"string"}},"every":{"type":"string","description":"manual, daily HH:MM, or weekly <mon..sun> HH:MM"},"notes_to":{"type":"string","description":"leave out: Bands/<name>/"}},"required":["name","goal","steps","every"],"additionalProperties":false}}},"required":["name","about","members","flows"],"additionalProperties":false}"#,
+                    ),
+                ),
+                (
+                    "note",
+                    o(vec![
+                        ("type", J::s("string")),
+                        ("description", J::s("One or two plain sentences for the owner: why you propose this band.")),
+                    ]),
+                ),
+            ]),
+            &["band"],
+            false,
+        ),
     ]
+}
+
+fn schema(text: &str) -> J {
+    parse(text).unwrap_or(J::Obj(vec![]))
 }
 
 /// Everything a tool needs from the outside world.
@@ -304,6 +342,22 @@ impl Server<'_> {
                 Ok(format!(
                     "Proposal saved in the Tempo home folder as {file}. Nothing has been changed.\nTell the owner to run this in a terminal; it shows what would change and asks y/N:\n\n  {cmd}\n\nYou cannot apply it yourself.",
                     file = propose::PROPOSAL_FILE
+                ))
+            }
+            "band_templates" => Ok(band::propose::templates_facts().pretty()),
+            "band_propose" => {
+                let b = args
+                    .get("band")
+                    .ok_or("band is required: an object with name, about, members and flows (see band_templates)")?;
+                let name = band::propose::write(
+                    self.ctx,
+                    b,
+                    args.str("note").unwrap_or(""),
+                    (self.now)(),
+                )?;
+                Ok(format!(
+                    "Band proposal \"{name}\" saved in the Tempo home folder. Nothing has been set up.\nTell the owner to run this in a terminal; it shows the band in plain words and asks y/N:\n\n  {} {name}\n\nYou cannot apply it yourself.",
+                    band::propose::APPLY_COMMAND
                 ))
             }
             other => Err(format!("unknown tool {other}")),
@@ -352,7 +406,7 @@ impl Server<'_> {
                 ),
                 (
                     "instructions",
-                    J::s("Perennos Tempo setup helper. Start with setup_scan and setup_plan, explain the result to the owner in plain words, and ask whether this is one computer or several. You can only read machine facts and write a proposal with setup_propose; the owner applies it themselves with `tempo-launch setup --apply-proposal`. Never ask the owner for files, notes or chats."),
+                    J::s("Perennos Tempo setup helper. Start with setup_scan and setup_plan, explain the result to the owner in plain words, and ask whether this is one computer or several. You can only read machine facts and write a proposal with setup_propose; the owner applies it themselves with `tempo-launch setup --apply-proposal`. Never ask the owner for files, notes or chats. To help design a Tempo Band (a small team of AI members for the owner's own workflow), read band_templates, talk through what the owner does, and write band_propose; the owner sets it up with `tempo-launch band apply-proposal`."),
                 ),
             ])),
             "ping" => reply(J::Obj(vec![])),
@@ -536,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_four_tools_and_marks_the_read_only_ones() {
+    fn lists_six_tools_and_marks_the_read_only_ones() {
         let root = tmp("list");
         let ctx = ctx_in(&root);
         let host = pc();
@@ -551,13 +605,20 @@ mod tests {
         let names: Vec<&str> = t.iter().filter_map(|x| x.str("name")).collect();
         assert_eq!(
             names,
-            ["setup_scan", "setup_plan", "tempo_status", "setup_propose"]
+            [
+                "setup_scan",
+                "setup_plan",
+                "tempo_status",
+                "setup_propose",
+                "band_templates",
+                "band_propose"
+            ]
         );
         for x in t {
             let ro = x.get("annotations").unwrap().bool("readOnlyHint").unwrap();
             assert_eq!(
                 ro,
-                x.str("name") != Some("setup_propose"),
+                !matches!(x.str("name"), Some("setup_propose" | "band_propose")),
                 "{:?}",
                 x.str("name")
             );
@@ -815,6 +876,146 @@ mod tests {
             propose::apply_proposal(&ctx, None, 1, &mut out, &mut |_| panic!("no question")),
             1
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ---- Tempo Band
+
+    fn call(s: &Server, name: &str, args: &str) -> (String, bool) {
+        text_of(&rpc(
+            s,
+            1,
+            "tools/call",
+            &format!(r#"{{"name":"{name}","arguments":{args}}}"#),
+        ))
+    }
+
+    const BAND_ARGS: &str = r#"{"note":"Built around your bakery.\nEnjoy.","band":{"name":"bakery-posts","about":"Weekly posts for the bakery.","members":[{"handle":"writer","name":"Crumb","instrument":"Piccolo","role":"You write short warm captions for a bakery.","may":"draft","model":"heavy"},{"handle":"editor","name":"Glaze","instrument":"Triangle","role":"You tidy captions and check them.","may":"draft"}],"flows":[{"name":"weekly-plan","goal":"Plan the week.","steps":["writer","editor"],"every":"weekly mon 09:00"}]}}"#;
+
+    #[test]
+    fn the_band_templates_tool_is_read_only_and_holds_no_personal_data() {
+        let root = tmp("bandtpl");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let (t, err) = call(&s, "band_templates", "{}");
+        assert!(!err, "{t}");
+        let j = parse(&t).unwrap();
+        assert_eq!(j.arr("templates").len(), 7);
+        for want in [
+            "social-media",
+            "dev-team",
+            "Soundcheck",
+            "never post, send, buy or delete",
+        ] {
+            assert!(t.contains(want), "{want}");
+        }
+        assert!(j.arr("rules").len() >= 4);
+        assert!(!t.contains(&root.to_string_lossy().into_owned()));
+        // it changed nothing
+        assert!(!ctx.home.join("bands").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn band_propose_writes_a_proposal_and_only_the_owner_sets_it_up() {
+        let root = tmp("bandprop");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1_793_000_000,
+        };
+        let (t, err) = call(&s, "band_propose", BAND_ARGS);
+        assert!(!err, "{t}");
+        assert!(
+            t.contains("tempo-launch band apply-proposal bakery-posts")
+                && t.contains("Nothing has been set up")
+                && t.contains("cannot apply it yourself")
+        );
+        assert!(!t.contains(&root.to_string_lossy().into_owned()));
+        // a proposal file, and no band
+        let p = parse(
+            &std::fs::read_to_string(ctx.home.join("bands/proposals/bakery-posts.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(p.str("note"), Some("Built around your bakery. Enjoy."));
+        assert_eq!(p.get("band").unwrap().str("name"), Some("bakery-posts"));
+        assert!(!ctx.home.join("bands/bakery-posts").exists());
+        // the same proposal is what apply-proposal reads
+        assert_eq!(band::propose::waiting(&ctx), ["bakery-posts"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn band_propose_refuses_a_band_with_tools_a_bad_folder_or_no_band() {
+        let root = tmp("bandbad");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let with = |from: &str, to: &str| BAND_ARGS.replacen(from, to, 1);
+        for (what, args) in [
+            (
+                "a tools key",
+                with(
+                    r#""may":"draft","model":"heavy""#,
+                    r#""may":"draft","tools":["send"]"#,
+                ),
+            ),
+            (
+                "a folder elsewhere",
+                with(
+                    r#""every":"weekly mon 09:00""#,
+                    r#""every":"weekly mon 09:00","notes_to":"Documents/""#,
+                ),
+            ),
+            (
+                "a step nobody is",
+                with(
+                    r#""steps":["writer","editor"]"#,
+                    r#""steps":["writer","ghost"]"#,
+                ),
+            ),
+            (
+                "a schedule that is not one",
+                with("weekly mon 09:00", "whenever"),
+            ),
+            (
+                "a long role",
+                with(
+                    "You write short warm captions for a bakery.",
+                    &"x".repeat(2001),
+                ),
+            ),
+            (
+                "a name with capitals",
+                with(r#""name":"bakery-posts""#, r#""name":"Bakery""#),
+            ),
+            ("no band", r#"{"note":"hello"}"#.to_string()),
+            (
+                "a band that is not an object",
+                r#"{"band":"bakery"}"#.to_string(),
+            ),
+        ] {
+            let (t, err) = call(&s, "band_propose", &args);
+            assert!(err, "{what}: {t}");
+        }
+        // the answer lists the problems so the AI can fix them
+        let (t, _) = call(&s, "band_propose", &with("weekly mon 09:00", "whenever"));
+        assert!(t.contains("not a schedule"), "{t}");
+        assert!(!ctx.home.join("bands").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 }

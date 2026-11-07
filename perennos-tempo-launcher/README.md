@@ -25,6 +25,16 @@ tempo-launch welcome         the first-run page: scan, one or several computers,
 tempo-launch link URL        adds another computer's Ollama (private or tailnet address) to ollama_fallbacks
 tempo-launch mcp [--scan]    stdio MCP server for your AI (scan, plan, status, propose); --scan prints the scan facts
 tempo-launch setup --apply-proposal  shows what your AI's proposal would change; applies it only after y/N
+tempo-launch band            Tempo Band, a team of AI members for your own workflow: lists your bands
+tempo-launch band templates  the ready-made bands (social-media, music-release, small-business, dev-team, research, content-creator, study)
+tempo-launch band new (--template NAME | --describe "TEXT") [--name BAND] [--yes]
+                             sets a band up: shows it in plain words, asks y/N, saves it, adds the members to Room, schedules the flows
+tempo-launch band run BAND [FLOW] [--note TEXT]
+                             walks a flow through its members; each step becomes a linked note in the Vault
+tempo-launch band room BAND  adds the band's members to Room as teammates (when Room was not running)
+tempo-launch band page BAND  writes and opens the band's dashboard page
+tempo-launch band apply-proposal [NAME]
+                             shows the band your AI proposed; sets it up only after y/N
 tempo-launch learn           one learning pass over the vault (what the hourly task runs)
 tempo-launch schedule [--daily | --remove | --print]
 tempo-launch logs            opens the logs folder
@@ -62,6 +72,17 @@ tempo-launch logs            opens the logs folder
 ## Setup (`tempo-launch setup`)
 
 Looks at the computer (memory, graphics card, free disk, Ollama, Perennos models already there) and your goals, chooses a model for each job, and prints the plan with the real size and licence of each. The models come from a built-in list of candidate names (`catalog/candidates.json`, never holding sizes or licences) that setup verifies live against the Ollama registry with curl (cached 7 days in `<home>/models/registry-cache.json`, skipped when unverified, offline-safe), the shipped verified entries (`catalog/models.json`, override at `<home>/models/catalog.json`) and what is installed. Installed models whose names start with your preferred prefix are preferred (`--preferred-prefix P` saves it per computer; none by default; `--prefer mainstream` overrides). Without a GPU the thinking lane keeps to 8B active parameters or fewer (a mixture-of-experts model counts its active parameters) unless `--prefer quality`. Nothing is fetched without `--apply` and a yes (or `--yes`); it refuses when the disk is too small, installs nothing system-wide, and fetches through Ollama's own API, hidden, with progress lines. It then fills the keys the user has not set in `<agent data>/config.json` (`models`, `fast_models`, `embed_model`, `ollama_url`), copying the old file to `<home>/trash/<date>/` first. UMBRA models are only detected and used, never fetched; d1 only with `--with-d1`, after its licence (LFM Open License v1.0, free under USD 10 million yearly revenue) and link are shown. When `<agent data>/config.json` exists the launcher starts the agent with `--config` on it (unless `TEMPO_AGENT_CONFIG` is set). The first `start` or bare launch with no settings writes `<home>/setup.html` and opens it once. When no Ollama is on the computer, setup can also fetch Tempo's own pinned copy (`catalog/runtime.json`, SHA-256 checked before it is unpacked with the system's own `tar`, kept in `<home>/runtime`), only after a yes; `start` runs it before the agent and `stop` ends it only by its own pid record. Details: `docs/TEMPO-SETUP.md`.
+
+## Tempo Band (`tempo-launch band`)
+
+A band is a small team of AI members for the owner's own workflow (a social media team of researcher, writer, editor and scheduler, say), all on this computer. Each member is a teammate in Room to `@mention` like a colleague, and a flow walks the members one after another and files what they make as linked notes in the Vault. Code: `src/band/`. The long version, with the template list and the spec, is in `docs/TEMPO-SETUP.md` under "Tempo Band".
+
+- **The spec** is `<home>/bands/<name>/band.json`: `members` (`handle`, `name`, `instrument`, `role` of at most 2000 characters, `model`, `may` as `talk` or `draft`) and `flows` (`name`, `goal`, `steps` as handles, `every` as `manual`, `daily HH:MM` or `weekly <day> HH:MM`, `notes_to` as `Bands/<name>/` or a folder inside it). It is checked strictly, on write and again on read: unknown keys, overlong roles, steps that are not members (or only talk), schedules that are not schedules and folders outside the band's own are all refused, with every problem listed in words.
+- **Never outside the computer.** Members chat as guests with the agent (no tools, no memory of your files). They never post, send, buy or delete anything; the most they do is the launcher writing their drafts into the Vault, only under the band's notes folder. `may: "talk"` members only answer in Room and cannot be steps.
+- **`band new`** takes `--template` (seven are built in) or `--describe "..."` (the model on this computer fits the closest template to the sentence; its answer is validated and, if it is not usable, the template is used as it is). It always shows the band in plain words and asks y/N (`--yes` skips the question), saves it (an earlier band.json goes to `<home>/trash/<date>/`), adds each member to Room as an `agent` teammate in a room named after the band when Room is running (it prints `tempo-launch band room NAME` when it is not), and registers the flows that run by themselves with the system scheduler (a crontab line, or a Windows scheduled task; on a Mac, or when that fails, it prints the line to add).
+- **`band run`** sends each step the flow goal, the owner's `--note`, and the step before it, and files each answer as `<notes folder>/<date> <flow>/<n> <member>.md` with front matter (`band`, `member`, `flow`, `step`) and `[[links]]` to the step before and to the flow's `Index` note. Without a Vault the notes go to `<home>/bands/<name>/runs/`. Text files in an `Inbox` folder next to the runs (`Bands/<name>/Inbox/` in the Vault) are read by the first step, so there is a place to drop emails, sources or a request.
+- **`band page`** writes `<home>/bands/<name>/band.html`: members as cards, flows with their schedule, the latest runs with links to their notes, and the `@handles` to use in Room. Static, with the same strict Content-Security-Policy as the welcome page and no script.
+- **The AI's two tools** in `tempo-launch mcp`: `band_templates` (read-only) and `band_propose`, which writes `<home>/bands/proposals/<name>.json`. The owner applies it with `band apply-proposal`, which shows the band in plain words, labels the AI's note as the AI's, and asks y/N (there is no `--yes`).
 
 ## Apps on other machines (`remote.json`)
 

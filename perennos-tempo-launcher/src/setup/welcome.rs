@@ -7,6 +7,7 @@ use super::json::J;
 use super::plan::{Plan, Run};
 use super::probe::Machine;
 use super::propose::{APPLY_COMMAND, OLLAMA_DEFAULT_PORT};
+use crate::band::templates;
 use crate::{html_escape, MARK_SVG};
 use std::path::Path;
 
@@ -76,6 +77,16 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
         format!("<p><strong>{}</strong></p>", html_escape(r))
     });
     let pre = |s: &str| format!("<pre>{}</pre>", html_escape(s));
+    let bands: String = templates::all()
+        .iter()
+        .map(|t| {
+            format!(
+                "<li><strong>{}</strong>: {}</li>",
+                html_escape(t.id),
+                html_escape(t.summary)
+            )
+        })
+        .collect();
     format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -159,6 +170,17 @@ pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:12px
 <p>It is opt-in: nothing connects unless you add the entry to your AI yourself, and Tempo never calls out to any AI on its own. Once you do, what the helper answers becomes part of your conversation with that AI, so it reaches that AI's provider like anything else you type there. To stop, remove the entry from the AI's settings.</p>
 </div>
 
+<h2>5. Start a band for your work</h2>
+<p>A <em>band</em> is a small team of AI members set up for your own workflow, all on this computer: for a social media account, say, a researcher, a writer, an editor and a scheduler. Each one shows up in Room as a teammate you can talk to like a person (<code>@writer</code>), and a flow walks them one after another and files what they make as linked notes in your Vault. They only talk and write drafts: they never post, send, buy or delete anything.</p>
+<p>Pick a template:</p>
+<ul>{bands}</ul>
+{band_template}
+<p>Or say what you do, in your own words. The model on this computer fits the closest template to it; Tempo shows you the band in plain words and asks y/N before it sets anything up:</p>
+{band_describe}
+<p>Then run a flow, and see the band on one page:</p>
+{band_run}
+<p>Your own AI can design a band with you too: the setup helper from step 3 has <code>band_templates</code> (read-only) and <code>band_propose</code>, and you set a proposal up yourself with <code>tempo-launch band apply-proposal</code>.</p>
+
 <p class="small">The longer plan, with sizes and licences, is in <code>setup.html</code> in the Tempo folder (<code>tempo-launch setup</code> shows it in the terminal). This page can be opened again with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
 </main></body></html>
 "#,
@@ -179,5 +201,11 @@ pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:12px
         code = pre(&code_command(exe)),
         command = pre(&format!("{} mcp", command_path(exe))),
         scan_cmd = pre("tempo-launch mcp --scan"),
+        bands = bands,
+        band_template = pre("tempo-launch band new --template social-media"),
+        band_describe = pre(
+            "tempo-launch band new --describe \"I run a bakery's Instagram and want posts planned weekly\""
+        ),
+        band_run = pre("tempo-launch band run social-media weekly-plan\ntempo-launch band page social-media"),
     )
 }
