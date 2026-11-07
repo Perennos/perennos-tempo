@@ -10,7 +10,6 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
 /// Background commands that may be alive at once in one conversation.
 pub const MAX_ALIVE: usize = 4;
@@ -18,6 +17,8 @@ pub const MAX_ALIVE: usize = 4;
 pub const RING_BYTES: usize = 64 * 1024;
 /// The most characters of output `command_output` returns (the end of it).
 pub const TAIL_CHARS: usize = 6000;
+/// Finished commands remembered per conversation (the oldest are forgotten first).
+pub const KEEP_ENDED: usize = 16;
 
 /// The last `cap` bytes a command printed.
 pub struct Ring {
@@ -95,29 +96,23 @@ struct Job {
 }
 
 impl Job {
-    /// Check whether it has ended (reaping it if so).
+    /// Check whether it has ended. It is waited for (reaped) only once nothing holds its output
+    /// open: until then something it started may still be running, so it counts as running, and
+    /// while it is not reaped its process id (on Unix also its group's) cannot go to another
+    /// process, so `stop` can still end what it left behind. All its output is read by then.
     fn poll(&mut self) -> Status {
         if let Some(s) = self.ended {
             return s;
         }
+        if !self.readers.iter().all(|r| r.is_finished()) {
+            return Status::Running;
+        }
         if let Ok(Some(st)) = self.child.try_wait() {
             self.code = st.code();
             self.ended = Some(Status::Exited);
-            self.drain();
             return Status::Exited;
         }
         Status::Running
-    }
-
-    /// Give the reader threads a moment to take the last output out of the pipes. A command that
-    /// left something running which holds the pipes open is not waited for.
-    fn drain(&mut self) {
-        let t = std::time::Instant::now();
-        while t.elapsed() < Duration::from_millis(300)
-            && !self.readers.iter().all(|r| r.is_finished())
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     /// End it if it is still running. Ending one that already ended does nothing.
@@ -178,6 +173,28 @@ struct ConvJobs {
     /// The number the next one gets (`bg-N`); never reused.
     next: u32,
     jobs: BTreeMap<String, Job>,
+}
+
+impl ConvJobs {
+    /// Forget the oldest finished commands beyond `KEEP_ENDED`, so a long conversation does not
+    /// keep the output of every command it ever ran. Running ones are never forgotten.
+    fn forget_old(&mut self) {
+        let mut ended: Vec<(u32, String)> = Vec::new();
+        for (id, j) in self.jobs.iter_mut() {
+            if j.poll() != Status::Running {
+                let n = id.trim_start_matches("bg-").parse().unwrap_or(0);
+                ended.push((n, id.clone()));
+            }
+        }
+        if ended.len() <= KEEP_ENDED {
+            return;
+        }
+        ended.sort();
+        let drop = ended.len() - KEEP_ENDED;
+        for (_, id) in ended.into_iter().take(drop) {
+            self.jobs.remove(&id);
+        }
+    }
 }
 
 /// Every conversation's background commands. Dropping it ends them all.
@@ -252,6 +269,7 @@ impl Background {
                 code: None,
             },
         );
+        entry.forget_old();
         Ok(id)
     }
 
@@ -260,7 +278,7 @@ impl Background {
             .get_mut(conv)
             .and_then(|c| c.jobs.get_mut(id))
             .ok_or_else(|| {
-                format!("error: no background command {id} in this conversation (run_command with background true starts one and gives its id)")
+                format!("error: no background command {id} in this conversation (run_command with background true starts one and gives its id; only the last {KEEP_ENDED} finished ones are kept)")
             })
     }
 
@@ -292,7 +310,7 @@ impl Background {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn the_ring_keeps_only_the_last_64_kb() {
@@ -349,6 +367,69 @@ mod tests {
         assert!(running(pid));
         drop(bg);
         assert!(!running(pid), "the child outlived the registry");
+    }
+
+    #[cfg(unix)]
+    fn wait_for_pid(file: &Path) -> u32 {
+        let t = Instant::now();
+        loop {
+            if let Some(p) = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+            {
+                return p;
+            }
+            assert!(t.elapsed() < Duration::from_secs(5), "no pid in {file:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_a_command_left_running_counts_as_running_and_is_ended_with_it() {
+        // the shell starts a program in the background and exits at once; the program still
+        // holds the output open, so the command is not finished and stopping it reaches the program
+        let d = tmp("left");
+        let mut bg = Background::default();
+        let id = bg
+            .start("c", "sleep 300 & echo $! > left.pid; echo started", &d)
+            .unwrap();
+        let gpid = wait_for_pid(&d.join("left.pid"));
+        std::thread::sleep(Duration::from_millis(200));
+        let r = bg.output("c", &id).unwrap();
+        assert_eq!(r["status"], "running", "{r}");
+        assert!(r["output"].as_str().unwrap().contains("started"), "{r}");
+        assert_eq!(bg.stop("c", &id).unwrap()["status"], "stopped");
+        let t = Instant::now();
+        while running(gpid) && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!running(gpid), "what the command left running kept running");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_last_finished_commands_are_kept() {
+        let d = tmp("keep");
+        let mut bg = Background::default();
+        let mut ids = vec![];
+        for i in 0..KEEP_ENDED + 4 {
+            let id = bg.start("c", &format!("echo run {i}"), &d).unwrap();
+            let t = Instant::now();
+            while bg.output("c", &id).unwrap()["status"] != "exited" {
+                assert!(t.elapsed() < Duration::from_secs(5), "{id} never ended");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ids.push(id);
+        }
+        // one more start forgets the oldest finished ones
+        let last = bg.start("c", "echo last", &d).unwrap();
+        let kept = bg.convs["c"].jobs.len();
+        assert!(kept <= KEEP_ENDED + 1, "{kept} kept");
+        let err = bg.output("c", &ids[0]).unwrap_err();
+        assert!(err.contains("only the last"), "{err}");
+        assert!(bg.output("c", ids.last().unwrap()).is_ok());
+        assert!(bg.output("c", &last).is_ok());
     }
 
     #[cfg(unix)]
