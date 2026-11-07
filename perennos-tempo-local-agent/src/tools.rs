@@ -10,14 +10,14 @@ use crate::rag::Rag;
 use crate::util::{self, cap, head_chars, http_json, is_secret_path, resolve, Guard, RESULT_CAP};
 use regex::Regex;
 use serde_json::{json, Value};
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Env {
@@ -31,6 +31,18 @@ pub struct Env {
     fetch_ok: RefCell<HashMap<String, HashSet<String>>>,
     /// What files held before a turn changed them (`/undo`, `/diff`).
     pub checkpoints: Checkpoints,
+    /// Commands started with `background: true`, by number (`bg-1`).
+    bg: RefCell<BTreeMap<u64, Background>>,
+    bg_seq: Cell<u64>,
+}
+
+/// Nothing Tempo started in the background outlives it.
+impl Drop for Env {
+    fn drop(&mut self) {
+        for b in self.bg.get_mut().values_mut() {
+            b.stop();
+        }
+    }
 }
 
 /// The host of an http(s) address, lower case, without the port.
@@ -69,7 +81,9 @@ pub fn builtin_schemas() -> Vec<Value> {
         func("read_file", "Read a text file (first 6000 chars unless offset given).", json!({"path": s("file path"), "offset": int}), &["path"]),
         func("write_file", "Write a text file inside the allowed write folders. Overwrites need approval.", json!({"path": s("file path"), "content": s("text")}), &["path", "content"]),
         func("trash", "Move a file or folder into the trash folder (the only way to remove anything; nothing is ever deleted). Needs approval.", json!({"path": s("path")}), &["path"]),
-        func("run_command", "Run a shell command (PowerShell on Windows, sh elsewhere) in the conversation's folder. Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash).", json!({"command": s("shell command"), "cwd": s("optional folder to run in (relative to the conversation's folder)")}), &["command"]),
+        func("run_command", "Run a shell command (PowerShell on Windows, sh elsewhere) in the conversation's folder. Read-only commands run at once; anything that writes, installs, stops things or uses the network asks the user first. Deleting is refused (use trash). background: true starts it and returns at once (a dev server, a long build or test run; no & needed); read it with command_output, end it with command_stop.", json!({"command": s("shell command"), "cwd": s("optional folder to run in (relative to the conversation's folder)"), "background": boolean}), &["command"]),
+        func("command_output", "What a background command (run_command with background: true) has printed so far (the end of it) and whether it still runs. wait: seconds to wait for it to finish first (at most 60).", json!({"id": s("its id, such as bg-1"), "wait": int}), &["id"]),
+        func("command_stop", "End a background command and everything it started.", json!({"id": s("its id, such as bg-1")}), &["id"]),
         func("fetch_url", "Fetch a web page as text. Works only when the internet is up; fails cleanly offline.", json!({"url": s("http(s) URL")}), &["url"]),
         func("search_memory", "Search the user's memory and notes (configured markdown files). Returns cited excerpts.", json!({"query": s("what to look for")}), &["query"]),
         func("workflow_update", "Update this conversation's persistent task list and notes. Call it when you plan work and after each step.",
@@ -117,24 +131,35 @@ fn barg(a: &Value, k: &str) -> bool {
     }
 }
 
-/// Run a shell command; output is stdout+stderr. Kills the exact child on timeout.
-pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
+/// The shell every command runs in: PowerShell on Windows (with no window), sh elsewhere.
+fn shell_command(cmd: &str) -> Command {
     #[cfg(windows)]
-    let mut c = {
+    {
         use std::os::windows::process::CommandExt;
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", cmd])
             .creation_flags(0x0800_0000);
         c
-    };
+    }
     #[cfg(not(windows))]
-    let mut c = {
+    {
         let mut c = Command::new("sh");
         c.args(["-c", cmd]);
         c
-    };
+    }
+}
+
+/// Run a shell command; output is stdout+stderr. Kills the exact child on timeout.
+pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
+    shell_env(cmd, cwd, timeout, &[])
+}
+
+/// `shell` with environment variables added (what a hook is told).
+pub fn shell_env(cmd: &str, cwd: &Path, timeout: Duration, vars: &[(&str, &str)]) -> (String, i32) {
+    let mut c = shell_command(cmd);
     let _ = std::fs::create_dir_all(cwd);
     c.current_dir(cwd)
+        .envs(vars.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -206,6 +231,175 @@ pub fn shell(cmd: &str, cwd: &Path, timeout: Duration) -> (String, i32) {
         ));
     }
     (text, code)
+}
+
+/// Background commands that may run at once, across all conversations.
+const BG_MAX: usize = 4;
+/// The latest part of a background command's output that is kept, in bytes.
+const BG_KEEP: usize = 64 * 1024;
+/// Background commands remembered; past this the oldest finished ones are forgotten.
+const BG_REMEMBER: usize = 16;
+/// The longest a `command_output` call waits for a command to finish, in seconds.
+const BG_WAIT_MAX: i64 = 60;
+
+/// What a background command printed (its latest `BG_KEEP` bytes), filled as it runs.
+type Output = Arc<Mutex<Vec<u8>>>;
+
+/// A command started with `background: true`: running, or finished and not yet forgotten.
+struct Background {
+    conv: String,
+    cmd: String,
+    child: Child,
+    out: Output,
+    started: Instant,
+    /// How it ended: its exit code, or None while it runs.
+    ended: Option<(i32, Duration, bool)>,
+}
+
+impl Background {
+    /// Notice whether it has finished. When the shell is gone, whatever it left running in its
+    /// group ends too (on Unix): nothing Tempo started outlives the record of it.
+    fn refresh(&mut self) {
+        if self.ended.is_none() {
+            if let Ok(Some(st)) = self.child.try_wait() {
+                end_group(&self.child);
+                self.ended = Some((st.code().unwrap_or(-1), self.started.elapsed(), false));
+            }
+        }
+    }
+
+    fn running(&mut self) -> bool {
+        self.refresh();
+        self.ended.is_none()
+    }
+
+    /// End it and everything it started.
+    fn stop(&mut self) {
+        self.refresh();
+        if self.ended.is_some() {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // the handle Tempo holds keeps the process id from being reused
+            let _ = Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &self.child.id().to_string()])
+                .creation_flags(0x0800_0000)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        // still running (not yet waited for), so its process id is still its own
+        end_group(&self.child);
+        let _ = self.child.kill();
+        let code = self.child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        self.ended = Some((code, self.started.elapsed(), true));
+    }
+
+    fn status(&self) -> String {
+        match self.ended {
+            None => format!("running for {}s", self.started.elapsed().as_secs()),
+            Some((_, after, true)) => format!("stopped after {}s", after.as_secs()),
+            Some((code, after, false)) => format!("exited {code} after {}s", after.as_secs()),
+        }
+    }
+}
+
+/// End the process group a background command leads (Unix; it was started as its own group).
+fn end_group(child: &Child) {
+    #[cfg(unix)]
+    {
+        // `--` first: procps reads a bare `-9 -<group>` as two signals and ends nothing
+        let _ = Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{}", child.id())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+/// Start a command that keeps running after the call returns; its output is collected (the latest
+/// `BG_KEEP` bytes) for `command_output`.
+fn spawn_background(cmd: &str, cwd: &Path) -> Result<(Child, Output), String> {
+    let mut c = shell_command(cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // its own process group, so stopping it ends everything it started
+        c.process_group(0);
+    }
+    let _ = std::fs::create_dir_all(cwd);
+    c.current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().map_err(|e| format!("cannot start shell: {e}"))?;
+    let out = Arc::new(Mutex::new(Vec::new()));
+    for mut pipe in [
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let out = out.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let mut o = out.lock().unwrap_or_else(|e| e.into_inner());
+                o.extend_from_slice(&buf[..n]);
+                if o.len() > BG_KEEP {
+                    let cut = o.len() - BG_KEEP;
+                    o.drain(..cut);
+                }
+            }
+        });
+    }
+    Ok((child, out))
+}
+
+/// The arguments and result a hook is told, cut so the whole event stays well inside what an
+/// environment variable may hold on every system.
+fn hook_event(
+    event: &str,
+    conv: &Conv,
+    cwd: &Path,
+    tool: Option<(&str, &Value)>,
+    result: Option<&str>,
+) -> String {
+    let mut e = json!({
+        "event": event,
+        "conversation": conv.id,
+        "cwd": cwd.to_string_lossy(),
+        "mode": conv.permission.name(),
+    });
+    if let Some((name, args)) = tool {
+        e["tool"] = json!(name);
+        let a = args.to_string();
+        e["args"] = if a.len() <= 12_000 {
+            args.clone()
+        } else {
+            json!(format!("(arguments too long to pass: {} chars)", a.len()))
+        };
+    }
+    if let Some(r) = result {
+        e["result"] = json!(head_chars(r, 2000));
+    }
+    e.to_string()
 }
 
 static NET_CACHE: Mutex<Vec<(String, Instant, bool)>> = Mutex::new(Vec::new());
@@ -735,6 +929,8 @@ impl Env {
             protect,
             fetch_ok: RefCell::new(HashMap::new()),
             checkpoints,
+            bg: RefCell::new(BTreeMap::new()),
+            bg_seq: Cell::new(0),
         }
     }
 
@@ -1013,13 +1209,15 @@ impl Env {
             "write_file" => self.write_file(conv, a),
             "trash" => self.trash(a),
             "run_command" => self.run_command(conv, a),
+            "command_output" => self.command_output(conv, a),
+            "command_stop" => self.command_stop(conv, a),
             "apply_patch" => self.apply_patch(conv, a),
             "fetch_url" => self.fetch_url(conv, a),
             "search_memory" => self.search_memory(a),
             "workflow_update" => {
                 Ok(conv.wf_update(a.get("tasks"), a.get("note").and_then(|n| n.as_str())))
             }
-            "delegate" => self.delegate(a),
+            "delegate" => self.delegate(conv, a),
             "comfy_image" => self.comfy_image(a),
             "edit_file" => sarg(a, "path").and_then(|p| {
                 let (o, n) = (sarg(a, "old")?, sarg(a, "new")?);
@@ -1263,10 +1461,19 @@ impl Env {
         });
         let unasked = !reaches_state
             && (is_read_only(cmd) || (!changed && allowed_unasked(cmd, &self.cfg.command_allow)));
+        let background = barg(a, "background");
         if !unasked {
-            if let Err(no) = self.ask("run command", cmd) {
+            let what = if background {
+                "run command in the background"
+            } else {
+                "run command"
+            };
+            if let Err(no) = self.ask(what, cmd) {
                 return Ok(no);
             }
+        }
+        if background {
+            return Ok(self.start_background(conv, cmd, &cwd));
         }
         let (out, rc) = shell(
             cmd,
@@ -1274,6 +1481,239 @@ impl Env {
             Duration::from_secs_f64(self.cfg.command_timeout_s),
         );
         Ok(format!("[exit {rc}]\n{out}"))
+    }
+
+    /// Start an approved command that keeps running (at most `BG_MAX` at once).
+    fn start_background(&self, conv: &Conv, cmd: &str, cwd: &Path) -> String {
+        let mut bg = self.bg.borrow_mut();
+        let running = bg.values_mut().map(|b| b.running()).filter(|r| *r).count();
+        if running >= BG_MAX {
+            return format!("refused: {BG_MAX} background commands are already running; end one with command_stop first");
+        }
+        let (child, out) = match spawn_background(cmd, cwd) {
+            Ok(x) => x,
+            Err(e) => return format!("error: {e}"),
+        };
+        let n = self.bg_seq.get() + 1;
+        self.bg_seq.set(n);
+        bg.insert(
+            n,
+            Background {
+                conv: conv.id.clone(),
+                cmd: cmd.to_string(),
+                child,
+                out,
+                started: Instant::now(),
+                ended: None,
+            },
+        );
+        // forget the oldest finished ones past the limit (the running ones are at most BG_MAX)
+        while bg.len() > BG_REMEMBER {
+            let Some(old) = bg
+                .iter_mut()
+                .find_map(|(k, b)| (!b.running()).then_some(*k))
+            else {
+                break;
+            };
+            bg.remove(&old);
+        }
+        format!("started in the background as bg-{n}: read it with command_output, end it with command_stop")
+    }
+
+    /// A background command of this conversation (another conversation's are not visible).
+    fn background_of<'a>(
+        &self,
+        bg: &'a mut BTreeMap<u64, Background>,
+        conv: &Conv,
+        a: &Value,
+    ) -> Result<(String, &'a mut Background), String> {
+        let id = sarg(a, "id")?.trim();
+        bg.get_mut(
+            &id.strip_prefix("bg-")
+                .unwrap_or(id)
+                .parse::<u64>()
+                .unwrap_or(0),
+        )
+        .filter(|b| b.conv == conv.id)
+        .map(|b| (id.to_string(), b))
+        .ok_or_else(|| format!("error: no background command {id} in this conversation"))
+    }
+
+    fn command_output(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        let wait = Duration::from_secs(iarg(a, "wait", 0).clamp(0, BG_WAIT_MAX) as u64);
+        let mut bg = self.bg.borrow_mut();
+        let (id, b) = self.background_of(&mut bg, conv, a)?;
+        let until = Instant::now() + wait;
+        while b.running() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if b.ended.is_some() {
+            // let the readers take what was still in the pipes
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        let out = b.out.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let text = String::from_utf8_lossy(&out);
+        let text = text.trim();
+        let n = text.chars().count();
+        let shown = if n > 6000 {
+            format!(
+                "...[{} earlier chars not shown]\n{}",
+                n - 6000,
+                text.chars().skip(n - 6000).collect::<String>()
+            )
+        } else {
+            text.to_string()
+        };
+        Ok(format!("[{id}: {}] {}\n{shown}", b.status(), b.cmd))
+    }
+
+    fn command_stop(&self, conv: &Conv, a: &Value) -> Result<String, String> {
+        let mut bg = self.bg.borrow_mut();
+        let (id, b) = self.background_of(&mut bg, conv, a)?;
+        let was = b.running();
+        b.stop();
+        Ok(if was {
+            format!("[{id}: {}] {}", b.status(), b.cmd)
+        } else {
+            format!("[{id}: had already {}] {}", b.status(), b.cmd)
+        })
+    }
+
+    /// This conversation's background commands, one line each (`/status`).
+    pub fn background_list(&self, conv: &Conv) -> Vec<String> {
+        self.bg
+            .borrow_mut()
+            .iter_mut()
+            .filter(|(_, b)| b.conv == conv.id)
+            .map(|(n, b)| {
+                b.refresh();
+                format!("bg-{n} {}: {}", b.status(), head_chars(&b.cmd, 80))
+            })
+            .collect()
+    }
+
+    /// The owner's `/stop`: end this conversation's background commands, all or one (`bg-2`).
+    pub fn background_stop(&self, conv: &Conv, id: &str) -> String {
+        let id = id.trim();
+        let mut ended = vec![];
+        for (n, b) in self.bg.borrow_mut().iter_mut() {
+            let name = format!("bg-{n}");
+            let chosen = id.is_empty() || id == name || id == n.to_string();
+            if b.conv == conv.id && chosen && b.running() {
+                b.stop();
+                ended.push(name);
+            }
+        }
+        match (ended.is_empty(), id.is_empty()) {
+            (false, _) => format!("Stopped {}.", ended.join(", ")),
+            (true, true) => "No background command of this conversation is running.".into(),
+            (true, false) => format!("{id} is not running in this conversation."),
+        }
+    }
+
+    /// Run one of the owner's hooks with what happened in `TEMPO_HOOK_EVENT` (JSON), in the
+    /// conversation's folder. The same refusals as any command hold (the deny list, deleting).
+    fn run_hook(&self, conv: &Conv, h: &crate::config::Hook, event: &str) -> (String, i32) {
+        if let Some(no) = self.refusal(&h.command) {
+            return (no, -2);
+        }
+        let (out, rc) = shell_env(
+            &h.command,
+            &self.cwd(conv),
+            Duration::from_secs_f64(h.timeout_s),
+            &[
+                ("TEMPO_HOOK_EVENT", event),
+                ("TEMPO_CONVERSATION", &conv.id),
+            ],
+        );
+        (head_chars(out.trim(), 2000), rc)
+    }
+
+    /// The owner's `before_tool` hooks for this call. Exit code 2 stops it, and what the hook
+    /// printed is what the model reads instead (Err). Another failure is noted in the result and
+    /// the call goes on (Ok, the notes), as in Claude Code; a hook the refusals stop blocks it,
+    /// since it may be a check the owner relies on.
+    pub fn hook_before(&self, conv: &Conv, tool: &str, args: &Value) -> Result<String, String> {
+        let mut notes = String::new();
+        for h in self
+            .cfg
+            .hooks
+            .before_tool
+            .iter()
+            .filter(|h| h.matches(tool))
+        {
+            let ev = hook_event(
+                "before_tool",
+                conv,
+                &self.cwd(conv),
+                Some((tool, args)),
+                None,
+            );
+            match self.run_hook(conv, h, &ev) {
+                (_, 0) => {}
+                (out, 2) => return Err(format!("blocked by the owner's hook: {out}")),
+                (out, -2) => {
+                    return Err(format!("blocked: the owner's hook could not run ({out})"))
+                }
+                (out, rc) => notes.push_str(&format!("[hook failed, exit {rc}] {out}\n")),
+            }
+        }
+        Ok(notes)
+    }
+
+    /// The owner's `after_tool` hooks: what they print joins the result the model reads. Not in
+    /// plan mode, which changes nothing (a formatter would).
+    pub fn hook_after(&self, conv: &Conv, tool: &str, args: &Value, result: &str) -> String {
+        if conv.permission == Permission::Plan {
+            return String::new();
+        }
+        let mut add = String::new();
+        for h in self.cfg.hooks.after_tool.iter().filter(|h| h.matches(tool)) {
+            let ev = hook_event(
+                "after_tool",
+                conv,
+                &self.cwd(conv),
+                Some((tool, args)),
+                Some(result),
+            );
+            match self.run_hook(conv, h, &ev) {
+                (out, 0) if out.is_empty() => {}
+                (out, 0) => add.push_str(&format!("\n[hook] {out}")),
+                (out, rc) => add.push_str(&format!("\n[hook failed, exit {rc}] {out}")),
+            }
+        }
+        add
+    }
+
+    /// The owner's `after_turn` hooks, after a turn the model answered: status lines for the
+    /// owner. Not in plan mode, and never for a guest room.
+    pub fn hooks_after_turn(&self, conv: &Conv, changed: &[String], reply: &str) -> Vec<String> {
+        if conv.guest || conv.permission == Permission::Plan || self.cfg.hooks.after_turn.is_empty()
+        {
+            return vec![];
+        }
+        let ev = json!({
+            "event": "after_turn",
+            "conversation": conv.id,
+            "cwd": self.cwd(conv).to_string_lossy(),
+            "mode": conv.permission.name(),
+            "changed": changed,
+            "reply": head_chars(reply, 2000),
+        })
+        .to_string();
+        self.cfg
+            .hooks
+            .after_turn
+            .iter()
+            .filter_map(|h| match self.run_hook(conv, h, &ev) {
+                (out, 0) if out.is_empty() => None,
+                (out, 0) => Some(format!("hook after the turn: {}", head_chars(&out, 300))),
+                (out, rc) => Some(format!(
+                    "hook after the turn failed (exit {rc}): {}",
+                    head_chars(&out, 300)
+                )),
+            })
+            .collect()
     }
 
     /// The first read of a host in a conversation asks the owner; yes covers that host for the
@@ -1468,7 +1908,7 @@ impl Env {
         ))
     }
 
-    fn delegate(&self, a: &Value) -> Result<String, String> {
+    fn delegate(&self, conv: &Conv, a: &Value) -> Result<String, String> {
         let (host, task) = (sarg(a, "host")?, sarg(a, "task")?);
         let mut model = opt_str(a, "model").to_string();
         let (url, house, avail) = match self.probe_host(host) {
@@ -1502,13 +1942,21 @@ impl Env {
                 .all_hosts()
                 .get(host)
                 .is_some_and(|h| h.trust_reads);
-        Ok(self.sub_loop(&url, &model, task, local, trusted))
+        Ok(self.sub_loop(conv, &url, &model, task, local, trusted))
     }
 
     /// 4-step read-only loop (list_dir, read_file, search_memory) on another engine, non-streaming.
     /// Unless the host is trusted (this machine, or one the owner marked `trust_reads`), each read
     /// its model asks for is approved by the owner first: what it reads is sent to that machine.
-    fn sub_loop(&self, url: &str, model: &str, task: &str, local: bool, trusted: bool) -> String {
+    fn sub_loop(
+        &self,
+        conv: &Conv,
+        url: &str,
+        model: &str,
+        task: &str,
+        local: bool,
+        trusted: bool,
+    ) -> String {
         let ro: Vec<Value> = builtin_schemas()
             .into_iter()
             .filter(|f| {
@@ -1557,18 +2005,20 @@ impl Env {
                     Some(v) => v.clone(),
                     None => json!({}),
                 };
-                // another machine's model chooses what to read here: the owner approves each read
-                let asked = if trusted {
+                // the owner's before_tool hooks gate these reads too; then, as another machine's
+                // model chooses what to read here, the owner approves each read
+                let r = if !["list_dir", "read_file", "search_memory"].contains(&name) {
+                    format!("error: tool {name} is not available to subagents")
+                } else if let Err(no) = self.hook_before(conv, name, &args) {
+                    no
+                } else if let Err(no) = if trusted {
                     Ok(())
                 } else {
                     self.ask(
                         &format!("delegate tool on {url}"),
                         &format!("{name} {args}"),
                     )
-                };
-                let r = if !["list_dir", "read_file", "search_memory"].contains(&name) {
-                    format!("error: tool {name} is not available to subagents")
-                } else if let Err(no) = asked {
+                } {
                     no
                 } else {
                     match name {
@@ -1975,12 +2425,12 @@ mod tests {
     }
 
     #[test]
-    fn all_fourteen_builtins_have_schemas() {
+    fn all_sixteen_builtins_have_schemas() {
         let names: Vec<String> = builtin_schemas()
             .iter()
             .map(|f| f["function"]["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 16);
         for n in [
             "list_dir",
             "read_file",
@@ -1996,10 +2446,168 @@ mod tests {
             "grep",
             "glob",
             "apply_patch",
+            "command_output",
+            "command_stop",
         ] {
             assert!(names.iter().any(|x| x == n), "{n}");
             assert!(Env::is_builtin(n));
         }
+    }
+
+    /// A command for this system's shell: sh, or PowerShell on Windows.
+    fn sh(unix: &str, windows: &str) -> String {
+        if cfg!(windows) { windows } else { unix }.to_string()
+    }
+
+    #[test]
+    fn background_commands_run_report_and_stop() {
+        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
+        let slow = sh(
+            "echo started; sleep 30",
+            "Write-Output started; Start-Sleep -Seconds 30",
+        );
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": slow, "background": true}),
+        );
+        assert!(r.starts_with("started in the background as bg-1"), "{r}");
+        // its output arrives while it runs
+        let mut seen = String::new();
+        for _ in 0..100 {
+            seen = run(&e, &c, "command_output", json!({"id": "bg-1"}));
+            if seen.contains("started\n") || seen.ends_with("started") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(seen.starts_with("[bg-1: running for"), "{seen}");
+        assert!(seen.ends_with("\nstarted"), "{seen}");
+        // another conversation can neither read it nor end it
+        let other = Conv::open(&e.cfg, Some("other")).unwrap();
+        for t in ["command_output", "command_stop"] {
+            let r = run(&e, &other, t, json!({"id": "bg-1"}));
+            assert!(r.contains("no background command bg-1"), "{r}");
+        }
+        let stopped = run(&e, &c, "command_stop", json!({"id": "bg-1"}));
+        assert!(stopped.starts_with("[bg-1: stopped after"), "{stopped}");
+        let r = run(&e, &c, "command_output", json!({"id": "1"}));
+        assert!(r.starts_with("[1: stopped after"), "{r}");
+        // a quick one: wait for it to finish
+        let quick = sh("echo done-here", "Write-Output done-here");
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": quick, "background": true}),
+        );
+        assert!(r.contains("bg-2"), "{r}");
+        let out = run(&e, &c, "command_output", json!({"id": "bg-2", "wait": 30}));
+        assert!(out.starts_with("[bg-2: exited 0 after"), "{out}");
+        assert!(out.ends_with("done-here"), "{out}");
+        let r = run(&e, &c, "command_stop", json!({"id": "bg-2"}));
+        assert!(r.starts_with("[bg-2: had already exited 0"), "{r}");
+        let r = run(&e, &c, "command_output", json!({"id": "bg-9"}));
+        assert!(r.contains("no background command bg-9"), "{r}");
+    }
+
+    #[test]
+    fn background_commands_are_limited_ask_first_and_keep_the_rules() {
+        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
+        let slow = sh("sleep 30", "Start-Sleep -Seconds 30");
+        for n in 1..=4 {
+            let r = run(
+                &e,
+                &c,
+                "run_command",
+                json!({"command": slow, "background": true}),
+            );
+            assert!(r.contains(&format!("bg-{n}")), "{r}");
+        }
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": slow, "background": true}),
+        );
+        assert!(r.starts_with("refused: 4 background commands"), "{r}");
+        assert!(run(&e, &c, "command_stop", json!({"id": "bg-2"})).contains("stopped"));
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": slow, "background": true}),
+        );
+        assert!(r.contains("bg-5"), "{r}");
+        drop(e); // ends them all
+                 // a background command asks as any command does, and deleting is still refused
+        let (e, c, _d) = env_with(Box::new(DenyAll), |_| {});
+        let writes = sh("echo x > made.txt", "Set-Content made.txt x");
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": writes, "background": true}),
+        );
+        assert!(!r.contains("started"), "{r}");
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": "rm -rf x", "background": true}),
+        );
+        assert!(r.starts_with("refused: deleting"), "{r}");
+        assert!(e.bg.borrow().is_empty());
+    }
+
+    /// Stopping a background command, or the agent ending, ends what the command started too.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopping_ends_what_a_background_command_started() {
+        let (e, c, _d) = env_with(Box::new(Yes), |_| {});
+        let r = run(
+            &e,
+            &c,
+            "run_command",
+            json!({"command": "sleep 300 & echo pid=$!; wait", "background": true}),
+        );
+        assert!(r.contains("bg-1"), "{r}");
+        let mut pid = String::new();
+        for _ in 0..100 {
+            let o = run(&e, &c, "command_output", json!({"id": "bg-1"}));
+            // after the first line, which repeats the command
+            let body = o.split_once('\n').map_or("", |x| x.1);
+            if let Some(p) = body.split("pid=").nth(1) {
+                pid = p.chars().take_while(char::is_ascii_digit).collect();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !pid.is_empty(),
+            "{}",
+            run(&e, &c, "command_output", json!({"id": "bg-1"}))
+        );
+        // running: /proc has it and it is not a zombie waiting to be collected
+        let alive = |p: &str| {
+            std::fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|st| {
+                st.rsplit(')')
+                    .next()
+                    .is_some_and(|r| !r.trim_start().starts_with('Z'))
+            })
+        };
+        assert!(alive(&pid));
+        drop(e);
+        let mut gone = false;
+        for _ in 0..50 {
+            if !alive(&pid) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(gone, "{pid} outlived the agent");
     }
 
     #[test]
