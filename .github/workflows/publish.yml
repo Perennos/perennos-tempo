@@ -1,0 +1,47 @@
+name: publish
+# Publishes a draft release that release.yml made, by hand (Actions, publish, Run workflow): it
+# checks that the release is a draft, that every file matches SHA256SUMS.txt and that every file's
+# provenance (gh attestation verify) says it was built by this repository's release workflow,
+# then makes it the published, latest release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The draft release to publish, for example v2.0.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Check the draft, then publish it
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Check and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a version tag: $TAG"; exit 1 ;; esac
+          draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+          [ "$draft" = "true" ] || { echo "$TAG is not a draft release; nothing was changed"; exit 1; }
+          mkdir got
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir got
+          ls -la got
+          [ -f got/SHA256SUMS.txt ] || { echo "the draft has no SHA256SUMS.txt"; exit 1; }
+          (cd got && grep -v ' SHA256SUMS.txt$' SHA256SUMS.txt | sha256sum -c -)
+          n=0
+          for f in got/*; do
+            [ "$(basename "$f")" = SHA256SUMS.txt ] && continue
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" >/dev/null
+            echo "provenance verified: $(basename "$f")"
+            n=$((n + 1))
+          done
+          [ "$n" -ge 4 ] || { echo "expected at least 4 files, found $n"; exit 1; }
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          echo "$TAG is published"
