@@ -1,6 +1,6 @@
 [package]
 name = "perennos-tempo-launcher"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 authors = ["Perennos"]
 description = "tempo-launch: opens a Perennos Tempo app from a shortcut. Starts its server hidden if it is not running, then opens it in the browser. No console window, ever."

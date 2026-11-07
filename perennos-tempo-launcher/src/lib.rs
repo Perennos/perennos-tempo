@@ -39,6 +39,8 @@ usage: tempo-launch [command]
   vault [FOLDER]    Tempo Vault on FOLDER (default: TEMPO_VAULT, else Documents\\Tempo Vault)
   room              Tempo Room, signed in as you
   agent             start the agent and open its chat page (with its key, from the agent's data folder)
+  studio            Tempo Studio (mixing and mastering) has no page of its own: starts the agent and
+                    opens its chat page; ask Tempo to analyse or master a file in your Music folder
   start             start the agent and every installed app without opening anything (sign-in); the very
                     first time it also writes and opens the setup page (the plan for this computer)
   stop              stop the apps tempo-launch started
@@ -120,7 +122,13 @@ pub const FIELD: App = App {
     signs: &["\"read_only\":true"],
     wait: Duration::from_secs(30),
 };
+/// The apps that have a server and a port: what `start`, `stop` and `status` go through. Tempo
+/// Studio is not here: it has no window or server of its own (the agent uses it as a tool), so there
+/// is nothing to start, wait for or stop. `tempo-launch studio` opens the agent instead.
 pub const APPS: [App; 4] = [AGENT, VAULT, ROOM, FIELD];
+/// What `tempo-launch studio` says: how Tempo Studio is used, since it has nothing to open.
+pub const STUDIO_LINE: &str =
+    "Tempo Studio works through Tempo: ask Tempo to analyse or master a file in your Music folder.";
 /// Tempo's own copy of Ollama (`setup --apply` fetches it when a computer has none). It is not in
 /// `APPS`: its program lives in `<home>/runtime`, named by `<home>/runtime/ollama.json`, and it is
 /// started with `OLLAMA_HOST` instead of arguments. Whatever Ollama answers on the port is used
@@ -1820,6 +1828,8 @@ pub enum Cmd {
     Vault(Option<PathBuf>),
     Room,
     Agent,
+    /// Tempo Studio has no page of its own: the agent, then its page, and how to use Studio.
+    Studio,
     Start,
     Stop,
     Status {
@@ -1923,6 +1933,10 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             only(&[])?;
             Cmd::Agent
         }
+        "studio" => {
+            only(&[])?;
+            Cmd::Studio
+        }
         "start" => {
             only(&[])?;
             Cmd::Start
@@ -1981,7 +1995,7 @@ pub fn run(args: &[String]) -> i32 {
 pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
     let clicked = matches!(
         cmd,
-        Cmd::Home | Cmd::Field | Cmd::Vault(_) | Cmd::Room | Cmd::Agent
+        Cmd::Home | Cmd::Field | Cmd::Vault(_) | Cmd::Room | Cmd::Agent | Cmd::Studio
     );
     // (OpenRemote is typed in a terminal, so a failure is printed, not shown as a page)
     let r = match cmd {
@@ -1992,6 +2006,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Vault(dir) => open_vault(ctx, dir.as_deref()),
         Cmd::Room => open_room(ctx),
         Cmd::Agent => agent(ctx),
+        Cmd::Studio => studio(ctx),
         Cmd::Start => Ok(start(ctx)),
         Cmd::Stop => Ok(stop(ctx)),
         Cmd::Status { json } => {
@@ -2222,10 +2237,28 @@ fn hide_key(target: &str) -> String {
 }
 
 fn agent(ctx: &Ctx) -> Result<i32, Problem> {
+    let l = agent_up(ctx)?;
+    open_agent_page(ctx, &l.url(), agent_key(ctx).as_deref())
+}
+
+/// Start the agent if it is not running (Tempo's own Ollama first, when it has one) and say where it
+/// is. Nothing else is started.
+fn agent_up(ctx: &Ctx) -> Result<Launch, Problem> {
     start_owned_ollama(ctx, false);
     let l = launch_for(ctx, AGENT);
     ensure(ctx, &l, true)?;
     println!("{} is running on 127.0.0.1:{}", AGENT.title, l.port);
+    Ok(l)
+}
+
+/// `studio`: Tempo Studio is a command-line program and a tool the agent uses; it has no window or
+/// server to open. So this does what helps: the agent, its page, and one plain line on how to use
+/// Studio. The line is printed (in a terminal) and written to launch.log (from a shortcut nothing
+/// is shown, so that is where it can be read).
+fn studio(ctx: &Ctx) -> Result<i32, Problem> {
+    let l = agent_up(ctx)?;
+    println!("{STUDIO_LINE}");
+    ctx.note(&format!("studio: {STUDIO_LINE}"));
     open_agent_page(ctx, &l.url(), agent_key(ctx).as_deref())
 }
 
@@ -3070,6 +3103,7 @@ mod tests {
             ("field", Cmd::Field),
             ("room", Cmd::Room),
             ("agent", Cmd::Agent),
+            ("studio", Cmd::Studio),
             ("start", Cmd::Start),
             ("stop", Cmd::Stop),
             ("learn", Cmd::Learn),
@@ -3082,6 +3116,33 @@ mod tests {
         assert!(parse(&s(&["nope"])).is_err());
         assert!(parse(&s(&["room", "--wat"])).is_err());
         assert!(parse(&s(&["vault", "a", "b"])).is_err());
+    }
+
+    #[test]
+    fn studio_takes_no_arguments_and_is_not_an_app_with_a_server() {
+        assert_eq!(
+            parse(&s(&["studio", "--wat"])),
+            Err("studio: unknown argument --wat".to_string())
+        );
+        assert!(parse(&s(&["studio", "D:\\Music"])).is_err());
+        assert!(parse(&s(&["studio", "--json"])).is_err());
+        assert!(parse(&s(&["studio", "agent"])).is_err());
+        // a web page can fire the verbs of the link list and nothing else: studio is not one
+        assert!(parse(&s(&["perennos-tempo:studio"])).is_err());
+        // it is a command, not an entry of APPS: start, stop and status go through APPS and would
+        // look for a program, a port and a health answer that Studio does not have
+        assert!(APPS
+            .iter()
+            .all(|a| a.id != "studio" && a.bin != "tempo-studio"));
+        // the help text names it, with how to use it
+        assert!(
+            USAGE.lines().any(|l| l.trim_start().starts_with("studio ")),
+            "{USAGE}"
+        );
+        assert!(USAGE.contains("ask Tempo to analyse or master a file in your Music folder"));
+        // the line it says is plain: no key, no address, and the product's name in full
+        assert!(STUDIO_LINE.starts_with("Tempo Studio works through Tempo"));
+        assert!(!STUDIO_LINE.contains("127.0.0.1") && !STUDIO_LINE.contains("key"));
     }
 
     #[test]
@@ -4411,6 +4472,10 @@ mod tests {
         }
     }
 
+    /// The fake agent (and the check that none is there) uses the agent's real port, so the tests
+    /// that do take turns.
+    static AGENT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Run by the fake `tempo-local-agent` script: answers the agent's health on its own port.
     #[test]
     fn fake_agent() {
@@ -4674,6 +4739,7 @@ mod tests {
     #[test]
     fn start_brings_up_tempos_own_ollama_before_the_agent() {
         use std::os::unix::fs::PermissionsExt;
+        let _turn = AGENT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         if !port_free(AGENT.port) {
             return; // something else is on the agent's port: this test cannot run here
         }
@@ -4714,6 +4780,122 @@ mod tests {
         // stop ends both, by their records
         assert_eq!(run_cmd(&ctx, Cmd::Stop), 0);
         assert!(answers(&OLLAMA, port).is_none() && answers(&AGENT, AGENT.port).is_none());
+    }
+
+    /// Ends what tempo-launch started when a test ends, even by a failed assertion, so a fake agent
+    /// never keeps the agent's port for the tests that follow.
+    #[cfg(unix)]
+    struct StopOnDrop<'a>(&'a Ctx);
+
+    #[cfg(unix)]
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            stop(self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn studio_opens_the_agent_page_and_starts_nothing_else() {
+        use std::os::unix::fs::PermissionsExt;
+        let _turn = AGENT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        if !port_free(AGENT.port) {
+            return; // something else is on the agent's port: this test cannot run here
+        }
+        let root = tmp("studio");
+        let ctx = ctx_in(&root);
+        let _stop = StopOnDrop(&ctx);
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let script = |name: &str, text: String| {
+            let p = bin.join(name);
+            fs::write(&p, text).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // the agent is the fake that answers its health; Tempo Studio and the other apps are
+        // installed too, and each leaves a mark if it is ever run
+        let me = std::env::current_exe().unwrap();
+        script(
+            AGENT.bin,
+            format!(
+                "#!/bin/sh\nTEMPO_FAKE_AGENT=1 exec \"{}\" tests::fake_agent --exact --nocapture --test-threads=1\n",
+                me.display()
+            ),
+        );
+        let others = [VAULT.bin, ROOM.bin, FIELD.bin, "tempo-studio"];
+        for name in others {
+            script(
+                name,
+                format!("#!/bin/sh\necho ran > \"{}/ran-{name}\"\n", root.display()),
+            );
+        }
+        fs::create_dir_all(&ctx.agent_data).unwrap();
+        fs::write(ctx.agent_data.join("control.key"), "studio-key_1\n").unwrap();
+        let page = agent_page_url(
+            &format!("http://127.0.0.1:{}/", AGENT.port),
+            agent_key(&ctx).as_deref(),
+        );
+
+        // the agent is not running: it is started, and its page (not another) is opened
+        assert_eq!(run_cmd(&ctx, Cmd::Studio), 0);
+        assert_eq!(ctx.opened.borrow().as_slice(), std::slice::from_ref(&page));
+        assert!(page.starts_with("http://127.0.0.1:8765/") && loopback_url(&page));
+        assert!(answers(&AGENT, AGENT.port).is_some());
+        // nothing else was started: one record, the agent's, and none of the other programs ran
+        let recs = ctx.records();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0].app, "agent");
+        assert!(is_ours(&recs[0]));
+        let pid = recs[0].pid;
+        for name in others {
+            assert!(!root.join(format!("ran-{name}")).exists(), "{name} ran");
+        }
+        // the plain line is recorded, and the agent's key is not
+        let launch_log = fs::read_to_string(ctx.log_path("launch")).unwrap();
+        assert!(
+            launch_log.contains(&format!("studio: {STUDIO_LINE}")),
+            "{launch_log}"
+        );
+        assert!(!launch_log.contains("studio-key_1"), "{launch_log}");
+
+        // again: the agent is found where it is, nothing is started, the page opens again
+        assert_eq!(run_cmd(&ctx, Cmd::Studio), 0);
+        assert_eq!(ctx.opened.borrow().as_slice(), [page.clone(), page]);
+        let recs = ctx.records();
+        assert_eq!((recs.len(), recs[0].pid), (1, pid));
+        for name in others {
+            assert!(!root.join(format!("ran-{name}")).exists(), "{name} ran");
+        }
+
+        // stop ends the agent, the only thing there is to end
+        assert_eq!(run_cmd(&ctx, Cmd::Stop), 0);
+        assert!(answers(&AGENT, AGENT.port).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn studio_without_the_agent_is_a_plain_problem_and_opens_no_agent_page() {
+        let _turn = AGENT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        if !port_free(AGENT.port) {
+            return; // something else is on the agent's port: this test cannot run here
+        }
+        let root = tmp("studio-missing");
+        let ctx = ctx_in(&root);
+        // as from a shortcut: a page says why (the only thing opened), and nothing is started
+        assert_eq!(run_cmd(&ctx, Cmd::Studio), 1);
+        let page = fs::read_to_string(ctx.home.join("problem.html")).unwrap();
+        assert!(page.contains("Tempo Agent is not installed"), "{page}");
+        let opened = ctx.opened.borrow().clone();
+        assert_eq!(opened, [ctx.home.join("problem.html").to_string_lossy()]);
+        assert!(ctx.records().is_empty());
+        // Studio is not described as ready when the agent that would use it is not there
+        let launch_log = fs::read_to_string(ctx.log_path("launch")).unwrap();
+        assert!(
+            launch_log.contains("problem: Tempo Agent is not installed")
+                && !launch_log.contains(STUDIO_LINE),
+            "{launch_log}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 ;   task. It keeps the vault, Tempo's memory and the logs: they are the user's.
 
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.0.1"
 #endif
 #ifndef Stage
   #define Stage AddBackslash(SourcePath) + "build\stage"
@@ -125,7 +125,7 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 SetupWindowTitle={#AppName} Setup
 WelcomeLabel1=Welcome to Perennos Tempo
 WelcomeLabel2=This installs [name/ver]: the local agent, and the apps it connects to as its tools on its own.%n%nEverything runs on this computer. Nothing is sent anywhere unless you connect it yourself, and uninstalling never touches your notes.%n%nIt takes about a minute.
-FinishedHeadingLabel=Perennos Tempo is ready
+FinishedHeadingLabel=Perennos Tempo is installed
 ClickFinish=Click Finish to close Setup.
 SelectComponentsLabel2=Choose what to install. You can come back and change this at any time: your notes and settings stay as they are.
 
@@ -161,7 +161,7 @@ Name: "addtopath"; Description: "Add the tempo programs to PATH, for terminals";
 #if HaveVault
 Name: "learn"; Description: "Let Tempo learn from your vault every hour (on this computer, no window)"; GroupDescription: "Perennos Tempo:"; Components: vault
 #endif
-Name: "setupmodels"; Description: "Set up models for this computer (downloads what fits, shown before anything is fetched)"; GroupDescription: "Perennos Tempo:"; Components: agent
+Name: "setupmodels"; Description: "Download models that fit this computer now (several gigabytes, needs Ollama)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
 Name: "startup"; Description: "Start Perennos Tempo in the background when I sign in"; GroupDescription: "Perennos Tempo:"; Flags: unchecked
 
 [Files]
@@ -211,6 +211,10 @@ Name: "{group}\{#AppName}"; Filename: "{#Launch}"; WorkingDir: "{app}"; IconFile
 #if HaveVault
 Name: "{group}\Tempo Vault"; Filename: "{#Launch}"; Parameters: "vault"; WorkingDir: "{app}"; IconFilename: "{app}\tempo-vault.ico"; Comment: "Your notes"; Components: vault
 #endif
+#if HaveStudio
+; no Studio icon is staged (the art makes tempo, vault and room icons only); Studio's mark is Tempo's orange P, so tempo.ico
+Name: "{group}\Tempo Studio"; Filename: "{#Launch}"; Parameters: "studio"; WorkingDir: "{app}"; IconFilename: "{app}\tempo.ico"; Comment: "Mixing and mastering, through Tempo"; Components: studio
+#endif
 #if HaveRoom
 Name: "{group}\Tempo Room"; Filename: "{#Launch}"; Parameters: "room"; WorkingDir: "{app}"; IconFilename: "{app}\tempo-room.ico"; Comment: "Your chat rooms"; Components: room
 #endif
@@ -246,11 +250,16 @@ Filename: "{app}\bin\tempo-vault.exe"; Parameters: "init ""{code:VaultDir}"""; F
 Filename: "{#Launch}"; Parameters: "schedule"; Flags: runhidden waituntilterminated; Tasks: learn; StatusMsg: "Setting up hourly learning..."
 Filename: "{#Launch}"; Parameters: "schedule --remove"; Flags: runhidden waituntilterminated; Tasks: not learn
 #endif
-; Models for this computer. With Ollama present: look at the computer and fetch what fits, hidden
-; (`--yes` because ticking the box above is the consent; the plan with sizes is what the box promises).
-; Without Ollama (Tempo never installs it): only write the plan to <home>\setup.html; the launcher opens it at the first start.
-Filename: "{#Launch}"; Parameters: "setup --apply --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: OllamaPresent; StatusMsg: "Setting up models for this computer..."
-Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: not OllamaPresent; StatusMsg: "Planning models for this computer..."
+; Models for this computer. The box is unticked by default and says it downloads several gigabytes, so
+; nothing large is ever fetched unless the person ticked it. Exactly one of these three runs:
+; 1. box ticked and Ollama present: look at the computer and fetch what fits, hidden
+;    (`--yes` because ticking the box is the consent);
+; 2. box ticked, no Ollama (Tempo never installs it here): only write the plan to <home>\setup.html;
+; 3. box not ticked: only write the plan too, so the page exists. In both 2 and 3 the launcher opens
+;    the plan at the first start; nothing is downloaded.
+Filename: "{#Launch}"; Parameters: "setup --apply --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: OllamaPresent; StatusMsg: "Downloading models for this computer. This can take a while..."
+Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: not OllamaPresent; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
+Filename: "{#Launch}"; Parameters: "setup --page"; Flags: runhidden waituntilterminated; Components: agent; Tasks: not setupmodels; StatusMsg: "Planning models for this computer (nothing is downloaded)..."
 Filename: "{#Launch}"; Description: "Open Perennos Tempo"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
@@ -269,16 +278,18 @@ var
 function SetEnvironmentVariable(lpName: String; lpValue: String): BOOL;
   external 'SetEnvironmentVariableW@kernel32.dll stdcall';
 
-{ Program Files for all users; for one user the per-user Programs folder, which is
-  %LOCALAPPDATA%\Programs unless the system has moved it. A system that cannot say where it is
-  (some locked-down setups, Wine) gets that usual place. }
-{ Ollama is installed for this user (its own installer's folder) or is on PATH. Tempo never installs it. }
+{ Ollama is installed for this user (its own installer's folder), for all users (Program Files), or is
+  on PATH. Tempo never installs it. }
 function OllamaPresent: Boolean;
 begin
   Result := FileExists(ExpandConstant('{localappdata}\Programs\Ollama\ollama.exe'))
+    or FileExists(ExpandConstant('{commonpf}\Ollama\ollama.exe'))
     or (FileSearch('ollama.exe', GetEnv('PATH')) <> '');
 end;
 
+{ Program Files for all users; for one user the per-user Programs folder, which is
+  %LOCALAPPDATA%\Programs unless the system has moved it. A system that cannot say where it is
+  (some locked-down setups, Wine) gets that usual place. }
 function ProgramsRoot(Param: String): String;
 begin
   if IsAdminInstallMode then
@@ -566,6 +577,10 @@ begin
     S := '';
     if (VaultPage <> nil) and WizardIsComponentSelected('vault') then
       S := 'Your vault is in ' + VaultDir('') + '.' + #13#10#13#10;
+    if OllamaPresent then
+      S := S + 'Ollama was found on this computer. The first time you open Perennos Tempo, it shows which models fit.' + #13#10#13#10
+    else
+      S := S + 'Ollama was not found on this computer. Perennos Tempo uses it to run models. Get it from https://ollama.com/download. The first time you open Perennos Tempo, it shows which models fit this computer.' + #13#10#13#10;
     S := S + 'Open Perennos Tempo any time from the Start menu. Everything stays on this computer.';
     WizardForm.FinishedLabel.Caption := S;
     WizardForm.FinishedLabel.AdjustHeight;

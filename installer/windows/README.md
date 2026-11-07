@@ -27,16 +27,16 @@ one AppId, so installing the full edition over the source-available one adds the
 | Destination | the folder (first install only; updates go where it already is) |
 | Components | Everything, the agent and Tempo Vault, or a choice |
 | Your vault | the notes folder: a new one, or an Obsidian vault you already have (left as it is) |
-| Additional tasks | desktop shortcut, "Open as Tempo Vault" in File Explorer, PATH, hourly learning, start at sign-in |
+| Additional tasks | desktop shortcut, "Open as Tempo Vault" in File Explorer, PATH, hourly learning, downloading models now (off unless ticked: several gigabytes, needs Ollama), start at sign-in |
 | Ready | a summary that includes the vault and where Tempo keeps its memory |
-| Finished | where the vault is, and "Open Perennos Tempo" |
+| Finished | "Perennos Tempo is installed", where the vault is, whether Ollama was found (if not, https://ollama.com/download), and "Open Perennos Tempo" |
 
 ## What goes where
 
 | | For me only | For all users |
 | --- | --- | --- |
 | Programs | `%LOCALAPPDATA%\Programs\Perennos Tempo\bin` | `C:\Program Files\Perennos Tempo\bin` |
-| Start menu | `Perennos Tempo` folder: Perennos Tempo, Tempo Vault, Tempo Room | the same, for everyone |
+| Start menu | `Perennos Tempo` folder: Perennos Tempo, Tempo Vault, Tempo Studio, Tempo Room | the same, for everyone |
 | PATH (if ticked) | the user's | the machine's |
 | "Open as Tempo Vault" (if ticked) | `HKCU\Software\Classes\Directory` | `HKLM\Software\Classes\Directory` |
 | Uninstall entry | Settings, Apps: Perennos Tempo (the source-available build says so), by Perennos, with its icon and size | the same |
@@ -46,6 +46,16 @@ For the user who installs it, Setup also sets `TEMPO_VAULT` (the vault folder) a
 a tool and terminals find the same data. Hourly learning is the scheduled task "Perennos Tempo Vault Learn"
 (the same name `tempo-vault schedule` uses, so there is only ever one). Start at sign-in is
 `HKCU\...\Run\Perennos Tempo` running `tempo-launch start`.
+
+Models: Setup downloads nothing large unless "Download models that fit this computer now" is ticked, and it is
+not ticked by default (it says several gigabytes, and needs Ollama). Ticked with Ollama found (for this user, in
+`Program Files\Ollama`, or on PATH), Setup runs `tempo-launch setup --apply --yes` hidden. In every other case it
+runs only `tempo-launch setup --page`, which writes the plan to `<the Tempo home>\setup.html` and downloads
+nothing; Perennos Tempo opens that page at its first start. Setup never installs Ollama: the Finished page says
+where to get it (https://ollama.com/download) when it was not found.
+
+The Tempo Studio shortcut runs `tempo-launch studio`, which opens Tempo, where Studio's tools are used. It carries
+`tempo.ico`: the build makes no separate Studio icon.
 
 Every shortcut runs `tempo-launch.exe`, a program without a console window. It starts an app's server
 hidden if it is not running, waits until it answers, and opens it in the browser. Each server's output goes
@@ -135,7 +145,7 @@ Python 3 and Inno Setup 6.4 or later.
 For IT tools and scripts (Inno Setup's standard switches, plus `/VAULT`):
 
 ```bat
-PerennosTempo-Setup-2.0.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /VAULT="D:\Notes" /LOG="%TEMP%\perennos-tempo-setup.log"
+PerennosTempo-Setup-2.0.1-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /VAULT="D:\Notes" /LOG="%TEMP%\perennos-tempo-setup.log"
 ```
 
 | Switch | |
@@ -143,7 +153,7 @@ PerennosTempo-Setup-2.0.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURR
 | `/CURRENTUSER` or `/ALLUSERS` | who it is for (default: the current user) |
 | `/DIR="..."` | the program folder |
 | `/COMPONENTS="agent,vault,studio,room,field,cli"` | what to install (the agent is always installed) |
-| `/TASKS="openvault,addtopath,learn"` | exactly these tasks; `/MERGETASKS="desktopicon,startup"` adds to the defaults |
+| `/TASKS="openvault,addtopath,learn"` | exactly these tasks; `/MERGETASKS="desktopicon,startup"` adds to the defaults. `setupmodels` (download models now) is not a default: name it, as in `/MERGETASKS="setupmodels"`, to opt in |
 | `/VAULT="D:\Notes"` | the vault folder (default: the last one, else `TEMPO_VAULT`, else `Documents\Tempo Vault`) |
 | `/LOG="file"` | Setup's log |
 

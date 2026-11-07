@@ -37,9 +37,9 @@ prerequisite stops only what needs it:
 ## Install from a release
 
 ```bash
-tar xzf perennos-tempo-full-2.0.0-x86_64-unknown-linux-gnu.tar.gz && cd perennos-tempo-full-*/ && ./install.sh
+tar xzf perennos-tempo-full-2.0.1-x86_64-unknown-linux-gnu.tar.gz && cd perennos-tempo-full-*/ && ./install.sh
 # or, one step, with the checksum checked first:
-installer/unix/install.sh --from-release perennos-tempo-full-2.0.0-x86_64-unknown-linux-gnu.tar.gz
+installer/unix/install.sh --from-release perennos-tempo-full-2.0.1-x86_64-unknown-linux-gnu.tar.gz
 installer/unix/install.sh --from-release https://example.invalid/perennos-tempo-...tar.gz --sha256 <64 hex digits>
 ```
 
