@@ -28,6 +28,13 @@ impl Confirm for TtyConfirm {
             return false;
         }
         // the whole request, so the answer is about what will really run
+        // the untrusted-content warning (tools.rs) is the one red line
+        let detail = match detail.strip_prefix(crate::tools::UNTRUSTED_LINE) {
+            Some(rest) if std::io::stderr().is_terminal() => {
+                format!("\x1b[31m{}\x1b[0m{rest}", crate::tools::UNTRUSTED_LINE)
+            }
+            _ => detail.to_string(),
+        };
         eprint!("\n[confirm] {what}:\n{detail}\n-- allow? [y/N] ");
         let _ = std::io::stderr().flush();
         let mut l = String::new();
