@@ -90,6 +90,14 @@ usage: tempo-launch [command]
                     and schedules their flows
   conductor run BAND [FLOW] [--note TEXT]
                     walk a flow through its members; each step becomes a linked note in the Vault
+  conductor sections BAND [FLOW] [--note TEXT] [--takes 1-3] [--resume RUN]
+                    play a big job as sections (sub-teams) and takes (attempts), under a budget;
+                    the producer judges the takes and the best one is kept (docs/SECTIONS.md)
+  conductor runs    the newest sectioned runs: what they used, their takes and winners
+  conductor stop [RUN]
+                    end a run at its next step, and say what got done
+  conductor takes accept|reject TAKE
+                    your say on one take, which can change the winner
   conductor engines every engine you have (this computer's Ollama and the ones you linked):
                     up or down, their models, and how strong each is
   conductor room BAND

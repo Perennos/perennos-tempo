@@ -578,7 +578,27 @@ impl Agent {
         u.prompt_tok += r.info.prompt_tok.unwrap_or(0);
         u.out_tok += r.info.out_tok.unwrap_or(0);
         u.seconds += r.info.total_s;
+        if let Some(m) = &conv.meter {
+            m.charge_tokens(r.info.prompt_tok.unwrap_or(0) + r.info.out_tok.unwrap_or(0));
+        }
         Ok(r)
+    }
+
+    /// A stop or a spent limit ends the turn cleanly: one plain line that says which, and what
+    /// this run did so far, given as the answer. None when the turn may go on.
+    fn halted(&self, conv: &mut Conv, sink: &mut dyn Sink) -> Option<String> {
+        let m = conv.meter.clone()?;
+        let h = m.halt()?;
+        let done = format!(
+            "Done so far: {} requests and {} tool calls. Say 'continue' to pick it up again.",
+            conv.usage.requests,
+            m.used().tool_calls
+        );
+        let out = m.halt_line(h, &done);
+        sink.text(&out);
+        conv.emit("assistant", &out);
+        conv.wf_log(&format!("halted: {out}"));
+        Some(out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1187,6 +1207,9 @@ impl Agent {
         let hist = self.cfg().hist_chars;
 
         for _step in 0..max_steps {
+            if let Some(out) = self.halted(conv, sink) {
+                return Ok(out);
+            }
             // a trim leaves a short note of what it dropped; the note needs a little room
             conv.messages = if self.cfg().prefix_stable {
                 trim_noting(std::mem::take(&mut conv.messages), hist, hist * 6 / 10)
@@ -1282,6 +1305,15 @@ impl Agent {
                     "tool_call",
                     &format!("{name} {}", cap(&args.to_string(), 600)),
                 );
+                // a stop or a spent limit mid-list: the rest are not run, and the next step ends the turn
+                if conv.meter.as_ref().is_some_and(|m| m.halt().is_some()) {
+                    conv.emit(
+                        "tool_result",
+                        &format!("{name}: (not run, the run was stopped)"),
+                    );
+                    conv.messages.push(json!({"role": "tool", "tool_name": name, "content": "not run: the run was stopped or ran out of budget"}));
+                    continue;
+                }
                 // sorted keys: serde_json's default Map is a BTreeMap, so to_string() is key-sorted
                 let key = format!("{name}{args}");
                 // a background command's output changes while it runs: reading it again is not a loop
@@ -1298,6 +1330,9 @@ impl Agent {
                     continue;
                 }
                 let r = self.run_tool(conv, &route, &name, &args);
+                if let Some(m) = &conv.meter {
+                    m.charge_tool();
+                }
                 // GUARD: the first time this turn takes in something untrusted, say so once
                 if let Some(m) = self.env.take_taint_notice(conv) {
                     conv.emit("status", m);
@@ -1829,6 +1864,49 @@ mod tests {
             .unwrap()
             .starts_with("Step limit reached."));
         assert!(conv.wf_text().contains("step cap:"));
+    }
+
+    #[test]
+    fn a_spent_tool_budget_ends_the_turn_with_a_plain_line() {
+        use crate::budget::{Budget, Meter};
+        let script: Vec<(u16, String)> = (0..4)
+            .map(|i| call_resp("list_dir", json!({"path": format!("/no/such/dir{i}")})))
+            .collect();
+        let m = Mock::start(chat_script(script));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        let root = Meter::root(Budget {
+            tool_calls: 2,
+            ..Budget::unlimited()
+        });
+        conv.meter = Some(root.child(Budget::unlimited()));
+        let r = a.turn(&mut conv, "list the folders", &mut VecSink::default());
+        let r = r.unwrap();
+        assert!(
+            r.starts_with("Stopped at the tool-call limit (2 of 2 used)."),
+            "{r}"
+        );
+        assert!(r.contains("2 tool calls"), "{r}");
+        assert_eq!(m.bodies("/api/chat").len(), 2, "no request after the limit");
+        assert_eq!(
+            root.used().tool_calls,
+            2,
+            "the child's calls count at the root"
+        );
+    }
+
+    #[test]
+    fn a_stop_ends_the_turn_before_the_next_request() {
+        use crate::budget::{Budget, Meter};
+        let m = Mock::start(chat_script(vec![text_resp("never asked")]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        let meter = Meter::root(Budget::unlimited());
+        meter.stop();
+        conv.meter = Some(meter);
+        let r = a
+            .turn(&mut conv, "hello there", &mut VecSink::default())
+            .unwrap();
+        assert!(r.starts_with("Stopped by you."), "{r}");
+        assert!(m.bodies("/api/chat").is_empty());
     }
 
     #[test]

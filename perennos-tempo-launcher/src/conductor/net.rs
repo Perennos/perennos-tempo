@@ -192,6 +192,17 @@ impl Agent {
 
     /// `ask`, with the engine the agent says answered (an agent that does not say, gives none).
     pub fn ask_on(&self, conv: &str, text: &str) -> Result<Said, String> {
+        self.ask_metered(conv, text, None)
+    }
+
+    /// `ask_on`, and when the run's meter says stop the agent is told to end the conversation
+    /// (`POST /agent/stop`) and the wait ends at once.
+    pub fn ask_metered(
+        &self,
+        conv: &str,
+        text: &str,
+        meter: Option<&super::budget::Meter>,
+    ) -> Result<Said, String> {
         let body = format!(
             "{{\"conv\":\"{}\",\"text\":\"{}\"}}",
             json_escape(conv),
@@ -201,6 +212,11 @@ impl Agent {
         let end = Instant::now() + self.patience;
         loop {
             std::thread::sleep(self.poll);
+            if meter.is_some_and(|m| m.halt().is_some()) {
+                let stop = format!("{{\"conv\":\"{}\"}}", json_escape(conv));
+                let _ = self.call("POST", "/agent/stop", Some(&stop));
+                return Err("stopped".into());
+            }
             let j = self.call(
                 "GET",
                 &format!("/agent/events?conv={}&since=0", json_escape(conv)),
@@ -264,6 +280,32 @@ impl Chat for Agent {
             r => r?,
         };
         self.ask_on(&conv, text)
+    }
+
+    fn say_run(
+        &self,
+        meter: &super::budget::Meter,
+        engine: &str,
+        model: &str,
+        role: &str,
+        text: &str,
+        schema: &str,
+    ) -> Result<Said, String> {
+        if meter.halt().is_some() {
+            return Err("stopped".into());
+        }
+        let pin = !engine.is_empty() && self.knows_engines();
+        let conv = match self.new_guest_with(model, role, if pin { engine } else { "" }, schema) {
+            Err(e) if pin && e.starts_with("the agent said: engine:") => {
+                self.new_guest_with(model, role, "", schema)?
+            }
+            r => r?,
+        };
+        self.ask_metered(&conv, text, Some(meter))
+    }
+
+    fn parallel(&self) -> Option<&(dyn Chat + Sync)> {
+        Some(self)
     }
 }
 

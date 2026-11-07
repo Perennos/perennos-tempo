@@ -122,6 +122,9 @@ pub struct Conv {
     /// The engine that answered the last request. Not saved: it is for whoever is waiting on
     /// the turn (the Conductor files it in its notes).
     pub served_by: Option<String>,
+    /// The stop switch and budget of the run this turn belongs to. Not saved. A turn with none
+    /// runs as before.
+    pub meter: Option<crate::budget::Meter>,
 }
 
 /// The longest role a conversation may be given, and whether a model name is one we accept.
@@ -237,6 +240,7 @@ impl Conv {
             engine: None,
             format: None,
             served_by: None,
+            meter: None,
         };
         if let Ok(txt) = std::fs::read_to_string(&c.path) {
             let d: Value = serde_json::from_str(&txt)

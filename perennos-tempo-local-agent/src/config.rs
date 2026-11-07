@@ -120,6 +120,9 @@ pub struct Config {
     /// prompt prefix every turn (only new tokens are processed). Default on.
     pub prefix_stable: bool,
     pub max_steps: usize,
+    /// What a run may use (`budget_tokens`, `budget_wall_s`, `budget_tool_calls`,
+    /// `budget_cloud_cents`; 0 is no limit). Applies to turns that ask for a budget.
+    pub budget: crate::budget::Budget,
     pub tool_cap: usize,
     pub retries: usize,
     pub retry_delay_ms: u64,
@@ -267,6 +270,7 @@ impl Config {
             hist_chars: 11000,
             prefix_stable: true,
             max_steps: 40,
+            budget: crate::budget::Budget::default(),
             tool_cap: 40,
             retries: 3,
             retry_delay_ms: 10_000,
@@ -381,6 +385,18 @@ impl Config {
             if let Some(n) = num(v, k) {
                 *slot = n as usize;
             }
+        }
+        for (k, slot) in [
+            ("budget_tokens", &mut c.budget.tokens),
+            ("budget_tool_calls", &mut c.budget.tool_calls),
+            ("budget_cloud_cents", &mut c.budget.cloud_cents),
+        ] {
+            if let Some(n) = num(v, k) {
+                *slot = n.max(0.0) as u64;
+            }
+        }
+        if let Some(n) = num(v, "budget_wall_s") {
+            c.budget.wall_time = std::time::Duration::from_secs(n.max(0.0) as u64);
         }
         if let Some(b) = v.get("prefix_stable").and_then(Value::as_bool) {
             c.prefix_stable = b;
@@ -711,6 +727,23 @@ mod tests {
         assert_eq!(c.max_steps, 40);
         let c = Config::defaults(Some("/x/data".into()));
         assert_eq!(c.data_dir, PathBuf::from("/x/data"));
+    }
+
+    #[test]
+    fn budget_defaults_are_sensible_and_the_config_changes_them() {
+        let c = Config::defaults(Some("/x/data".into()));
+        assert_eq!(c.budget, crate::budget::Budget::default());
+        let v = json!({"budget_tokens": 5000, "budget_wall_s": 60, "budget_tool_calls": 0, "budget_cloud_cents": 5});
+        let c = Config::from_json(&v, None).unwrap();
+        assert_eq!(
+            (
+                c.budget.tokens,
+                c.budget.wall_time.as_secs(),
+                c.budget.tool_calls,
+                c.budget.cloud_cents
+            ),
+            (5000, 60, 0, 5)
+        );
     }
 
     #[test]

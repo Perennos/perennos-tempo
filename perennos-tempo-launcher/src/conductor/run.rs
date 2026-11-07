@@ -305,7 +305,11 @@ pub struct Outcome {
 }
 
 /// A folder for this run that does not exist yet: `<date> <flow>`, then `(2)`, `(3)`...
-fn make_run_folder(root: &Path, date: &str, flow: &str) -> Result<(PathBuf, String), String> {
+pub(super) fn make_run_folder(
+    root: &Path,
+    date: &str,
+    flow: &str,
+) -> Result<(PathBuf, String), String> {
     std::fs::create_dir_all(root).map_err(|e| format!("could not make {}: {e}", root.display()))?;
     for i in 1..100 {
         let name = if i == 1 {

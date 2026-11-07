@@ -13,14 +13,21 @@
 //! Members chat as guests (no tools); the launcher writes their notes, and only under the band's
 //! own notes folder.
 
+pub mod budget;
+pub mod checks;
 pub mod draft;
 pub mod engines;
 pub mod net;
 pub mod page;
 pub mod propose;
 pub mod run;
+pub mod runlog;
+pub mod runs;
 pub mod schedule;
+pub mod sections;
+pub mod settings;
 pub mod spec;
+pub mod takes_file;
 pub mod templates;
 
 use crate::setup::{apply, plan::Plan, probe};
@@ -96,6 +103,35 @@ pub trait Chat {
         self.say(model, role, text)
             .map(|text| Said { text, engine: None })
     }
+
+    /// One member's step inside a sectioned run: `say_on`, or with a `schema` the answer must
+    /// follow, and ended at once when the run's meter says stop. The agent connection ends the
+    /// conversation it started too. A stand-in keeps this default.
+    fn say_run(
+        &self,
+        meter: &budget::Meter,
+        engine: &str,
+        model: &str,
+        role: &str,
+        text: &str,
+        schema: &str,
+    ) -> Result<Said, String> {
+        if meter.halt().is_some() {
+            return Err("stopped".into());
+        }
+        if schema.is_empty() {
+            self.say_on(engine, model, role, text)
+        } else {
+            self.say_json(model, role, text, schema)
+                .map(|text| Said { text, engine: None })
+        }
+    }
+
+    /// This chat, as one that members on several threads can use at once. None: it cannot, and
+    /// sections cannot be played with it.
+    fn parallel(&self) -> Option<&(dyn Chat + Sync)> {
+        None
+    }
 }
 
 /// An answer and, when the agent said so, the address of the engine that gave it.
@@ -138,6 +174,25 @@ pub enum ConductorCmd {
         band: Option<String>,
     },
     Engines,
+    /// Play a flow as sections and takes.
+    Sections {
+        band: String,
+        flow: Option<String>,
+        note: Option<String>,
+        takes: Option<u8>,
+        resume: Option<String>,
+    },
+    /// The newest sectioned runs.
+    Runs,
+    /// End a run at its next step.
+    Stop {
+        run: Option<String>,
+    },
+    /// The owner's say on one take.
+    Verdict {
+        take: String,
+        accept: bool,
+    },
     Room {
         band: String,
     },
@@ -251,6 +306,71 @@ pub fn parse_args(rest: &[&str]) -> Result<ConductorCmd, String> {
             }
             Ok(ConductorCmd::Run { band, flow, note })
         }
+        "sections" => {
+            let band = band_arg(args.first(), "sections")?;
+            let (mut flow, mut note, mut takes, mut resume) = (None, None, None, None);
+            let mut i = 1;
+            let value = |i: &mut usize, what: &str| -> Result<String, String> {
+                *i += 1;
+                args.get(*i)
+                    .map(|v| v.to_string())
+                    .ok_or_else(|| format!("conductor sections: {what} needs a value"))
+            };
+            while i < args.len() {
+                match args[i] {
+                    "--note" => note = Some(value(&mut i, "--note")?),
+                    "--takes" => {
+                        let v = value(&mut i, "--takes")?;
+                        takes = Some(
+                            v.parse::<u8>()
+                                .ok()
+                                .filter(|n| (1..=settings::MAX_TAKES).contains(n))
+                                .ok_or_else(|| {
+                                    format!(
+                                        "conductor sections: --takes is 1 to {}",
+                                        settings::MAX_TAKES
+                                    )
+                                })?,
+                        );
+                    }
+                    "--resume" => {
+                        let v = value(&mut i, "--resume")?;
+                        if v.is_empty() || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                            return Err("conductor sections: --resume takes a run id like r-1a2b3c4d".into());
+                        }
+                        resume = Some(v);
+                    }
+                    f if !f.starts_with("--") && flow.is_none() => flow = Some(f.to_string()),
+                    other => return Err(format!("conductor sections: unknown argument {other}")),
+                }
+                i += 1;
+            }
+            if let Some(f) = &flow {
+                if !slug_ok(f, 40) {
+                    return Err(format!("conductor sections: \"{f}\" is not a flow name"));
+                }
+            }
+            Ok(ConductorCmd::Sections {
+                band,
+                flow,
+                note,
+                takes,
+                resume,
+            })
+        }
+        "runs" if args.is_empty() => Ok(ConductorCmd::Runs),
+        "stop" if args.len() <= 1 => Ok(ConductorCmd::Stop {
+            run: args.first().map(|r| r.to_string()),
+        }),
+        "takes" => match args {
+            [v @ ("accept" | "reject"), id] if !id.is_empty() && id.len() <= 80 => {
+                Ok(ConductorCmd::Verdict {
+                    take: id.to_string(),
+                    accept: *v == "accept",
+                })
+            }
+            _ => Err("conductor takes: accept TAKE-ID or reject TAKE-ID".into()),
+        },
         "page" if args.len() <= 1 => Ok(ConductorCmd::Page {
             band: args
                 .first()
@@ -268,11 +388,13 @@ pub fn parse_args(rest: &[&str]) -> Result<ConductorCmd, String> {
         }),
         "room" => Err("conductor room takes one band name".into()),
         "page" => Err("conductor page takes at most one band name".into()),
+        "runs" => Err("conductor runs takes no arguments".into()),
+        "stop" => Err("conductor stop takes at most one run id".into()),
         "templates" => Err("conductor templates takes no arguments".into()),
         "engines" => Err("conductor engines takes no arguments".into()),
         "apply-proposal" => Err("conductor apply-proposal takes at most one name".into()),
         other => Err(format!(
-            "band: unknown command {other} (try: templates, new, run, engines, room, page, apply-proposal)"
+            "band: unknown command {other} (try: templates, new, run, sections, runs, stop, takes, engines, room, page, apply-proposal)"
         )),
     }
 }
@@ -362,6 +484,13 @@ fn saved(ctx: &Ctx) -> Vec<(String, Result<Band, String>)> {
 pub trait Outside {
     fn engines(&self) -> Vec<engines::Engine>;
     fn apps(&self) -> Vec<page::AppState>;
+
+    /// The repo checks a sectioned run judges takes with. None are set up unless the owner
+    /// named a folder and a check command in conductor.json.
+    fn checks(&self, ctx: &Ctx, settings: &settings::Settings) -> Box<dyn checks::Checks> {
+        let _ = (ctx, settings);
+        Box::new(checks::NoChecks)
+    }
 }
 
 /// Everything the commands need from outside, so tests can stand in for the agent, Room and the
@@ -735,6 +864,25 @@ pub fn dispatch(
         ConductorCmd::Templates => templates_list(out),
         ConductorCmd::New { .. } => new_band(ctx, cmd, d, out, ask),
         ConductorCmd::Run { .. } => run_flow_cmd(ctx, cmd, d, out),
+        ConductorCmd::Sections {
+            band,
+            flow,
+            note,
+            takes,
+            resume,
+        } => runs::sections_cmd(
+            ctx,
+            &band,
+            flow.as_deref(),
+            note.as_deref(),
+            takes,
+            resume.as_deref(),
+            d,
+            out,
+        ),
+        ConductorCmd::Runs => runs::runs_cmd(ctx, out),
+        ConductorCmd::Stop { run } => runs::stop_cmd(ctx, run.as_deref(), out),
+        ConductorCmd::Verdict { take, accept } => runs::verdict_cmd(ctx, &take, accept, out),
         ConductorCmd::Page { band } => page_cmd(ctx, band.as_deref(), d, out),
         ConductorCmd::Engines => engines_cmd(d, out),
         ConductorCmd::Room { band } => room_cmd(ctx, &band, d, out),
@@ -749,6 +897,8 @@ pub fn dispatch(
 /// The agent, started when a band first needs a word from it.
 struct RealChat<'a> {
     ctx: &'a Ctx,
+    /// The agent connection for sections, made on this thread once, then shared by many.
+    par: std::sync::OnceLock<Option<net::Agent>>,
 }
 
 impl RealChat<'_> {
@@ -788,6 +938,15 @@ impl Chat for RealChat<'_> {
     ) -> Result<String, String> {
         self.agent()?.say_json(model, role, text, schema)
     }
+
+    /// Sections go straight to the agent. A fleet machine does not play a section: its engines
+    /// are still named in the cast, but the agent here is the one asked.
+    fn parallel(&self) -> Option<&(dyn Chat + Sync)> {
+        self.par
+            .get_or_init(|| self.agent().ok())
+            .as_ref()
+            .map(|a| a as &(dyn Chat + Sync))
+    }
 }
 
 fn real_models(ctx: &Ctx, now: u64) -> Models {
@@ -820,6 +979,21 @@ impl Outside for RealOutside<'_> {
     fn apps(&self) -> Vec<page::AppState> {
         page::real_apps(self.ctx)
     }
+
+    fn checks(&self, ctx: &Ctx, s: &settings::Settings) -> Box<dyn checks::Checks> {
+        match &s.workdir {
+            Some(w) if w.is_dir() && (!s.check.is_empty() || s.soundcheck) => {
+                Box::new(checks::RepoChecks {
+                    workdir: w.clone(),
+                    command: s.check.clone(),
+                    soundcheck_exe: s.soundcheck.then(|| ctx.find(AGENT.bin)).flatten(),
+                    scratch: runlog::runs_dir(ctx).join("work"),
+                    timeout: s.check_timeout,
+                })
+            }
+            _ => Box::new(checks::NoChecks),
+        }
+    }
 }
 
 /// `tempo-launch conductor ...` (and `band ...`).
@@ -834,7 +1008,10 @@ pub fn run(ctx: &Ctx, cmd: ConductorCmd) -> i32 {
     } else {
         Models::default()
     };
-    let chat = RealChat { ctx };
+    let chat = RealChat {
+        ctx,
+        par: std::sync::OnceLock::new(),
+    };
     let sched = schedule::RealScheduler;
     let outside = RealOutside { ctx };
     let deps = Deps {
@@ -855,5 +1032,7 @@ pub fn run(ctx: &Ctx, cmd: ConductorCmd) -> i32 {
     )
 }
 
+#[cfg(test)]
+mod sections_tests;
 #[cfg(test)]
 pub mod tests;
