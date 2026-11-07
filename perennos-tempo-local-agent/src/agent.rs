@@ -555,6 +555,9 @@ impl Agent {
                 Ok(r) => return Ok(r),
                 Err(e) => e,
             };
+            if let Some(m) = ollama::nobody_answering(cfg, &last) {
+                return Err(m);
+            }
             // a model this engine does not have will not appear on a retry: fall back at once
             let missing = last.contains("not found") || last.contains("HTTP 404");
             for attempt in 1..=(if missing { 0 } else { cfg.retries }) {
@@ -577,6 +580,9 @@ impl Agent {
                 ) {
                     Ok(r) => return Ok(r),
                     Err(e) => last = e,
+                }
+                if let Some(m) = ollama::nobody_answering(cfg, &last) {
+                    return Err(m);
                 }
             }
             let msg = format!(
@@ -1020,11 +1026,15 @@ impl Agent {
         srcs.dedup();
         let m = if conv.guest {
             "memory: off (guest conversation)".to_string()
+        } else if srcs.is_empty() {
+            String::new()
         } else {
             format!("memory: {}", srcs.join(", "))
         };
-        conv.emit("status", &m);
-        sink.status(&m);
+        if !m.is_empty() {
+            conv.emit("status", &m);
+            sink.status(&m);
+        }
 
         // the owner's choice of model, or files to read, mean the heavy lane
         let (with_files, attached) = if conv.guest {
@@ -1449,6 +1459,48 @@ mod tests {
             "ok"
         );
         assert_eq!(chat_models(&m), ["heavy-a", "heavy-a"]);
+    }
+
+    #[test]
+    fn no_ollama_is_said_at_once_without_retries() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        drop(l);
+        let m = Mock::start(chat_script(vec![]));
+        let (mut a, mut conv) = agent(&m, |c| {
+            c.ollama_url = url.clone();
+            c.retry_delay_ms = 1000; // a retry would be slow and visible
+        });
+        let mut sink = VecSink::default();
+        let t0 = std::time::Instant::now();
+        let e = a
+            .turn(&mut conv, "please read the file", &mut sink)
+            .unwrap_err();
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(e.contains("Ollama isn't answering"), "{e}");
+        assert!(e.contains(&url), "{e}");
+        assert!(chat_models(&m).is_empty());
+        assert!(
+            !sink
+                .status
+                .iter()
+                .any(|s| s.contains("retry") || s.contains("fallback")),
+            "{:?}",
+            sink.status
+        );
+    }
+
+    #[test]
+    fn no_memory_status_when_nothing_was_recalled() {
+        let m = Mock::start(chat_script(vec![text_resp("ok")]));
+        let (mut a, mut conv) = agent(&m, |_| {});
+        let mut sink = VecSink::default();
+        a.turn(&mut conv, "please read it", &mut sink).unwrap();
+        assert!(
+            !sink.status.iter().any(|s| s.starts_with("memory:")),
+            "{:?}",
+            sink.status
+        );
     }
 
     #[test]

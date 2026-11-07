@@ -181,6 +181,26 @@ pub fn unreachable(e: &str) -> bool {
     .any(|k| e.contains(k))
 }
 
+/// The plain-words error for a request that failed because no engine could be reached at all
+/// (the one `ollama_url`, or every one of it and `ollama_fallbacks`); `None` for any other
+/// error, such as an engine's own answer. Retrying or trying another model cannot help here:
+/// every model lives on the same engines.
+pub fn nobody_answering(cfg: &Config, err: &str) -> Option<String> {
+    if !unreachable(err) {
+        return None;
+    }
+    let order = engine_order(cfg, None);
+    // with several engines, `chat_pooled` says "(every engine: ..)" only after trying them all
+    if order.len() > 1 && !err.contains("(every engine: ") {
+        return None;
+    }
+    Some(format!(
+        "Ollama isn't answering at {}. Start Ollama, or install it from https://ollama.com/download \
+         (tempo-launch setup --apply can fetch it for you), then try again.",
+        order.join(", ")
+    ))
+}
+
 /// `chat_with` on the first engine that can be reached (see `engine_order`). Only "cannot be
 /// reached" moves a request to another engine; an engine's own error (a model it does not have,
 /// a crash) comes back as it is, for the caller to retry and fall back as before. `conv` keeps
