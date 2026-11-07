@@ -53,7 +53,7 @@
       <div class="join-box">
         <p class="lbl">Perennos Tempo Room</p>
         <h1>Come on in.</h1>
-        <p class="sub">A private room where people talk, and Perennos Tempo answers when you write <b>@tempo</b>. Ask whoever runs it for an invite: codes work once and expire. Already in a room and on a new device? Ask for a sign-in code instead; it needs no name.</p>
+        <p class="sub">A private room where people talk, and Perennos Tempo answers when you write <b>@tempo</b>. Ask whoever runs it for the key to the room (an invite code): codes work once and expire. Already in a room and on a new device? Ask for a sign-in code instead; it needs no name.</p>
         <form id="join-form" class="join-form">
           <label class="lbl" for="join-code">Invite or sign-in code</label>
           <input id="join-code" class="field mono" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX" maxlength="20">
@@ -74,13 +74,13 @@
         </div>
         <div class="chat-tools">
           <button class="btn sm" id="people" type="button" title="People in this room">People</button>
-          <button class="btn sm" id="invite" type="button" hidden>Invite</button>
+          <button class="btn sm" id="invite" type="button" title="Share this room: make a key (code and link) for someone to join" hidden>Share</button>
         </div>
       </div>
       <div class="msgs" id="msgs" role="log" aria-live="polite" aria-relevant="additions"></div>
       <button class="jump" id="jump" type="button" hidden>New messages ↓</button>
       <div class="thinking" id="thinking" hidden aria-live="polite">
-        <span class="mark">tempo</span>
+        <span class="mark" id="thinking-mark">tempo</span>
         <span class="beat" aria-hidden="true"><i></i><i></i><i></i></span>
         <span class="lbl" id="thinking-text">is thinking</span>
       </div>

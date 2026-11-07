@@ -2,7 +2,7 @@
 
 A full run of Perennos Tempo Room before a release. It uses the real `tempo-room` and
 `tempo-local-agent` programs, a mock Ollama, an owner and three guests (Mia, Sam and Lee) in two
-rooms. The unit tests check each piece alone. This checks that they work together, the way people
+rooms, plus two teammates: Sage (an engine, model `mock:4b`) and Coder (an agent). The unit tests check each piece alone. This checks that they work together, the way people
 will use them.
 
 ## Run it (Linux or macOS)
@@ -23,7 +23,7 @@ python3 -I perennos-tempo-room/rehearsal/rehearse.py /tmp/rehearsal-bin /tmp/reh
   program's log into the run folder.
 - Use a new, empty run folder each time. Nothing outside it is written, and nothing is deleted.
 
-## What it checks (55 checks)
+## What it checks (87 checks)
 
 - **Signing in:**
   - the one-time owner link works once;
@@ -49,6 +49,21 @@ python3 -I perennos-tempo-room/rehearsal/rehearse.py /tmp/rehearsal-bin /tmp/reh
   - hidden reasoning never reaches the room;
   - long answers are capped;
   - keys in answers and in pasted messages are redacted before they are stored or shown.
+- **Teammates:**
+  - a member cannot add a teammate, list the team or see the installed models;
+  - the owner adds the engine teammate `sage` and the command line adds the agent teammate `coder`
+    through the running server; `team list` shows both; a model Ollama does not have and the name
+    `tempo` are refused; nobody can join as a teammate;
+  - Mia asks `@sage` and gets the mock Ollama's answer under Sage's name; the engine call is a
+    direct chat (`stream` false, no tools), its system message is the role plus the room rule and
+    the request is the room line;
+  - a guest's `@sage` request that makes the model try a tool runs nothing, every engine call
+    carried no tools, and a key in an answer is redacted;
+  - `@coder` is answered by the real agent; Tempo does not answer too; one message naming two
+    teammates asks each;
+  - a one-on-one room (`always`, exactly one teammate) answers every message with `@coder` and Tempo
+    stays out of it;
+  - removing a teammate moves its record to `trash/`; teammates survive a restart.
 - **Owner powers:**
   - a request that came through a proxy is never the owner;
   - members cannot make rooms;
@@ -68,4 +83,9 @@ python3 -I perennos-tempo-room/rehearsal/rehearse.py /tmp/rehearsal-bin /tmp/reh
 - Tailscale or another proxy in front.
 - The Discord, Telegram and WhatsApp bridges.
 - A real model. The mock answers by keyword: `THINKTEST`, `LONGTEST`, `KEYTEST`, `SLOWTEST`,
-  `TOOLTEST`.
+  `TOOLTEST`. It answers a call with `"stream": false` (an engine teammate) with one JSON reply and
+  streams for the agent.
+- The agent's teammate roles: the agent binary may be older and not take a role and model
+  (`"roles": true` in its health); the run prints which. Both ways are covered by the unit tests
+  with a fake agent.
+- Ask limits: the run raises them in its own config so its many questions are not told to wait.

@@ -10,6 +10,7 @@ pub mod hub;
 pub mod mcp;
 pub mod server;
 pub mod store;
+pub mod team;
 pub mod tempo_home;
 pub mod util;
 pub mod vault;

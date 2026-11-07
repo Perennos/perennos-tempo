@@ -2,7 +2,7 @@
 //! there is one (so everyone sees the change live) and straight to the data folder when not.
 use crate::bridges::{self, Outbound, Setting};
 use crate::hub::{Hub, HubOpts};
-use crate::mcp::{control_key, live_server, owner_post};
+use crate::mcp::{control_key, live_server, owner_get, owner_post};
 use crate::server::{self, ServeOpts};
 use crate::store::{data_dir, Kind, Mode, Msg, Personality, Store, DEFAULT_PORT};
 use crate::util::{log, read_json, scrub, unix_now, write_atomic};
@@ -28,6 +28,10 @@ usage: tempo-room <command> [--data DIR] [options]
   rooms add NAME                 make a room
   invite ROOM [--hours 48]       a one-time invite (link and code); makes the room if it is new
   post ROOM TEXT [--as-tempo]    post as the owner, or as Tempo
+  team list                      your teammates (named AI members) and the rooms they are in
+  team add HANDLE --kind agent|engine [--name N] [--role TEXT] [--model M] [--room ROOM]...
+                                 add a teammate: @HANDLE in a room asks it
+  team remove HANDLE             take a teammate out (its record is kept in trash/)
   bridges check [--live]         which bridges are on and ready (tokens are never printed)
   mcp                            the rooms as MCP tools on stdio: room_list, room_read, room_post
   version
@@ -42,6 +46,11 @@ const VALUE_FLAGS: &[&str] = &[
     "--agent",
     "--hours",
     "--public-url",
+    "--name",
+    "--role",
+    "--kind",
+    "--model",
+    "--room",
 ];
 const BOOL_FLAGS: &[&str] = &["--json", "--live", "--as-tempo", "--help"];
 
@@ -167,6 +176,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
         "rooms" => rooms(&a, &dir, out),
         "invite" => invite(&a, &dir, out),
         "post" => post(&a, &dir, out),
+        "team" => team(&a, &dir, out),
         "bridges" => match a.pos.get(1).map(String::as_str) {
             Some("check") | None => bridges_check(&a, &dir, out),
             Some(x) => Err(format!("bridges {x}? try: tempo-room bridges check")),
@@ -437,6 +447,158 @@ fn post(a: &Args, dir: &Path, out: &mut dyn Write) -> Result<(), String> {
     })
 }
 
+/// `team list|add|remove`: through the running server when there is one, else the data folder.
+fn team(a: &Args, dir: &Path, out: &mut dyn Write) -> Result<(), String> {
+    let sub = a.pos.get(1).map(String::as_str).unwrap_or("list");
+    match sub {
+        "list" => {
+            let list: Vec<Value> = match live_server(dir) {
+                Some(addr) => {
+                    let v = owner_get(&addr, &control_key(dir)?, "team")?;
+                    v["team"].as_array().cloned().unwrap_or_default()
+                }
+                None => {
+                    let st = Store::open(dir)?;
+                    st.team
+                        .iter()
+                        .map(|t| {
+                            let mut j = t.to_json();
+                            j["rooms"] = json!(st
+                                .rooms
+                                .iter()
+                                .filter(|r| r.team.contains(&t.handle))
+                                .map(|r| r.id.clone())
+                                .collect::<Vec<_>>());
+                            j
+                        })
+                        .collect()
+                }
+            };
+            emit(out, a, json!({"team": list}), || {
+                if list.is_empty() {
+                    return "No teammates yet. Add one: tempo-room team add sage --kind engine --model qwen3:4b --room family".into();
+                }
+                list.iter()
+                    .map(|t| {
+                        let rooms: Vec<&str> = t["rooms"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect();
+                        format!(
+                            "@{:<16} {:<16} {:<7} {:<18} {}",
+                            t["handle"].as_str().unwrap_or(""),
+                            t["name"].as_str().unwrap_or(""),
+                            t["kind"].as_str().unwrap_or(""),
+                            t["model"].as_str().unwrap_or("-"),
+                            if rooms.is_empty() {
+                                "in no room".to_string()
+                            } else {
+                                format!("in #{}", rooms.join(", #"))
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        }
+        "add" => {
+            let handle = a.pos(2, "HANDLE")?.trim_start_matches('@').to_lowercase();
+            let name = a.get("--name").map(str::to_string).unwrap_or_else(|| {
+                let mut c = handle.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            });
+            let kind = a.get("--kind").unwrap_or("agent").to_string();
+            let role = a.get("--role").unwrap_or("").to_string();
+            let model = a.get("--model").map(str::to_string);
+            let rooms = a.all("--room");
+            let (t, note) = match live_server(dir) {
+                Some(addr) => {
+                    let v = owner_post(
+                        &addr,
+                        &control_key(dir)?,
+                        "team/add",
+                        &json!({"handle": handle, "name": name, "role": role, "kind": kind, "model": model, "rooms": rooms}),
+                    )?;
+                    (
+                        v["teammate"].clone(),
+                        v["note"].as_str().map(str::to_string),
+                    )
+                }
+                None => {
+                    let mut st = Store::open(dir)?;
+                    let t =
+                        st.vet_teammate(&handle, &name, &role, &kind, model.as_deref(), false)?;
+                    let note = match (t.kind, &t.model) {
+                        (crate::team::TeamKind::Engine, Some(m)) => {
+                            crate::team::verify_model(&st.cfg, m)?
+                        }
+                        _ => None,
+                    };
+                    let mut ids = vec![];
+                    for r in &rooms {
+                        ids.push(
+                            st.find_room(r)
+                                .ok_or_else(|| {
+                                    format!("no room {r} (tempo-room rooms lists them)")
+                                })?
+                                .id
+                                .clone(),
+                        );
+                    }
+                    st.insert_teammate(t.clone(), &ids, false)?;
+                    (t.to_json(), note)
+                }
+            };
+            emit(out, a, json!({"teammate": t, "note": note}), || {
+                let mut s = format!(
+                    "Added @{} ({}, {}{}).",
+                    t["handle"].as_str().unwrap_or(""),
+                    t["name"].as_str().unwrap_or(""),
+                    t["kind"].as_str().unwrap_or(""),
+                    t["model"]
+                        .as_str()
+                        .map(|m| format!(", model {m}"))
+                        .unwrap_or_default()
+                );
+                if rooms.is_empty() {
+                    s.push_str(" Put it in a room: add --room NAME, or use People in the app.");
+                } else {
+                    s.push_str(&format!(" In: {}.", rooms.join(", ")));
+                }
+                if let Some(n) = &note {
+                    s.push_str(&format!("\nNote: {n}"));
+                }
+                s
+            })
+        }
+        "remove" => {
+            let handle = a.pos(2, "HANDLE")?.trim_start_matches('@').to_lowercase();
+            match live_server(dir) {
+                Some(addr) => {
+                    owner_post(
+                        &addr,
+                        &control_key(dir)?,
+                        "team/remove",
+                        &json!({"handle": handle}),
+                    )?;
+                }
+                None => {
+                    Store::open(dir)?.remove_teammate(&handle)?;
+                    crate::hub::forget_convs_in(dir, &handle);
+                }
+            }
+            emit(out, a, json!({"removed": handle}), || {
+                format!("Removed @{handle}. Its record is kept in trash/.")
+            })
+        }
+        x => Err(format!("team {x}? try: team list, team add, team remove")),
+    }
+}
+
 fn bridges_check(a: &Args, dir: &Path, out: &mut dyn Write) -> Result<(), String> {
     let st = Store::open(dir)?;
     let b = st.cfg.raw["bridges"].clone();
@@ -677,5 +839,85 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains(&tok));
+    }
+    #[test]
+    fn team_list_add_remove_offline() {
+        let d = tmpdir("cli-team");
+        let ds = d.to_str().unwrap();
+        // Ollama is not running here: an engine teammate is kept, with a note
+        std::fs::write(
+            d.join("config.json"),
+            json!({"ollama_url": crate::testutil::dead_url()}).to_string(),
+        )
+        .unwrap();
+        assert!(cli(&["team", "list", "--data", ds])
+            .unwrap()
+            .contains("No teammates yet"));
+        cli(&["rooms", "add", "Family", "--data", ds]).unwrap();
+        let out = cli(&[
+            "team", "add", "sage", "--kind", "engine", "--model", "mock:4b", "--name", "Sage",
+            "--role", "Be kind.", "--room", "family", "--data", ds,
+        ])
+        .unwrap();
+        assert!(
+            out.contains("Added @sage (Sage, engine, model mock:4b). In: family.")
+                && out.contains("Note: Ollama is not answering"),
+            "{out}"
+        );
+        let j: Value =
+            serde_json::from_str(&cli(&["team", "add", "@Coder", "--data", ds, "--json"]).unwrap())
+                .unwrap();
+        assert_eq!(
+            (
+                j["teammate"]["handle"].as_str(),
+                j["teammate"]["kind"].as_str(),
+                j["teammate"]["name"].as_str()
+            ),
+            (Some("coder"), Some("agent"), Some("Coder"))
+        );
+        let l: Value =
+            serde_json::from_str(&cli(&["team", "list", "--data", ds, "--json"]).unwrap()).unwrap();
+        assert_eq!(l["team"].as_array().unwrap().len(), 2);
+        assert_eq!(l["team"][0]["rooms"], json!(["family"]));
+        assert_eq!(l["team"][0]["role"], "Be kind.");
+        let text = cli(&["team", "list", "--data", ds]).unwrap();
+        assert!(
+            text.contains("@sage")
+                && text.contains("engine")
+                && text.contains("in #family")
+                && text.contains("in no room"),
+            "{text}"
+        );
+        // the rules hold here too
+        for bad in [
+            vec!["team", "add", "Tempo"],
+            vec!["team", "add", "x"],
+            vec!["team", "add", "helper", "--kind", "engine"],
+            vec!["team", "add", "helper", "--room", "nowhere"],
+            vec!["team", "add", "sage"],
+            vec!["team", "add"],
+            vec!["team", "remove", "ghost"],
+            vec!["team", "bogus"],
+        ] {
+            let mut a = bad.clone();
+            a.extend(["--data", ds]);
+            assert!(cli(&a).is_err(), "{bad:?}");
+        }
+        assert!(cli(&["team", "remove", "sage", "--data", ds])
+            .unwrap()
+            .contains("kept in trash"));
+        assert!(std::fs::read_dir(d.join("trash"))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains("teammate-sage")));
+        let l: Value =
+            serde_json::from_str(&cli(&["team", "list", "--data", ds, "--json"]).unwrap()).unwrap();
+        assert_eq!(l["team"].as_array().unwrap().len(), 1);
+        assert!(Store::open(&d)
+            .unwrap()
+            .room("family")
+            .unwrap()
+            .team
+            .is_empty());
     }
 }

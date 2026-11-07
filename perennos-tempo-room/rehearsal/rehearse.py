@@ -1,5 +1,5 @@
-"""Room rehearsal: the real tempo-room and tempo-local-agent binaries, a mock Ollama, an owner and
-three guests. Prints one line per check and writes results.json.
+"""Room rehearsal: the real tempo-room and tempo-local-agent binaries, a mock Ollama, an owner,
+three guests and two teammates (an engine and an agent). Prints one line per check and writes results.json.
 
 Usage: python3 -I rehearse.py BIN_DIR RUN_DIR
   BIN_DIR holds release builds of tempo-room and tempo-local-agent; RUN_DIR is a new, empty folder
@@ -11,6 +11,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MOCK, AGENT, ROOM = 18970, 18971, 18972
 HOME = os.path.join(RUN, "home")
 os.makedirs(os.path.join(HOME, "agent"), exist_ok=True)
+os.makedirs(os.path.join(HOME, "room"), exist_ok=True)
+with open(os.path.join(HOME, "room", "config.json"), "w") as f:
+    # where engine teammates find (the mock) Ollama; ask limits raised so the many questions of one
+    # run are not told to wait (the limits themselves are covered by the unit tests)
+    json.dump({"ollama_url": f"http://127.0.0.1:{MOCK}", "limits": {"ask_per_member": 60, "ask_per_room": 200}}, f)
 with open(os.path.join(HOME, "agent", "config.json"), "w") as f:
     json.dump({"models": ["mock:4b"], "ollama_url": f"http://127.0.0.1:{MOCK}"}, f)
 ENV = {k: v for k, v in os.environ.items()
@@ -103,6 +108,38 @@ def ask(cookie, text, room="family", secs=30):
                 return st, m, time.time() - t0
         time.sleep(0.2)
     return st, None, time.time() - t0
+
+
+def ask_team(cookie, text, handle, room="family", secs=40):
+    """Post `text`; wait for the teammate's reply to it. Returns (status, reply or None, post id)."""
+    st, _, js = req("POST", "/room/post", cookie, {"room": room, "text": text})
+    if st != 200:
+        return st, None, None
+    qid = js["msg"]["id"]
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        for m in messages(cookie, room):
+            if m.get("kind") == "teammate" and m.get("reply_to") == qid and m.get("from") == "team:" + handle:
+                return st, m, qid
+        time.sleep(0.2)
+    return st, None, qid
+
+
+def room_cli(*args):
+    """The real tempo-room command line against the running server (its control key)."""
+    p = subprocess.run([os.path.join(BIN, "tempo-room"), *args, "--data", os.path.join(HOME, "room")],
+                       env=ENV, capture_output=True, text=True, timeout=60)
+    return p.returncode, p.stdout + p.stderr
+
+
+def engine_chats():
+    """The chats an engine teammate (Sage) made with the mock: its system message says so."""
+    out = []
+    for b in mock_chats():
+        sysmsg = " ".join(x.get("content", "") for x in b.get("messages", []) if x.get("role") == "system")
+        if sysmsg.startswith("You are Sage."):
+            out.append(b)
+    return out
 
 
 class Stream(threading.Thread):
@@ -280,6 +317,80 @@ try:
     rem = os.path.join(HOME, "room", "remembered", "family.md")
     check("@tempo remember keeps it (no vault: the room's own file)", os.path.exists(rem) and "spare key" in open(rem).read(), a and a["text"])
 
+
+    # --- teammates: named AI members the owner sets up
+    st, _, js = req("POST", "/room/team/add", people["Mia"], {"handle": "sage", "name": "Sage", "kind": "engine", "model": "mock:4b"})
+    check("a member cannot add a teammate", st == 403, st)
+    check("a member cannot see the installed models", req("GET", "/room/team/models", people["Mia"])[0] == 403)
+    check("a member cannot list the team", req("GET", "/room/team", people["Mia"])[0] == 403)
+    st, _, js = req("POST", "/room/team/add", owner, {"handle": "sage", "name": "Sage", "kind": "engine", "model": "mock:4b",
+                                                      "role": "You are a calm cooking coach. Keep answers to one sentence.", "rooms": ["family"]})
+    check("the owner adds the engine teammate sage (model mock:4b)", st == 200 and js.get("teammate", {}).get("handle") == "sage" and not js.get("note"), (st, js))
+    st, _, js = req("GET", "/room/team/models", owner)
+    check("the installed models come from Ollama, for the owner", st == 200 and js.get("ollama") == "up" and any(m.get("name") == "mock:4b" for m in js.get("models", [])), js)
+    st, _, js = req("POST", "/room/team/add", owner, {"handle": "ghost", "name": "Ghost", "kind": "engine", "model": "absent:1b"})
+    check("an engine model Ollama does not have is refused", st == 400 and "absent:1b" in js.get("error", ""), (st, js))
+    st, _, js = req("POST", "/room/team/add", owner, {"handle": "tempo", "name": "Helper", "kind": "agent"})
+    check("a teammate cannot take Tempo's name", st == 400, (st, js))
+    rc, txt = room_cli("team", "add", "coder", "--kind", "agent", "--name", "Coder", "--role", "Review code. Be blunt.", "--room", "family")
+    check("the command line adds the agent teammate coder through the running server", rc == 0 and "Added @coder" in txt, (rc, txt))
+    rc, txt = room_cli("team", "list", "--json")
+    listed = {t["handle"]: t for t in json.loads(txt).get("team", [])} if rc == 0 else {}
+    check("team list shows both, with their rooms", sorted(listed) == ["coder", "sage"] and listed["sage"]["rooms"] == ["family"] and listed["coder"]["kind"] == "agent", (rc, txt[:200]))
+    mem = req("GET", "/room/members?room=family", people["Mia"])[2]
+    check("members see who is in the room, never a role", [t["handle"] for t in mem.get("team", [])] == ["sage", "coder"] and "Review code" not in json.dumps(mem) and "cooking coach" not in json.dumps(mem), mem.get("team"))
+    st, _, js = req("POST", "/room/join", None, {"code": invite("family"), "name": "Sage"})
+    check("nobody can join the room as a teammate", st == 400, (st, js))
+
+    st, a, qid = ask_team(people["Mia"], "@sage which spice goes with rice?", "sage")
+    check("Mia asks @sage and gets the engine's answer, marked as Sage", a is not None and a["name"] == "Sage" and a["text"].startswith("Sage here. Mock answer to:"), a)
+    check("a teammate's reply is never Tempo's or the owner's", a is not None and a["kind"] == "teammate" and a["from"] == "team:sage" and a["from"] not in ("tempo", "owner"))
+    chats = engine_chats()
+    last = chats[-1] if chats else {}
+    msgs = last.get("messages", [])
+    check("the engine call is a direct chat: stream false, no tools", chats and last.get("stream") is False and "tools" not in last and "functions" not in last, list(last.keys()))
+    check("its system message is the role plus the room rule", msgs and msgs[0]["role"] == "system" and msgs[0]["content"].startswith("You are Sage. You are a calm cooking coach.") and "Do not run commands" in msgs[0]["content"], msgs and msgs[0]["content"][:160])
+    check("and the request is what Tempo gets: the room line", len(msgs) == 2 and msgs[1]["content"].startswith("[Perennos Tempo room #family] Mia: @sage which spice goes with rice?"), msgs and msgs[-1]["content"][:120])
+    st, a, _ = ask_team(people["Sam"], "@Sage TOOLTEST", "sage", secs=60)
+    check("a guest's @sage request that makes the model try a tool still runs nothing", a is not None and not os.path.exists(PWNED), a and a["text"])
+    check("every engine call a guest's question made carried no tools", len(engine_chats()) >= 2 and all("tools" not in b and "functions" not in b for b in engine_chats()), [list(b.keys()) for b in engine_chats()])
+    st, a, _ = ask_team(people["Lee"], "@sage KEYTEST", "sage")
+    check("a key in a teammate's answer is redacted", a is not None and "sk-AAAA" not in a["text"] and "REDACTED" in a["text"], a and a["text"])
+    st, a, _ = ask_team(people["Mia"], "@coder what does a mutex do?", "coder", secs=90)
+    check("Mia asks @coder and the real agent answers, marked as Coder", a is not None and a["name"] == "Coder" and a["text"].startswith("Mock answer"), a)
+    after = [x for x in messages(owner) if x.get("kind") == "tempo" and "what does a mutex" in (x.get("reply_text") or "")]
+    check("Tempo did not answer the teammate's question too", not after, after)
+    ah2 = wait_http(AGENT, "/agent/health") or {}
+    print(f"     (the agent {'takes' if ah2.get('roles') is True else 'does not take'} a teammate's role and model; both paths are tested in the unit tests)")
+    st, a, _ = ask_team(owner, "@coder and @sage, a word please?", "sage", secs=60)
+    st2, c2, _ = ask_team(owner, "@coder one more thing?", "coder", secs=60)
+    check("one message naming two teammates asks each", a is not None and any(x.get("from") == "team:coder" and x.get("reply_to") == a["reply_to"] for x in messages(owner)), a)
+
+    # a one-on-one room: always mode, exactly one teammate; that teammate answers every message
+    st, _, js = req("POST", "/room/create", owner, {"name": "Coder DM"})
+    check("the owner makes a room for a one-on-one chat", st == 200 and js.get("room", {}).get("id") == "coder-dm", js)
+    req("POST", "/room/update", owner, {"room": "coder-dm", "mode": "always"})
+    st, _, js = req("POST", "/room/team/room", owner, {"room": "coder-dm", "handle": "coder", "on": True})
+    check("the owner puts coder in that room", st == 200, (st, js))
+    st, sc, js = req("POST", "/room/join", people["Mia"], {"code": invite("coder-dm"), "name": "Mia"})
+    check("Mia joins the room", st == 200, (st, js))
+    got = []
+    for text in ["first thing on my mind", "and a second thing"]:
+        st, a, _ = ask_team(people["Mia"], text, "coder", room="coder-dm", secs=90)
+        got.append(a)
+    check("a DM room with @coder answers every message, no @ needed", all(g is not None and g["name"] == "Coder" for g in got), got)
+    dm = messages(owner, "coder-dm")
+    check("and Tempo stays out of it", not any(x.get("kind") == "tempo" for x in dm), [x.get("kind") for x in dm])
+    check("the room says who it is with", any(r.get("id") == "coder-dm" and r.get("team") == ["coder"] for r in req("GET", "/room/rooms", people["Mia"])[2].get("rooms", [])))
+
+    # removing a teammate keeps its record in trash/
+    room_cli("team", "add", "scratch", "--kind", "agent", "--room", "family")
+    rc, txt = room_cli("team", "remove", "scratch")
+    tr = os.path.join(HOME, "room", "trash")
+    kept = [t for t in os.listdir(tr) if "teammate-scratch" in t] if os.path.isdir(tr) else []
+    check("removing a teammate moves its record to trash", rc == 0 and kept and "scratch" in open(os.path.join(tr, kept[0])).read(), (rc, txt, kept))
+    check("and it is gone from the team", "scratch" not in [t["handle"] for t in req("GET", "/room/team", owner)[2].get("team", [])])
+
     # --- limits and redaction of what people paste
     codes = [req("POST", "/room/post", people["Sam"], {"room": "family", "text": f"spam {i}"})[0] for i in range(30)]
     check("posting too fast is limited", 429 in codes and codes[0] == 200, codes)
@@ -320,6 +431,9 @@ try:
     check("the room starts again", wait_http(ROOM, "/room/health") is not None)
     check("messages survive a restart", any("dinner at 7" in x.get("text", "") for x in messages(people["Mia"])))
     check("sessions survive a restart (member and owner)", req("GET", "/room/me", people["Mia"])[2].get("role") == "member" and req("GET", "/room/me", owner)[2].get("role") == "owner")
+    check("teammates survive a restart", sorted(t["handle"] for t in req("GET", "/room/team", owner)[2].get("team", [])) == ["coder", "sage"])
+    st, a, _ = ask_team(people["Mia"], "@sage still here after the restart?", "sage")
+    check("@sage answers after a room restart", a is not None and a["text"].startswith("Sage here."), a)
     n_before = len(mock_chats())
     st, a, _ = ask(people["Mia"], "@tempo still there after the restart?")
     check("@tempo works after a room restart", a is not None and a["text"].startswith("Mock answer"), a and a["text"])
