@@ -1465,7 +1465,11 @@ fn the_dashboard_holds_nothing_external_and_shows_the_band() {
     );
     let (code, out, _) = go(&ctx, &w, args(&["page", "social-media"]), true);
     assert_eq!(code, 0, "{out}");
-    let file = ctx.home.join("bands/social-media/band.html");
+    let file = ctx
+        .home
+        .join("bands")
+        .join("social-media")
+        .join("band.html");
     assert!(file.is_file());
     assert_eq!(
         ctx.opened.borrow().last().map(String::as_str),
