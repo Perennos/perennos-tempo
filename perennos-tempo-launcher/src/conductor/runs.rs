@@ -505,9 +505,21 @@ pub fn stop_cmd(ctx: &Ctx, run: Option<&str>, out: &mut dyn Write) -> i32 {
 
 /// `conductor takes accept|reject <take>`: the owner's say on one take.
 pub fn verdict_cmd(ctx: &Ctx, take: &str, accept: bool, out: &mut dyn Write) -> i32 {
-    match takes_file::set_owner(&takes_file::path(ctx), take, accept) {
+    let file = takes_file::path(ctx);
+    let before = takes_file::read_all(&file)
+        .into_iter()
+        .find(|t| t.id == take);
+    match takes_file::set_owner(&file, take, accept) {
         Ok(m) => {
             let _ = writeln!(out, "{m}");
+            // a thumb on a render a band made on Stage teaches that band which Pedals worked
+            if let Some(t) = before {
+                if let Some(note) =
+                    crate::stage::learn::note_verdict(ctx, &t, t.owner, accept, crate::unix_now())
+                {
+                    let _ = writeln!(out, "{note}");
+                }
+            }
             0
         }
         Err(e) => {

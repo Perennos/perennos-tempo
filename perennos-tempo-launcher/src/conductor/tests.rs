@@ -337,6 +337,7 @@ struct World<'a> {
 impl World<'_> {
     fn deps(&self) -> Deps<'_> {
         Deps {
+            stage: None,
             chat: self.chat,
             outside: no_outside(),
             room_dir: self.room_dir.clone(),
@@ -651,6 +652,7 @@ fn describe_with_junk_from_the_model_falls_back_to_the_template() {
     }
     let sched = RecSched::default();
     let d = Deps {
+        stage: None,
         chat: &Junk,
         outside: no_outside(),
         room_dir: root.join("room"),
@@ -2039,6 +2041,7 @@ fn the_engine_is_saved_per_member_checked_and_only_the_conductor_picks_it() {
     };
     let (chat, sched) = (FakeChat::new(), RecSched::default());
     let d = Deps {
+        stage: None,
         chat: &chat,
         outside: &outside,
         room_dir: root.join("room"),
@@ -2106,6 +2109,7 @@ fn the_engine_is_saved_per_member_checked_and_only_the_conductor_picks_it() {
     // with no engine answering, a band is still set up, and the words say why
     let none = FakeOutside::default();
     let d2 = Deps {
+        stage: None,
         outside: &none,
         ..d
     };
@@ -2152,6 +2156,7 @@ fn a_run_checks_the_engines_again_and_the_index_note_says_who_played() {
     let (chat, sched) = (FakeChat::new(), RecSched::default());
     let deps = |o: &'static FakeOutside| -> Deps<'_> {
         Deps {
+            stage: None,
             chat: &chat,
             outside: o,
             room_dir: root.join("room"),
@@ -2299,6 +2304,7 @@ fn the_engines_command_lists_each_engine_with_its_models_and_class() {
     };
     let (chat, sched) = (FakeChat::new(), RecSched::default());
     let d = Deps {
+        stage: None,
         chat: &chat,
         outside: &outside,
         room_dir: root.join("room"),
@@ -2477,6 +2483,7 @@ fn conductor_page_writes_one_page_for_everything_or_one_band() {
     };
     let (chat, sched) = (FakeChat::new(), RecSched::default());
     let d = Deps {
+        stage: None,
         chat: &chat,
         outside: &outside,
         room_dir: root.join("room"),

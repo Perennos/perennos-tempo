@@ -93,6 +93,9 @@ usage: tempo-launch [command]
                     and schedules their flows
   conductor run BAND [FLOW] [--note TEXT]
                     walk a flow through its members; each step becomes a linked note in the Vault
+  conductor shots BAND [FLOW]
+                    the SHOT lines a band wrote for Stage in its newest run: the whole list with the
+                    machine and time for each, then y/N once, then the Conductor plays them
   conductor sections BAND [FLOW] [--note TEXT] [--takes 1-3] [--resume RUN]
                     play a big job as sections (sub-teams) and takes (attempts), under a budget;
                     the producer judges the takes and the best one is kept (docs/SECTIONS.md)
@@ -142,6 +145,9 @@ usage: tempo-launch [command]
                     let Tempo play it as a tool; allow a paid or cloud node for one workflow (never by default)
   stage run ID --input NAME=PATH --pedal NAME=VALUE [--takes N] [--again] [--on MACHINE]
                     play it; Pedals (modifiers) are camera, lens, light, strength, duration, seed
+  stage cue \"WORDS\" [--plan] [--yes] [--json]
+                    say it in words (\"golden hour\", \"slow orbit\"): plays the last run again with those
+                    Pedals, after showing what it understood and asking y/N
   stage mcp         Stage's workflows as MCP tools for the agent (turned-on ones only)
   woodshed          the Woodshed (training): your local models get better at their parts from your best takes
   woodshed on|off BAND

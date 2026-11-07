@@ -676,7 +676,7 @@ fn play_remote_take(
     })
 }
 
-fn input_value(
+pub fn input_value(
     ctx_world: &dyn World,
     wf: &Workflow,
     name: &str,

@@ -6,12 +6,16 @@
 
 pub mod catalog;
 pub mod comfy;
+pub mod cue;
+pub mod estimate;
 pub mod guard;
 pub mod hf;
 pub mod http;
 pub mod install;
+pub mod learn;
 pub mod mcp;
 pub mod pedals;
+pub mod phrase;
 pub mod remote;
 pub mod route;
 pub mod run;
@@ -19,7 +23,7 @@ pub mod state;
 pub mod world;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::bank::detect::Sys;
 use crate::bank::install::RealPm;
@@ -44,6 +48,8 @@ pub enum StageCmd {
     Cloud(String, bool),
     Folder(Option<String>),
     Run(String, RunSpec),
+    /// Words to a run of the last thing that ran: `stage cue "golden hour"`.
+    Cue(String, cue::CueOpts),
     /// The MCP server for Tempo's AI.
     Mcp,
 }
@@ -80,6 +86,28 @@ pub fn parse_args(rest: &[&str]) -> Result<StageCmd, String> {
     Ok(match *verb {
         "list" if args.is_empty() => StageCmd::List,
         "mcp" if args.is_empty() => StageCmd::Mcp,
+        "cue" => {
+            let mut o = cue::CueOpts::default();
+            let mut words: Vec<&str> = vec![];
+            let mut flags_done = false;
+            for a in args {
+                match *a {
+                    // after `--` everything is the words, whatever it looks like
+                    "--" if !flags_done => flags_done = true,
+                    "--plan" if !flags_done => o.plan = true,
+                    "--json" if !flags_done => o.json = true,
+                    "--yes" | "-y" if !flags_done => o.yes = true,
+                    s if s.starts_with("--") && !flags_done => {
+                        return Err(format!("stage cue: unknown argument {s}"))
+                    }
+                    w => words.push(w),
+                }
+            }
+            if words.is_empty() {
+                return Err("stage cue takes the words, like stage cue \"golden hour\"".into());
+            }
+            StageCmd::Cue(words.join(" "), o)
+        }
         "show" => StageCmd::Show(id()?),
         "check" => StageCmd::Check(args.first().map(|a| a.to_string())),
         "enable" => StageCmd::Enable(id()?),
@@ -510,6 +538,7 @@ pub fn run_with(
                 }
             }
         }
+        StageCmd::Cue(words, o) => cue::run(ctx, world, cat, &words, &o, out, ask),
         StageCmd::Mcp => mcp::run_stdio(ctx),
     }
 }

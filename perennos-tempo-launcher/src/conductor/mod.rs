@@ -26,6 +26,7 @@ pub mod runs;
 pub mod schedule;
 pub mod sections;
 pub mod settings;
+pub mod shots;
 pub mod spec;
 pub mod takes_file;
 pub mod templates;
@@ -184,6 +185,11 @@ pub enum ConductorCmd {
         flow: Option<String>,
         note: Option<String>,
     },
+    /// The shot lines in a flow's newest run: the whole list, then y/N.
+    Shots {
+        band: String,
+        flow: Option<String>,
+    },
     Page {
         /// One band, or every band.
         band: Option<String>,
@@ -320,6 +326,15 @@ pub fn parse_args(rest: &[&str]) -> Result<ConductorCmd, String> {
                 }
             }
             Ok(ConductorCmd::Run { band, flow, note })
+        }
+        "shots" => {
+            let band = band_arg(args.first(), "shots")?;
+            let flow = match &args[1..] {
+                [] => None,
+                [f] if slug_ok(f, 40) => Some(f.to_string()),
+                _ => return Err("conductor shots takes a band and, if it has several, a flow".into()),
+            };
+            Ok(ConductorCmd::Shots { band, flow })
         }
         "sections" => {
             let band = band_arg(args.first(), "sections")?;
@@ -512,6 +527,8 @@ pub trait Outside {
 /// scheduler.
 pub struct Deps<'a> {
     pub chat: &'a dyn Chat,
+    /// Where Stage plays a shot list. None: this computer's own (made only when a flow wrote one).
+    pub stage: Option<&'a dyn crate::stage::run::World>,
     /// The engines and the apps, as they are right now.
     pub outside: &'a dyn Outside,
     pub room_dir: PathBuf,
@@ -776,7 +793,13 @@ fn room_cmd(ctx: &Ctx, name: &str, d: &Deps, out: &mut dyn Write) -> i32 {
     0
 }
 
-fn run_flow_cmd(ctx: &Ctx, cmd: ConductorCmd, d: &Deps, out: &mut dyn Write) -> i32 {
+fn run_flow_cmd(
+    ctx: &Ctx,
+    cmd: ConductorCmd,
+    d: &Deps,
+    out: &mut dyn Write,
+    ask: &mut dyn FnMut(&str) -> bool,
+) -> i32 {
     let ConductorCmd::Run { band, flow, note } = cmd else {
         return 2;
     };
@@ -831,12 +854,114 @@ fn run_flow_cmd(ctx: &Ctx, cmd: ConductorCmd, d: &Deps, out: &mut dyn Write) -> 
     };
     let cast = engines::cast(&band, &d.outside.engines());
     match run::run_flow_cast(ctx, &band, flow, note.as_deref(), d.chat, d.now, &cast, out) {
-        Ok(_) => 0,
+        Ok(o) => offer_shots(ctx, &band, flow, &o.folder, &o.notes, d, out, ask),
         Err(e) => {
             eprintln!("tempo-launch: {e}");
             1
         }
     }
+}
+
+/// If the flow's notes hold shot lines for Stage: the whole list, then y/N, then play.
+#[allow(clippy::too_many_arguments)]
+fn offer_shots(
+    ctx: &Ctx,
+    band: &Band,
+    flow: &spec::Flow,
+    folder: &std::path::Path,
+    notes: &[PathBuf],
+    d: &Deps,
+    out: &mut dyn Write,
+    ask: &mut dyn FnMut(&str) -> bool,
+) -> i32 {
+    if shots::shots_in(notes).is_empty() {
+        return 0;
+    }
+    let real;
+    let world: &dyn crate::stage::run::World = match d.stage {
+        Some(w) => w,
+        None => {
+            real = crate::stage::world::RealWorld::new(ctx);
+            &real
+        }
+    };
+    let at = run::places(ctx, band, flow);
+    shots::offer(
+        ctx,
+        band,
+        flow,
+        folder,
+        &at.link_base,
+        notes,
+        world,
+        &crate::stage::catalog::embedded(),
+        d.now,
+        out,
+        ask,
+    )
+}
+
+/// `conductor shots BAND [FLOW]`: the shot lines in the newest run, for a run nobody was there
+/// to say yes to (a scheduled one), or one the owner said no to.
+fn shots_cmd(
+    ctx: &Ctx,
+    name: &str,
+    flow: Option<&str>,
+    d: &Deps,
+    out: &mut dyn Write,
+    ask: &mut dyn FnMut(&str) -> bool,
+) -> i32 {
+    let band = match load(ctx, name) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("tempo-launch: {e}");
+            return 1;
+        }
+    };
+    let chosen = match flow {
+        Some(f) => band.flow(f),
+        None => band.flows.first().filter(|_| band.flows.len() == 1),
+    };
+    let Some(flow) = chosen else {
+        eprintln!(
+            "tempo-launch: {} has several flows; say which: {}",
+            band.name,
+            band.flows
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return 2;
+    };
+    let newest = run::recent_runs(ctx, &band)
+        .into_iter()
+        .find(|r| r.folder.contains(&flow.name) && r.notes.iter().any(|(s, _)| s != "Index"));
+    let Some(r) = newest else {
+        eprintln!(
+            "tempo-launch: {} / {} has not run yet: `tempo-launch conductor run {}`",
+            band.name, flow.name, band.name
+        );
+        return 1;
+    };
+    let notes: Vec<PathBuf> = r
+        .notes
+        .iter()
+        .filter(|(s, _)| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|(_, p)| p.clone())
+        .collect();
+    let Some(dir) = notes.first().and_then(|p| p.parent()).map(PathBuf::from) else {
+        return 1;
+    };
+    if shots::shots_in(&notes).is_empty() {
+        let _ = writeln!(
+            out,
+            "The newest run of {} / {} wrote no SHOT lines.",
+            band.name, flow.name
+        );
+        return 0;
+    }
+    offer_shots(ctx, &band, flow, &dir, &notes, d, out, ask)
 }
 
 fn page_cmd(ctx: &Ctx, name: Option<&str>, d: &Deps, out: &mut dyn Write) -> i32 {
@@ -898,7 +1023,8 @@ pub fn dispatch(
         ConductorCmd::List => list(ctx, out),
         ConductorCmd::Templates => templates_list(out),
         ConductorCmd::New { .. } => new_band(ctx, cmd, d, out, ask),
-        ConductorCmd::Run { .. } => run_flow_cmd(ctx, cmd, d, out),
+        ConductorCmd::Run { .. } => run_flow_cmd(ctx, cmd, d, out, ask),
+        ConductorCmd::Shots { band, flow } => shots_cmd(ctx, &band, flow.as_deref(), d, out, ask),
         ConductorCmd::Sections {
             band,
             flow,
@@ -1066,6 +1192,7 @@ pub fn run(ctx: &Ctx, cmd: ConductorCmd) -> i32 {
     let outside = RealOutside { ctx };
     let deps = Deps {
         chat: &chat,
+        stage: None,
         outside: &outside,
         room_dir: net::room_dir(ctx),
         scheduler: &sched,

@@ -1346,3 +1346,199 @@ fn a_computer_without_the_models_can_still_play_on_the_studio() {
         "{e}"
     );
 }
+
+// ---- words to a run
+
+fn re_angle_home(tag: &str) -> (Ctx, Catalog) {
+    let d = tmp(tag);
+    let ctx = ctx_in(&d.join("home"));
+    std::fs::create_dir_all(&ctx.home).unwrap();
+    let mut st = State::load(&ctx);
+    st.set(
+        "re-angle-video",
+        vec![("installed", J::Bool(true)), ("enabled", J::Bool(true))],
+    );
+    st.set_last_run(
+        "re-angle-video",
+        parse(r#"{"inputs":[{"name":"clip","value":"/home/me/clips/dance.mp4"}],"pedals":[],"seed":5,"takes":1}"#).unwrap(),
+    );
+    st.set_last_workflow("re-angle-video");
+    st.save(&ctx).unwrap();
+    (ctx, embedded())
+}
+
+#[test]
+fn words_become_a_plan_with_the_machine_the_estimate_and_what_was_left_out() {
+    let (ctx, cat) = re_angle_home("cue-plan");
+    let fake = FakeComfy::start(24.0);
+    let w = world(Some(fake.machine("this computer", true, 24.0)), vec![]);
+    let (p, cue) =
+        super::cue::plan(&ctx, &w, &cat, "re-angle the last clip with a slow orbit").unwrap();
+    assert_eq!(p.id, "re-angle-video");
+    assert_eq!(cue.workflow.as_deref(), Some("re-angle-video"));
+    assert_eq!(
+        p.pedals,
+        vec![("camera".to_string(), "orbit_left".to_string())]
+    );
+    // re-angle has no speed Pedal: it says so instead of pretending
+    assert!(
+        p.left_out.iter().any(|l| l.contains("no speed Pedal")),
+        "{:?}",
+        p.left_out
+    );
+    let t = p.text();
+    assert!(
+        t.contains("camera=orbit_left")
+            && t.contains("dance.mp4")
+            && t.contains("this computer")
+            && t.contains("no estimate yet")
+            && !t.contains("/home/me"),
+        "{t}"
+    );
+    // "golden hour" is a light on whatever ran last
+    let (p, _) = super::cue::plan(&ctx, &w, &cat, "make it golden hour").unwrap();
+    assert_eq!(
+        (
+            p.id.as_str(),
+            p.pedals[0].0.as_str(),
+            p.pedals[0].1.as_str()
+        ),
+        ("re-angle-video", "light", "golden_hour")
+    );
+    // with the studio's earlier times in the run log, the estimate has a number
+    let runs = super::install::stage_dir(&ctx).join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join("x.jsonl"),
+        "{\"run\":\"x\",\"id\":\"re-angle-video\",\"seed\":1}\n{\"take\":1,\"machine\":\"this computer\",\"secs\":41.0}\n",
+    )
+    .unwrap();
+    let (p, _) = super::cue::plan(&ctx, &w, &cat, "push in").unwrap();
+    assert!(p.text().contains("about 41 s"), "{}", p.text());
+}
+
+#[test]
+fn words_with_no_earlier_run_or_no_pedal_say_what_to_do() {
+    let (ctx, cat) = re_angle_home("cue-nothing");
+    let fake = FakeComfy::start(24.0);
+    let w = world(Some(fake.machine("this computer", true, 24.0)), vec![]);
+    let e = super::cue::plan(&ctx, &w, &cat, "relight the photo with noir")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        e.contains("not added yet") && e.contains("stage add relight-photo"),
+        "{e}"
+    );
+    let mut st = State::load(&ctx);
+    st.set("swap-character-video", vec![("installed", J::Bool(true))]);
+    st.save(&ctx).unwrap();
+    let e = super::cue::plan(&ctx, &w, &cat, "swap the character in the clip")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        e.contains("no earlier run") && e.contains("stage run swap-character-video"),
+        "{e}"
+    );
+    let e = super::cue::plan(&ctx, &w, &cat, "hello there")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(e.contains("golden hour"), "{e}");
+    let fresh = ctx_in(&tmp("cue-fresh").join("home"));
+    let e = super::cue::plan(&fresh, &w, &cat, "golden hour")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(e.contains("Nothing has played yet"), "{e}");
+}
+
+#[test]
+fn a_cue_asks_y_n_once_then_plays_the_last_run_with_the_new_pedal_on_the_same_seed() {
+    let (ctx, cat, d) = ready("cue-run");
+    let fake = FakeComfy::start(24.0);
+    let w = world(Some(fake.machine("this computer", true, 24.0)), vec![]);
+    let first = play(&ctx, &w, &cat, "paint-edit-photo", &opts(&d, &[])).unwrap();
+    let before = fake.st.lock().unwrap().prompts.len();
+    // no: nothing plays
+    let mut said = vec![];
+    let mut asked = 0;
+    let o = super::cue::CueOpts::default();
+    let code = super::cue::run(&ctx, &w, &cat, "strength 20", &o, &mut said, &mut |_| {
+        asked += 1;
+        "n".into()
+    });
+    let out = String::from_utf8(said).unwrap();
+    assert_eq!((code, asked), (0, 1), "{out}");
+    assert!(
+        out.contains("strength=20") && out.contains("Not played"),
+        "{out}"
+    );
+    assert_eq!(fake.st.lock().unwrap().prompts.len(), before);
+    // yes: it plays on the last run's inputs and seed, and gives one line of JSON for Room
+    let mut said = vec![];
+    let o = super::cue::CueOpts {
+        yes: true,
+        json: true,
+        ..Default::default()
+    };
+    let code = super::cue::run(&ctx, &w, &cat, "strength 20", &o, &mut said, &mut |_| {
+        panic!("asked again")
+    });
+    let out = String::from_utf8(said).unwrap();
+    assert_eq!(code, 0, "{out}");
+    let j = parse(out.trim()).unwrap();
+    assert_eq!(j.bool("ok"), Some(true));
+    assert!(j.str("text").unwrap().contains("Result: "), "{out}");
+    assert_eq!(j.strs("files").len(), 1);
+    assert!(std::path::Path::new(&j.strs("files")[0]).is_file());
+    assert_eq!(fake.st.lock().unwrap().prompts.len(), before + 1);
+    let st = State::load(&ctx);
+    assert_eq!(
+        st.last_run("paint-edit-photo").unwrap().f64("seed"),
+        Some(first.takes[0].seed as f64)
+    );
+    // --plan only says
+    let mut said = vec![];
+    let o = super::cue::CueOpts {
+        plan: true,
+        json: true,
+        ..Default::default()
+    };
+    super::cue::run(&ctx, &w, &cat, "strength 30", &o, &mut said, &mut |_| {
+        String::new()
+    });
+    assert!(String::from_utf8(said).unwrap().contains("strength=30"));
+    assert_eq!(fake.st.lock().unwrap().prompts.len(), before + 1);
+}
+
+#[test]
+fn the_cue_command_line_is_parsed() {
+    use super::{parse_args, StageCmd};
+    assert_eq!(
+        parse_args(&["cue", "golden", "hour"]).unwrap(),
+        StageCmd::Cue("golden hour".into(), super::cue::CueOpts::default())
+    );
+    assert_eq!(
+        parse_args(&["cue", "--yes", "--json", "push", "in"]).unwrap(),
+        StageCmd::Cue(
+            "push in".into(),
+            super::cue::CueOpts {
+                plan: false,
+                json: true,
+                yes: true
+            }
+        )
+    );
+    // after `--` the words are the words, even one that looks like a flag
+    assert_eq!(
+        parse_args(&["cue", "--json", "--plan", "--", "--yes", "golden", "hour"]).unwrap(),
+        StageCmd::Cue(
+            "--yes golden hour".into(),
+            super::cue::CueOpts {
+                plan: true,
+                json: true,
+                yes: false
+            }
+        )
+    );
+    assert!(parse_args(&["cue"]).is_err());
+    assert!(parse_args(&["cue", "--nope", "x"]).is_err());
+}

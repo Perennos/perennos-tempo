@@ -61,6 +61,11 @@ fn parts(r: &Rig) -> usize {
 
 #[test]
 fn a_big_blob_crosses_intact_past_the_old_64_mib_limit() {
+    // `fleet invite` starts `<this program> fleet serve` and in a test that is the test program,
+    // which runs every test with "fleet" in its name: that copy has no need of the slow one
+    if std::env::args().any(|a| a == "serve") {
+        return;
+    }
     let (a, b, mb) = pair("big");
     // 65 MiB and a bit: more than the 64 MiB the call channel took, and not a whole number of pieces
     let size = (65 << 20) + 12_345;

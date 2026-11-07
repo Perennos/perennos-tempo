@@ -793,6 +793,7 @@ fn go(f: &Fixture, chat: &Script, cmd: ConductorCmd) -> (i32, String) {
         engines: f.engines.clone(),
     };
     let d = Deps {
+        stage: None,
         chat,
         outside: &out,
         room_dir: f.root.join("room"),
@@ -934,6 +935,7 @@ fn chat_that_cannot_run_side_by_side_is_told_so() {
     }
     let out = Out { engines: vec![] };
     let d = Deps {
+        stage: None,
         chat: &Plain,
         outside: &out,
         room_dir: f.root.join("room"),

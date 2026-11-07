@@ -35,7 +35,7 @@ The list lives in `perennos-tempo-launcher/catalog/voice.json`. The program name
 
 ## Room
 
-The owner, at the machine, gets the mic in every room. A member gets it only in a room where the owner switched on "Let members use the mic here" (People), because the words are heard by the owner's computer. In a room, speech goes to `@tempo` unless you name someone ("at Sam, ..." becomes `@sam`).
+The owner, at the machine, gets the mic in every room. A member gets it only in a room where the owner switched on "Let members use the mic here" (People), because the words are heard by the owner's computer. In a room, speech goes to `@tempo` unless you name someone ("at Sam, ..." becomes `@sam`). From the owner, at their own computer, words about Stage reach it first: say "make it golden hour" or "re-angle the last clip with a slow orbit" and Tempo says what it understood, asks y or n in the room, plays it, and tells only you where the result is (see [STAGE.md](STAGE.md)). A member saying the same words gets an ordinary answer, with no tools.
 
 ## Settings
 

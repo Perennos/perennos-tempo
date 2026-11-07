@@ -32,6 +32,16 @@ The two keys come from the fleet key by HKDF-SHA-256 with different labels, so o
 
 A replayed frame still carries the same replay nonce in its header, so it is still refused for the two minutes the clock allows. Honest limit: the seal key is shared by the whole fleet, so a computer holding the fleet key can read frames between two others if it can listen to them. The Ed25519 pinning stops it speaking as them, not hearing them.
 
+## Big files: blob streams (Stage's clips and renders)
+
+A clip going to another computer's Stage, or a render coming back, is a blob stream: 256 KiB pieces, each in its own sealed and signed frame (the same frames, the same keys), written straight from the sender's file to a temp file on the receiver. Nothing is held in memory beyond one 4 MiB batch and nothing goes into SQLite. The receiver hashes the temp file, and only a file with the promised size and SHA-256 is renamed into `<home>/fleet/in/`; a wrong one goes to the trash and the sender is told why. A piece changed on the wire fails its seal and is dropped before anything reads it, and a piece that was changed before it was sealed fails the hash at the end.
+
+- **A cap per file,** `blob_cap_gib` in `fleet.json` (4 GiB unless you set it: `tempo-launch fleet cap GIB`). The receiver turns away a bigger `begin` and a piece past the size it was promised. Each computer keeps its own cap.
+- **Who may send.** A paired computer, and only when this computer's owner ran `tempo-launch fleet allow stage`, or when this computer is waiting for that computer's answer to a call it made (an `expect` file, good for six hours). No other peer can fill the disk. At most four files come in at once.
+- **No paths from a message.** The `stage` message that follows names a file by the id of a stream already received and checked; the receiving computer never opens a path a message gave.
+- **Still visible to someone listening:** the topics (`bs:<id>:<n>`), the sizes and the timing. A clip's size is visible. Padding is not done.
+- **Not tested:** a 4 GiB file (the biggest test is 65 MiB), and two real computers.
+
 ## ML-DSA: a second signature on frames, not added yet
 
 A post-quantum signature for identities (ML-DSA-65, FIPS 204) was looked at, and a stable pure-Rust crate exists (`ml-dsa` 0.1.x, Apache-2.0 or MIT). It is not on frames yet, for these reasons:

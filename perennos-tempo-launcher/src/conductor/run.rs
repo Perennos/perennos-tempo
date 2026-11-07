@@ -169,7 +169,7 @@ fn engine_label(url: &str, cast: &[Cast]) -> String {
         .unwrap_or_else(|| bare.split_once("://").map_or(bare, |x| x.1).to_string())
 }
 
-fn link(base: &str, folder: &str, file: &str, label: &str) -> String {
+pub(super) fn link(base: &str, folder: &str, file: &str, label: &str) -> String {
     format!("[[{base}{folder}/{file}|{label}]]")
 }
 
