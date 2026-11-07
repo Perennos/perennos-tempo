@@ -1,0 +1,69 @@
+{
+ "about": "Models Tempo setup may recommend. Public engines are copied from the verified public catalog (model_catalog.json in the public Perennos Tempo repository, verified 2026-10-17 against the Ollama registry); nothing here is invented. gb is the download size; null means unknown, and a model of unknown size is never chosen by size. min_ram_gb and min_vram_gb are gb plus 1.5 GB of room for the model's working memory (context); null when gb is null. To add a model, put a file with the same shape at <Tempo home>/models/catalog.json: its entries replace entries of the same name and add new ones.",
+ "verified_at": "2026-10-17",
+ "headroom_gb": 1.5,
+ "models": [
+  {
+   "name": "qwen3:4b",
+   "source": "ollama",
+   "gb": 2.5,
+   "params_b": 4,
+   "roles": ["thinking", "research", "inference", "writing-code"],
+   "licence": "Apache-2.0",
+   "min_ram_gb": 4.0,
+   "min_vram_gb": 4.0,
+   "digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+   "notes": "From the verified public catalog."
+  },
+  {
+   "name": "embeddinggemma",
+   "source": "ollama",
+   "gb": null,
+   "params_b": null,
+   "roles": ["embed"],
+   "licence": "unknown",
+   "min_ram_gb": null,
+   "min_vram_gb": null,
+   "notes": "Memory (notes search). The agent runs it on the CPU only. Its size and licence are not in the verified public catalog, so both are shown as unknown."
+  },
+  {
+   "name": "d1-2B",
+   "source": "huggingface",
+   "gb": 1.10,
+   "params_b": 2,
+   "roles": ["router", "judge"],
+   "licence": "LFM Open License v1.0: free use only while your yearly revenue is under USD 10 million",
+   "min_ram_gb": 2.6,
+   "min_vram_gb": 2.6,
+   "opt_in": true,
+   "pull": "hf.co/LiquidAI/d1-2B-GGUF:Q4_K_M",
+   "link": "https://huggingface.co/LiquidAI/d1-2B-GGUF/blob/4a181094d1b6addfaa3a0956f78e7ab2aa406a0c/LICENSE",
+   "revision": "4a181094d1b6addfaa3a0956f78e7ab2aa406a0c",
+   "bytes": 1099629888,
+   "sha256": "adca5789ad30ae6027e8e936749bb9f19673097492ab26fa1c5b69643ca50b4b",
+   "notes": "Liquid AI's public model, Q4_K_M. Only with --with-d1."
+  },
+  {
+   "name": "UMBRA-2",
+   "source": "local-only",
+   "gb": 1.10,
+   "params_b": 1.7,
+   "roles": ["fast"],
+   "licence": "Perennos own model, never released",
+   "min_ram_gb": 2.6,
+   "min_vram_gb": 2.6,
+   "notes": "Perennos's own small model. Never downloaded and never uploaded: used only where it is already on this computer."
+  },
+  {
+   "name": "UMBRA-3",
+   "source": "local-only",
+   "gb": null,
+   "params_b": null,
+   "roles": ["heavy", "thinking"],
+   "licence": "Perennos own model, never released",
+   "min_ram_gb": null,
+   "min_vram_gb": null,
+   "notes": "Perennos's own big model. Never downloaded and never uploaded: used only where it is already on this computer."
+  }
+ ]
+}

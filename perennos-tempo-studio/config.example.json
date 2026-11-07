@@ -1,0 +1,9 @@
+{
+  "reaper_exe": "C:/Program Files/REAPER (x64)/reaper.exe",
+  "engine": "auto",
+  "preset": "streaming",
+  "allow_roots": ["/path/to/music/outputs"],
+  "render_timeout_s": 540,
+  "reference_lufs": -23,
+  "output_format": "pcm24"
+}

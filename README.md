@@ -82,6 +82,18 @@ A profile never declassifies a request, and a public label does not anonymize co
 | **Receipts** | Append-only, hash-chained route and outcome metadata. | Written by every route. |
 | **Admission and leases** | Resource admission and a lease gate for GPU work. | Applied by the gateway. |
 
+### The apps
+
+| App | What it gives you | Start it |
+|---|---|---|
+| **Tempo Agent** | A local AI agent for your own computer: it reads and edits files, runs commands and reads web pages, asking before anything that matters; `/undo` puts its last changes back. Projects can give it standing instructions (`AGENTS.md`, `CLAUDE.md`). | `tempo-local-agent`, or `tempo-launch open agent` |
+| **Tempo Vault** | Your notes as plain Markdown files, Obsidian-compatible. The agent reads and links them; Tempo learns from them on your computer. | `tempo-launch open vault` |
+| **Tempo Studio** | Mixing and mastering: loudness, analysis and REAPER sessions, through the agent or its own commands. | `tempo-studio` |
+| **Tempo Room** | A private group chat on your computer. Invite family or a team with a one-time link; anyone in the room can ask `@tempo`. Guests never get tools, files or your memory. | `tempo-launch open room` |
+| **tempo-launch** | Starts and stops everything without a console window, and sets Tempo up for this computer: it checks the memory, graphics card and disk, recommends models that fit, and fetches them (and Ollama itself, checked against a pinned SHA-256) only after you say yes. | `tempo-launch setup` |
+
+Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.md](docs/TEMPO-HOME.md)); setup is described in [docs/TEMPO-SETUP.md](docs/TEMPO-SETUP.md).
+
 ## Quick start
 
 **Windows.** Download `PerennosTempo-Setup-unsigned.exe` from the [latest release](https://github.com/Perennos/perennos-tempo/releases), check its published SHA-256, open it and click **Install and open**. First setup downloads pinned packages, the app-owned Ollama runtime and the local `qwen3:4b` model, which is several gigabytes. Setup shows the exact plan and free space before anything large is downloaded.
@@ -94,14 +106,16 @@ python tempo.py headless --home "<data-folder>" --host 127.0.0.1 --port 8765 --d
 
 Then connect an MCP client with the entry printed by `python tempo.py mcp-config --home "<data-folder>" --port 8765`. The [Setup Guide](SETUP-GUIDE.md) covers the token, the MCP client and the Linux source path.
 
-## Coming to this repository
+**The apps, on macOS and Linux.** With Rust and a C compiler:
 
-Being prepared for release here:
+```sh
+bash installer/unix/install.sh --from-source .
+tempo-launch setup
+```
 
-- **Rust local agent:** tools, memory and an MCP host.
-- **Perennos Tempo Vault:** your notes, in Markdown.
-- **Perennos Tempo Studio:** mix and master.
-- **Perennos Tempo Room:** a private group chat where anyone can ask `@tempo`.
+`install.sh` builds the agent, Vault, Studio, Room and `tempo-launch`, adds menu entries (an app in `~/Applications` on macOS), and `--uninstall` moves everything it installed to a trash folder. See [installer/unix/README.md](installer/unix/README.md).
+
+**The apps, on Windows.** `installer/windows/build.ps1 -Apps vault,studio,room` builds the installer with [Inno Setup](https://jrsoftware.org/isinfo.php); see [installer/windows/README.md](installer/windows/README.md).
 
 ## Defaults and limits
 
@@ -121,7 +135,7 @@ Perennos-authored files are offered under the [PolyForm Shield License 1.0.0](LI
 
 ## Contributing and security
 
-Contributions are welcome. They come in under Apache-2.0 with a sign-off (`git commit -s`), so they can go into every edition of Perennos Tempo; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md).
+Contributions are welcome. They come in under Apache-2.0 with a sign-off (`git commit -s`), so they can go into every edition of Perennos Tempo; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md). What the apps keep and what leaves your computer: [PRIVACY.md](PRIVACY.md).
 
 <br>
 

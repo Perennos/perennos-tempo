@@ -1,0 +1,117 @@
+name: products
+# The Rust products on real Linux, macOS and Windows machines: every crate's tests and lints, the Room
+# rehearsal (the real programs with an owner and three guests), and a real install and uninstall with
+# each system's installer. Free GitHub-hosted runners; no secrets are used.
+on: [push, pull_request]
+permissions:
+  contents: read
+concurrency:
+  group: products-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  crates:
+    name: ${{ matrix.crate }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        crate: [perennos-tempo-local-agent, perennos-tempo-vault, perennos-tempo-studio, perennos-tempo-room, perennos-tempo-launcher]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Tests
+        run: cargo test --locked --manifest-path ${{ matrix.crate }}/Cargo.toml
+      - name: Clippy, warnings are errors
+        run: cargo clippy --locked --all-targets --manifest-path ${{ matrix.crate }}/Cargo.toml -- -D warnings
+      - name: Formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check --manifest-path ${{ matrix.crate }}/Cargo.toml
+
+  room-rehearsal:
+    name: Room rehearsal (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build the room and the agent
+        run: |
+          cargo build --release --locked --manifest-path perennos-tempo-room/Cargo.toml
+          cargo build --release --locked --manifest-path perennos-tempo-local-agent/Cargo.toml
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/run"
+          cp perennos-tempo-room/target/release/tempo-room perennos-tempo-local-agent/target/release/tempo-local-agent "$RUNNER_TEMP/bin/"
+      - name: Rehearsal (an owner and three guests, a mock Ollama)
+        run: python3 -I perennos-tempo-room/rehearsal/rehearse.py "$RUNNER_TEMP/bin" "$RUNNER_TEMP/run"
+
+  install-unix:
+    name: Install and uninstall (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install from source (source-available edition)
+        run: bash installer/unix/install.sh --from-source "$GITHUB_WORKSPACE" --prefix "$RUNNER_TEMP/tempo-bin" --yes
+      - name: The programs answer
+        run: |
+          for p in tempo-launch tempo-local-agent tempo-vault tempo-studio tempo-room; do
+            test -x "$RUNNER_TEMP/tempo-bin/$p" || { echo "missing $p"; exit 1; }
+          done
+          "$RUNNER_TEMP/tempo-bin/tempo-launch" home --json
+          "$RUNNER_TEMP/tempo-bin/tempo-launch" status
+          "$RUNNER_TEMP/tempo-bin/tempo-local-agent" --help | head -n 3
+          "$RUNNER_TEMP/tempo-bin/tempo-room" version
+          if [ "$RUNNER_OS" = macOS ]; then test -d "$HOME/Applications/Perennos Tempo.app"; fi
+      - name: Uninstall (everything goes to the trash folder)
+        run: |
+          bash installer/unix/install.sh --uninstall --prefix "$RUNNER_TEMP/tempo-bin" --yes
+          test ! -e "$RUNNER_TEMP/tempo-bin/tempo-launch"
+
+  install-windows:
+    name: Windows installer (build, silent install, uninstall)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build the source-available installer
+        shell: pwsh
+        run: ./installer/windows/build.ps1 -Apps vault,studio,room
+      - name: Install for this user, without a window
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer/windows/build/out -Filter 'PerennosTempo-Setup-*-source-available.exe' | Select-Object -First 1
+          if (-not $setup) { throw "no setup file was built" }
+          $p = Start-Process $setup.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/TASKS=addtopath', "/LOG=$env:RUNNER_TEMP\setup.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup.log" -Tail 40; throw "setup exited with $($p.ExitCode)" }
+      - name: The programs answer
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:LOCALAPPDATA 'Programs\Perennos Tempo\bin'
+          foreach ($p in 'tempo-launch', 'tempo-local-agent', 'tempo-vault', 'tempo-studio', 'tempo-room') {
+            if (-not (Test-Path (Join-Path $bin "$p.exe"))) { throw "missing $p.exe" }
+          }
+          & (Join-Path $bin 'tempo-launch.exe') home --json
+          & (Join-Path $bin 'tempo-launch.exe') status
+          & (Join-Path $bin 'tempo-room.exe') version
+      - name: Uninstall without a window
+        shell: pwsh
+        run: |
+          $un = Join-Path $env:LOCALAPPDATA 'Programs\Perennos Tempo\uninstall\unins000.exe'
+          if (-not (Test-Path $un)) { throw "no uninstaller at $un" }
+          $p = Start-Process $un -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall exited with $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Perennos Tempo\bin\tempo-launch.exe')) { throw "tempo-launch.exe is still there" }

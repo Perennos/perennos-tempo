@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en" data-theme="charcoal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Perennos Tempo Vault</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.mjs"></script>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <div class="l">
+      <span class="brand">tempo</span>
+      <span class="seg auto"><b>VAULT</b></span>
+      <span class="sep">·</span>
+      <span class="seg"><b id="vname">…</b></span>
+      <span class="sep">·</span>
+      <span class="seg"><b id="vcount">0</b> <i>notes</i></span>
+      <span class="sep">·</span>
+      <span class="seg"><b>LOCAL</b> <i>only</i></span>
+    </div>
+    <div class="r">
+      <button class="seg pal-open" id="palbtn" type="button" title="Jump to a note or run a command (Ctrl+K)"><i>jump</i> <kbd>Ctrl</kbd><kbd>K</kbd></button>
+      <span class="seg live" id="livebox"><i>live</i> <b id="livestate">SSE</b></span>
+    </div>
+  </header>
+
+  <nav class="rail" aria-label="Views">
+    <div class="sub">Vault</div>
+    <button type="button" data-view="files" aria-current="page"><kbd>F</kbd>Files<span class="n" id="n-files"></span></button>
+    <button type="button" data-view="search"><kbd>S</kbd>Search</button>
+    <button type="button" data-view="graph"><kbd>G</kbd>Graph</button>
+    <button type="button" data-view="tasks"><kbd>T</kbd>Tasks<span class="n warm" id="n-tasks"></span></button>
+    <button type="button" data-view="tags"><kbd>H</kbd>Tags<span class="n" id="n-tags"></span></button>
+    <div class="sub">Days</div>
+    <button type="button" data-view="daily"><kbd>D</kbd>Today</button>
+    <button type="button" data-view="calendar"><kbd>M</kbd>Calendar</button>
+    <button type="button" data-view="learned"><kbd>L</kbd>Learned<span class="n learn" id="n-learned"></span></button>
+    <div class="sub">Care</div>
+    <button type="button" data-view="health"><kbd>C</kbd>Check<span class="n warm" id="n-health"></span></button>
+    <div class="gap"></div>
+    <button type="button" data-view="new"><kbd>N</kbd>New note</button>
+    <button type="button" data-view="theme"><kbd>,</kbd>Theme</button>
+  </nav>
+
+  <aside class="side" id="side" aria-label="Notes">
+    <div class="side-hd">
+      <span class="lbl" id="side-title">Files</span>
+      <input id="filter" class="filter" type="search" placeholder="Filter" autocomplete="off" spellcheck="false" aria-label="Filter notes">
+    </div>
+    <div class="side-body" id="side-body"></div>
+  </aside>
+
+  <main class="stage" id="stage">
+    <section class="doc" id="doc" aria-live="polite">
+      <div class="doc-hd">
+        <div class="crumbs lbl" id="crumbs"></div>
+        <h1 id="title">Perennos Tempo Vault</h1>
+        <div class="meta lbl" id="meta"></div>
+        <div class="doc-tools" id="tools">
+          <button class="btn sm" type="button" id="mode" aria-pressed="false" title="Read or edit (Ctrl+E)">Edit <kbd>E</kbd></button>
+          <button class="btn sm" type="button" id="rename" title="Rename or move; links follow (F2)">Rename</button>
+          <button class="btn sm" type="button" id="hist" title="Earlier versions">History</button>
+          <button class="btn sm" type="button" id="trash" title="Move to the vault's trash">Trash</button>
+          <button class="btn sm insp-btn" type="button" id="inspbtn" title="Links, outline, properties (I)">Links <kbd>I</kbd></button>
+        </div>
+      </div>
+      <div class="banner" id="banner" hidden></div>
+      <div class="doc-body" id="body"></div>
+      <textarea class="editor" id="editor" spellcheck="true" hidden aria-label="Note text"></textarea>
+    </section>
+    <section class="graph" id="graph" hidden>
+      <div class="graph-hd">
+        <h1>The vault, as a field.</h1>
+        <div class="graph-ctl">
+          <button class="btn sm" type="button" data-g="tags" aria-pressed="false">Tags</button>
+          <button class="btn sm" type="button" data-g="attachments" aria-pressed="true">Files</button>
+          <button class="btn sm" type="button" data-g="unresolved" aria-pressed="false">Wanted</button>
+          <button class="btn sm" type="button" data-g="orphans" aria-pressed="true">Orphans</button>
+          <input id="gfilter" class="filter" type="search" placeholder="Only notes matching…" autocomplete="off" aria-label="Graph filter">
+        </div>
+        <div class="legend lbl" id="legend"></div>
+      </div>
+      <div class="graph-stage" id="gstage"></div>
+    </section>
+  </main>
+
+  <aside class="insp" id="insp" aria-label="Note details">
+    <div class="tabs" role="tablist">
+      <button class="tab" type="button" role="tab" data-tab="links" aria-selected="true">Links</button>
+      <button class="tab" type="button" role="tab" data-tab="outline" aria-selected="false">Outline</button>
+      <button class="tab" type="button" role="tab" data-tab="props" aria-selected="false">Props</button>
+      <button class="tab" type="button" role="tab" data-tab="local" aria-selected="false">Local</button>
+      <button class="tab" type="button" role="tab" data-tab="tempo" aria-selected="false" title="Ask Tempo about this note">Tempo</button>
+    </div>
+    <div class="insp-body" id="insp-body"></div>
+  </aside>
+
+  <footer class="status">
+    <span><i class="dot" id="dot"></i><b id="st-live">connecting</b></span>
+    <span id="st-mid"></span>
+    <span id="st-save">nothing leaves this machine</span>
+  </footer>
+</div>
+
+<div class="pal" id="pal" hidden>
+  <div class="pal-box" role="dialog" aria-label="Jump to">
+    <input id="pal-in" type="text" placeholder="Jump to a note, or > for commands" autocomplete="off" spellcheck="false" aria-label="Jump to">
+    <div class="pal-list" id="pal-list" role="listbox"></div>
+    <div class="pal-foot lbl"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Shift</kbd><kbd>Enter</kbd> create</span><span><kbd>Esc</kbd> close</span></div>
+  </div>
+</div>
+<div class="sheet" id="sheet" hidden><div class="sheet-box" id="sheet-box" role="dialog"></div></div>
+<div class="suggest" id="suggest" hidden role="listbox"></div>
+</body>
+</html>
