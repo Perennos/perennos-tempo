@@ -12,11 +12,12 @@
 //!  "winner":true|false,"pair":"<take id>"|null,"ts":"RFC3339"}
 //! ```
 //!
-//! Lines are only ever added. The one rewrite is the owner's verdict, which changes `owner` and
-//! may move `winner` and `pair` between takes of the same part; no line is dropped.
+//! Lines are only ever added, never rewritten. The owner's verdict adds a fresh line for each
+//! take of that part whose `owner`, `winner` or `pair` changed, so a reader keeps the last line
+//! it sees for a take id. That keeps the whole history, and Woodshed can read it as a plain log.
 
 use crate::setup::json::{parse, J};
-use crate::{redact, write_atomic, Ctx};
+use crate::{redact, Ctx};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -229,51 +230,56 @@ pub fn append(file: &std::path::Path, takes: &[Take]) -> std::io::Result<()> {
     f.write_all(text.as_bytes())
 }
 
-/// Every take in the file (a line that is not a take is skipped, and kept by `set_owner`).
+/// Every take in the file, as it stands now: when a take appears more than once, its last line
+/// wins, in the place it first showed up. A line that is not a take is skipped.
 pub fn read_all(file: &std::path::Path) -> Vec<Take> {
-    std::fs::read_to_string(file)
+    let mut out: Vec<Take> = Vec::new();
+    let mut at = std::collections::HashMap::new();
+    for t in std::fs::read_to_string(file)
         .unwrap_or_default()
         .lines()
         .filter_map(|l| parse(l).ok())
         .filter_map(|j| Take::from_j(&j))
-        .collect()
+    {
+        match at.get(&t.id) {
+            Some(&i) => out[i] = t,
+            None => {
+                at.insert(t.id.clone(), out.len());
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
 /// The owner's accept or reject of one take. The takes of the same run, part and task are picked
 /// again, so accepting a take that lost makes it the winner, and rejecting the winner hands the
 /// win to the next best. Says what changed.
 pub fn set_owner(file: &std::path::Path, id: &str, accept: bool) -> Result<String, String> {
-    let text = std::fs::read_to_string(file)
-        .map_err(|_| "there is no takes file yet; no run has made any takes".to_string())?;
-    let mut rows: Vec<(String, Option<Take>)> = text
-        .lines()
-        .map(|l| (l.to_string(), parse(l).ok().and_then(|j| Take::from_j(&j))))
-        .collect();
-    let at = rows
+    if !file.exists() {
+        return Err("there is no takes file yet; no run has made any takes".to_string());
+    }
+    let all = read_all(file);
+    let me = all
         .iter()
-        .position(|(_, t)| t.as_ref().is_some_and(|t| t.id == id))
+        .find(|t| t.id == id)
         .ok_or_else(|| format!("no take called {id}"))?;
     let key = |t: &Take| (t.run.clone(), t.part.clone(), t.task.clone());
-    let group_key = rows[at].1.as_ref().map(key);
-    if let Some(t) = rows[at].1.as_mut() {
+    let group_key = key(me);
+    let before: Vec<Take> = all.into_iter().filter(|t| key(t) == group_key).collect();
+    let mut group = before.clone();
+    for t in group.iter_mut().filter(|t| t.id == id) {
         t.owner = Some(accept);
     }
-    let members: Vec<usize> = (0..rows.len())
-        .filter(|&i| rows[i].1.as_ref().map(key) == group_key)
-        .collect();
-    let mut group: Vec<Take> = members.iter().filter_map(|&i| rows[i].1.clone()).collect();
     pick_winner(&mut group);
     let winner = group.iter().find(|t| t.winner).map(|t| t.id.clone());
-    for (&i, t) in members.iter().zip(group) {
-        rows[i] = (t.to_line(), Some(t));
-    }
-    let mut out = String::new();
-    for (line, _) in &rows {
-        out.push_str(line);
-        out.push('\n');
-    }
-    write_atomic(file, out.as_bytes())
-        .map_err(|e| format!("could not write the takes file: {e}"))?;
+    let changed: Vec<Take> = group
+        .into_iter()
+        .zip(&before)
+        .filter(|(now, was)| now.to_line() != was.to_line())
+        .map(|(now, _)| now)
+        .collect();
+    append(file, &changed).map_err(|e| format!("could not write the takes file: {e}"))?;
     Ok(match winner {
         Some(w) if w == id => format!("Take {id} is the winner."),
         Some(w) => format!("Noted. Take {w} is the winner now."),
@@ -394,7 +400,16 @@ mod tests {
             .unwrap()
             .contains("Take b is the winner"));
         let all = read_all(&file);
-        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.len(),
+            3,
+            "a verdict adds lines, and the reader keeps the latest"
+        );
+        let lines = std::fs::read_to_string(&file).unwrap().lines().count();
+        assert!(
+            lines > 4,
+            "nothing was rewritten: the old lines are all still there"
+        );
         assert!(all[1].winner && !all[0].winner && all[1].owner == Some(true));
         assert!(all[2].winner, "another run is untouched");
         assert!(std::fs::read_to_string(path(&ctx))
