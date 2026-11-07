@@ -1,0 +1,20 @@
+[package]
+name = "perennos-tempo-studio"
+version = "0.1.0"
+edition = "2021"
+authors = ["Perennos"]
+description = "Perennos Tempo studio: open REAPER and mix and master songs, with a built-in loudness meter, mixdown and mastering fallback."
+
+[lib]
+name = "tempo_studio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tempo-studio"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "=1.0.145"
+
+# Standalone: own Cargo.lock, never part of a parent workspace.
+[workspace]

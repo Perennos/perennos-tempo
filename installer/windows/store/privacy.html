@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perennos Tempo privacy policy</title>
+<style>
+:root { color-scheme: light dark; --bg:#fbfaf7; --ink:#1b1d22; --muted:#555a63; --accent:#c8431f; --rule:#e2ded5; }
+@media (prefers-color-scheme: dark) { :root { --bg:#15171b; --ink:#ece6d8; --muted:#a9aeb8; --accent:#ff7a52; --rule:#2c3038; } }
+body { margin:0; background:var(--bg); color:var(--ink); font:17px/1.6 system-ui, "Segoe UI", sans-serif; }
+main { max-width:42rem; margin:0 auto; padding:2.5rem 1rem 4rem; }
+h1 { font-size:1.9rem; margin:0 0 1rem; }
+h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; padding-top:1rem; border-top:1px solid var(--rule); }
+li { margin:.4rem 0; }
+a { color:var(--accent); }
+code { font:.92em ui-monospace, Consolas, monospace; background:rgba(127,127,127,.15); padding:.05em .3em; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Perennos Tempo privacy policy</h1>
+<p>Effective 6 November 2026. Published by Perennos, built and maintained in the Cayman Islands.</p>
+<p><strong>Short version: Perennos Tempo runs on your computer and keeps your data there. We do not collect it. There is no account, no advertising, no analytics and no telemetry. Nothing is sent anywhere unless you connect it.</strong></p>
+<h2>What Perennos Tempo is</h2>
+<p>Perennos Tempo is a set of programs that run on your own computer (Windows, macOS or Linux): an AI agent, Tempo Vault (notes), Tempo Room (a private group chat) and Tempo Studio (music mixing and mastering). They talk to each other on your computer.</p>
+<h2>What is stored, and where</h2>
+<p>Everything is stored on your computer, in files you can open, copy and delete:</p>
+<ul><li>Your notes (Tempo Vault): the folder you chose (on Windows, by default <code>Documents\Tempo Vault</code>).</li><li>Conversations with the agent, its memory, Tempo Room's rooms and messages, settings, and logs of what the programs   did: the Tempo home folder, <code>%LOCALAPPDATA%\Perennos Tempo</code> on Windows and <code>~/.tempo</code> on macOS and Linux (or the   folder you set with <code>TEMPO_HOME</code>).</li><li>Tempo Room keeps the display names of the people you invite and their session records; invite codes are kept only   as hashes.</li></ul>
+<p>Perennos never receives any of it. Uninstalling the app does not delete your notes or data, so you never lose them by removing the app; you can delete these folders yourself at any time.</p>
+<h2>What Perennos Tempo does not do</h2>
+<ul><li>It does not collect, upload, sell or share your data with Perennos or anyone else.</li><li>It does not send usage statistics, crash reports or any "telemetry".</li><li>It has no account or sign-in with Perennos, and shows no advertising.</li></ul>
+<h2>What leaves your computer, only if you choose it</h2>
+<p>Perennos Tempo's programs listen only on your own computer (127.0.0.1) unless you change that. The following reach other computers only because you set them up or ask for them:</p>
+<ul><li><strong>A model host.</strong> The agent sends your messages and the files or notes it is working with to the model host you   configure. By default that is Ollama on your own computer. If you point it at another machine, your messages go to   that machine. If you point it at an online model service, your messages go to that service and its privacy policy applies.</li><li><strong>Web pages.</strong> If you ask the agent to read a web page, it fetches that page. It asks you first for each new site.</li><li><strong>Tool servers you add (MCP).</strong> A tool server you add is a program you chose; what it sends over the internet is   decided by that program.</li><li><strong>Bridges.</strong> If you turn on a Discord, Telegram or WhatsApp bridge for Tempo Room, the messages of that room pass   through that service, under its own terms and privacy policy. Bridges are off until you set them up.</li><li><strong>Other people in your rooms.</strong> Tempo Room is private: only people you invite can join, with a one-time link. Messages   are visible to the members of that room. If you let others reach your computer over Tailscale or your network, their   messages travel over that network.</li><li><strong>Models and Ollama.</strong> Perennos Tempo includes no model. When you run its setup, it looks up the names of the   models it might recommend in the public Ollama registry (only those model names are sent). Only when you say yes does   it ask Ollama to download the chosen models (from the Ollama registry or Hugging Face) and, if this computer has no   Ollama, fetch Ollama itself from Ollama's official GitHub release, checked against a pinned fingerprint (SHA-256)   before it is used. Those downloads come from those services, and their policies apply.</li><li><strong>REAPER.</strong> If you ask Tempo Studio to open REAPER, it starts that separate program on your computer.</li></ul>
+<h2>What the agent can do on your computer</h2>
+<p>At your request, and asking for approval first for actions that matter, the agent can read and change files and run programs on your computer. It only does this inside the conversations you start, and it keeps a record of what it did in your own data folder.</p>
+<h2>Children</h2>
+<p>Perennos Tempo is a general-purpose tool and is not directed at children. We do not knowingly collect information from anyone, children included, because we collect none.</p>
+<h2>Changes</h2>
+<p>If this policy changes, the new version will be published at this address with a new effective date.</p>
+<h2>Contact</h2>
+<p>Perennos: <a href="https://perennos.com">https://perennos.com</a></p>
+</main>
+</body>
+</html>

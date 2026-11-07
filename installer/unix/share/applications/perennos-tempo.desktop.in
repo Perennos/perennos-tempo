@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Perennos Tempo
+Comment=Open Perennos Tempo
+Exec="@LAUNCH@"
+Icon=perennos-tempo
+Terminal=false
+Categories=Utility;Development;
+Keywords=tempo;agent;ai;perennos;
+StartupNotify=false

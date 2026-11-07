@@ -1,0 +1,11 @@
+[Unit]
+Description=Perennos Tempo (background apps)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart="@LAUNCH@" start
+ExecStop="@LAUNCH@" stop
+
+[Install]
+WantedBy=default.target

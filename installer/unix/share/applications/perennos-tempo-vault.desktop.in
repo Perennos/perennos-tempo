@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tempo Vault
+Comment=Your notes, as Markdown
+Exec="@LAUNCH@" vault
+Icon=perennos-tempo-vault
+Terminal=false
+Categories=Office;Utility;
+Keywords=notes;markdown;obsidian;vault;
+StartupNotify=false

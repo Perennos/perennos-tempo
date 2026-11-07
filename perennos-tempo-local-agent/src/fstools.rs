@@ -351,7 +351,10 @@ mod tests {
             .set_modified(old)
             .unwrap();
         let r = glob("*.txt", t.d.to_str().unwrap());
-        let names: Vec<&str> = r.lines().map(|l| l.rsplit('/').next().unwrap()).collect();
+        let names: Vec<&str> = r
+            .lines()
+            .map(|l| l.rsplit(['/', '\\']).next().unwrap())
+            .collect();
         assert_eq!(names, ["new.txt", "old.txt"]);
         let _ = b;
         std::fs::create_dir_all(t.d.join("sub/deep")).unwrap();

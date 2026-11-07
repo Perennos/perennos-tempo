@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Perennos Tempo (background)
+Comment=Starts the Perennos Tempo apps in the background at sign-in
+Exec="@LAUNCH@" start
+Icon=perennos-tempo
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

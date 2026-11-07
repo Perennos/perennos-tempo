@@ -492,8 +492,13 @@ mod tests {
             (Some("hello\nworld\n"), true)
         );
         assert!(ch[1].after.is_none() && ch[1].before.as_deref() == Some("bye\n"));
-        assert_eq!(ch[2].path, d.join("moved.txt"));
-        assert_eq!(ch[2].moved_from.as_deref(), Some(d.join("m.txt").as_path()));
+        // plan resolves paths: compare real paths (macOS /var is /private/var; Windows gives \\?\ long names)
+        let real = std::fs::canonicalize(&d).unwrap();
+        assert_eq!(ch[2].path, real.join("moved.txt"));
+        assert_eq!(
+            ch[2].moved_from.as_deref(),
+            Some(real.join("m.txt").as_path())
+        );
         assert_eq!(ch[2].after.as_deref(), Some("a\nc\n"));
         for bad in [
             "no header",
