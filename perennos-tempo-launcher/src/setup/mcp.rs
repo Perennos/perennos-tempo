@@ -291,6 +291,28 @@ pub fn tools() -> Vec<J> {
             true,
         ),
         tool(
+            "crate_list",
+            "The Crate: free tools",
+            "The Crate is a bank of free tools (Blender, FFmpeg, Pandoc, Tesseract, whisper.cpp and more) the owner can set up and let Tempo play. This lists each with what it is for, its licence, size, whether it is installed here and whether the owner turned it on for Tempo. Nothing is changed.",
+            none(),
+            &[],
+            true,
+        ),
+        tool(
+            "crate_propose",
+            "Suggest a Crate tool",
+            "Suggest to the owner: add, remove, enable or disable a Crate tool (id from crate_list), or save a Blender script for them to read (action script, with script_name and script_text). Nothing is installed or turned on: it returns the command the owner runs, which shows what it will do and asks y/N. A script never runs until the owner has read and approved it.",
+            o(vec![
+                ("action", o(vec![("type", J::s("string")), ("enum", J::Arr(["add", "remove", "enable", "disable", "script"].iter().map(|x| J::s(x)).collect()))])),
+                ("id", o(vec![("type", J::s("string")), ("description", J::s("a tool id from crate_list"))])),
+                ("note", o(vec![("type", J::s("string")), ("description", J::s("One or two plain sentences for the owner: why."))])),
+                ("script_name", o(vec![("type", J::s("string")), ("description", J::s("for action script: a file name like make_cube.py"))])),
+                ("script_text", o(vec![("type", J::s("string")), ("description", J::s("for action script: the Python for Blender"))])),
+            ]),
+            &["action"],
+            false,
+        ),
+        tool(
             "conductor_propose",
             "Propose a band",
             "Write a proposed band for the owner to review. The Conductor picks each member's engine when the owner sets it up, so leave engines out. Nothing is set up: it returns the command the owner runs (`tempo-launch conductor apply-proposal`), which shows the band in plain words and asks y/N before anything is saved, added to Room or scheduled. Members have no tools: they only talk and write drafts. Every problem with the band is returned so you can fix it and propose again.",
@@ -346,6 +368,10 @@ impl Server<'_> {
                     file = propose::PROPOSAL_FILE
                 ))
             }
+            "crate_list" => {
+                Ok(crate::bank::list_facts(self.ctx, &crate::bank::detect::Sys::real()).pretty())
+            }
+            "crate_propose" => crate::bank::propose(self.ctx, args, (self.now)()),
             "conductor_templates" | "band_templates" => {
                 Ok(conductor::propose::templates_facts().pretty())
             }
@@ -594,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_six_tools_and_marks_the_read_only_ones() {
+    fn lists_eight_tools_and_marks_the_read_only_ones() {
         let root = tmp("list");
         let ctx = ctx_in(&root);
         let host = pc();
@@ -615,6 +641,8 @@ mod tests {
                 "tempo_status",
                 "setup_propose",
                 "conductor_templates",
+                "crate_list",
+                "crate_propose",
                 "conductor_propose"
             ]
         );
@@ -622,7 +650,10 @@ mod tests {
             let ro = x.get("annotations").unwrap().bool("readOnlyHint").unwrap();
             assert_eq!(
                 ro,
-                !matches!(x.str("name"), Some("setup_propose" | "conductor_propose")),
+                !matches!(
+                    x.str("name"),
+                    Some("setup_propose" | "conductor_propose" | "crate_propose")
+                ),
                 "{:?}",
                 x.str("name")
             );
@@ -630,6 +661,26 @@ mod tests {
         }
         // one line per message
         assert!(!r.compact().contains('\n'));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn crate_list_reads_and_crate_propose_only_suggests() {
+        let root = tmp("crate");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let l = s.call("crate_list", &J::Obj(vec![])).unwrap();
+        assert!(l.contains("\"blender\"") && l.contains("\"licence\""));
+        let a = parse(r#"{"action":"enable","id":"ffmpeg"}"#).unwrap();
+        let said = s.call("crate_propose", &a).unwrap();
+        assert!(said.contains("tempo-launch crate enable ffmpeg"), "{said}");
+        assert!(!root.join("crate.json").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
