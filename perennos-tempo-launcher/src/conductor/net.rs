@@ -321,7 +321,7 @@ pub fn register_band(link: &RoomLink, band: &Band) -> Result<RoomReport, String>
             .iter()
             .find(|t| t.str("handle") == Some(&m.handle));
         let result = match existing {
-            // already in this room: nothing to do (so `band room` can be run again)
+            // already in this room: nothing to do (so `conductor room` can be run again)
             Some(t) if t.strs("rooms").contains(&room) => Ok(()),
             Some(t) if t.str("role").map(str::trim) == Some(want.trim()) => link
                 .call(
@@ -335,7 +335,7 @@ pub fn register_band(link: &RoomLink, band: &Band) -> Result<RoomReport, String>
                 )
                 .map(|_| ()),
             Some(_) => Err(format!(
-                "@{} is already a teammate with a different role (another band's, or one you wrote); rename this member in band.json and run band room again",
+                "@{} is already a teammate with a different role (another band's, or one you wrote); rename this member in band.json and run conductor room again",
                 m.handle
             )),
             None => link

@@ -48,6 +48,7 @@ impl Template {
                     instrument: m.instrument.into(),
                     role: m.role.into(),
                     model: models.pick(m.heavy).into(),
+                    engine: String::new(),
                     may: m.may,
                 })
                 .collect(),

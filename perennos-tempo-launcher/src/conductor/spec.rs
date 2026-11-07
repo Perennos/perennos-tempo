@@ -1,4 +1,4 @@
-//! The band spec: `<Tempo home>/bands/<name>/band.json`.
+//! The band spec (a band is what the Tempo Conductor sets up): `<Tempo home>/bands/<name>/band.json`.
 //!
 //! A band is a few AI members and the flows they work through. The spec is plain data, checked
 //! strictly: an unknown key, a wrong type, an overlong role or a flow that points at nobody is a
@@ -59,6 +59,9 @@ pub struct Member {
     pub role: String,
     /// A model from this computer's plan. Empty: whatever the agent uses by default.
     pub model: String,
+    /// The engine the Conductor picked to play this part (an id from `conductor engines`).
+    /// Empty: the agent's own order.
+    pub engine: String,
     pub may: May,
 }
 
@@ -175,6 +178,15 @@ pub fn slug_ok(s: &str, max: usize) -> bool {
         && !s.contains("--")
 }
 
+/// The shape of an engine id (`local`, `192.168.0.20:11434`, a host's name). Whether it names an
+/// engine this computer knows is checked where the engines are known (`engines::unknown`).
+pub fn engine_id_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".:_-".contains(&b))
+}
+
 /// Text for one line: no control characters, not blank, at most `max` characters.
 fn line_ok(s: &str, max: usize) -> bool {
     !s.trim().is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control)
@@ -279,6 +291,11 @@ pub fn problems(b: &Band) -> Vec<String> {
         if let Err(e) = text_ok(&m.role, MAX_ROLE) {
             p.push(format!("{at}: the role {e}"));
         }
+        if !m.engine.is_empty() && !engine_id_ok(&m.engine) {
+            p.push(format!(
+                "{at}: the engine is an id from `tempo-launch conductor engines` (letters, digits and . : _ - only, at most 64 characters)"
+            ));
+        }
         if !m.model.is_empty() && !model_name_ok(&m.model) {
             p.push(format!(
                 "{at}: the model is letters, digits and : . - _ / only, at most 100 characters"
@@ -364,7 +381,15 @@ fn member_from(j: &J, i: usize, p: &mut Vec<String>) -> Member {
     }
     only_keys(
         j,
-        &["handle", "name", "instrument", "role", "model", "may"],
+        &[
+            "handle",
+            "name",
+            "instrument",
+            "role",
+            "model",
+            "engine",
+            "may",
+        ],
         &at,
         p,
     );
@@ -382,6 +407,7 @@ fn member_from(j: &J, i: usize, p: &mut Vec<String>) -> Member {
         instrument: text_of(j, "instrument", &at, p),
         role: text_of(j, "role", &at, p),
         model: text_of(j, "model", &at, p),
+        engine: text_of(j, "engine", &at, p),
         may,
     }
 }
@@ -470,6 +496,21 @@ pub fn from_j(j: &J) -> Result<Band, Vec<String>> {
     }
 }
 
+/// A band's JSON without any member's `engine`: the Conductor picks engines itself, so a draft or
+/// a proposal written by an AI never gets to name one.
+pub fn without_engines(mut j: J) -> J {
+    if let J::Obj(o) = &mut j {
+        if let Some((_, J::Arr(members))) = o.iter_mut().find(|(k, _)| k == "members") {
+            for m in members {
+                if let J::Obj(fields) = m {
+                    fields.retain(|(k, _)| k != "engine");
+                }
+            }
+        }
+    }
+    j
+}
+
 pub fn from_json(text: &str) -> Result<Band, Vec<String>> {
     match parse(text) {
         Ok(j) => from_j(&j),
@@ -484,14 +525,18 @@ impl Band {
             .members
             .iter()
             .map(|m| {
-                J::Obj(vec![
+                let mut o = vec![
                     ("handle".into(), s(&m.handle)),
                     ("name".into(), s(&m.name)),
                     ("instrument".into(), s(&m.instrument)),
                     ("role".into(), s(&m.role)),
                     ("model".into(), s(&m.model)),
-                    ("may".into(), s(m.may.text())),
-                ])
+                ];
+                if !m.engine.is_empty() {
+                    o.push(("engine".into(), s(&m.engine)));
+                }
+                o.push(("may".into(), s(m.may.text())));
+                J::Obj(o)
             })
             .collect();
         let flows = self
@@ -563,8 +608,13 @@ pub fn in_words(b: &Band, vault_ready: bool) -> String {
             May::Talk => "talks with you in Room",
             May::Draft => "talks with you and writes drafts",
         };
+        let on = if m.engine.is_empty() {
+            String::new()
+        } else {
+            format!(" on engine {}", m.engine)
+        };
         o.push_str(&format!(
-            "  @{}  {}, the {} ({may}; {model})\n      {}\n",
+            "  @{}  {}, the {} ({may}; {model}{on})\n      {}\n",
             m.handle,
             m.name,
             m.instrument,
@@ -605,6 +655,7 @@ mod tests {
             instrument: "Piccolo".into(),
             role: "You write short posts. Keep them warm.".into(),
             model: "qwen3:4b".into(),
+            engine: String::new(),
             may,
         };
         Band {
@@ -638,6 +689,25 @@ mod tests {
         let back = from_json(&b.to_json()).unwrap();
         assert_eq!(back, b);
         assert!(b.to_json().contains("\"every\": \"weekly mon 09:00\""));
+    }
+
+    #[test]
+    fn an_engine_is_kept_per_member_and_left_out_when_there_is_none() {
+        let mut b = sample();
+        assert!(!b.to_json().contains("\"engine\""));
+        b.members[0].engine = "192.168.0.20:11434".into();
+        let text = b.to_json();
+        assert!(text.contains("\"engine\": \"192.168.0.20:11434\""));
+        assert_eq!(from_json(&text).unwrap(), b);
+        assert!(in_words(&b, true).contains("on engine 192.168.0.20:11434"));
+        for bad in ["a b", "x;y", "a/b", &"x".repeat(65)] {
+            assert!(with(|b| b.members[0].engine = bad.into())[0].contains("the engine is an id"));
+        }
+        assert!(engine_id_ok("local") && engine_id_ok("gpu-box") && engine_id_ok("10.0.0.5:11434"));
+        let stripped = without_engines(b.to_j());
+        assert!(from_j(&stripped).unwrap().members[0].engine.is_empty());
+        let wrong = crate::conductor::engines::unknown(&b, &["local".to_string()]);
+        assert!(wrong[0].contains("@writer") && wrong[0].contains("not one of your engines"));
     }
 
     #[test]

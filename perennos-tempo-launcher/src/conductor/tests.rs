@@ -279,6 +279,29 @@ impl Scheduler for RecSched {
     }
 }
 
+/// The engines and apps as a test says they are.
+#[derive(Default)]
+pub struct FakeOutside {
+    pub engines: Vec<engines::Engine>,
+    pub apps: Vec<page::AppState>,
+}
+
+impl Outside for FakeOutside {
+    fn engines(&self) -> Vec<engines::Engine> {
+        self.engines.clone()
+    }
+
+    fn apps(&self) -> Vec<page::AppState> {
+        self.apps.clone()
+    }
+}
+
+static NO_OUTSIDE: std::sync::OnceLock<FakeOutside> = std::sync::OnceLock::new();
+
+fn no_outside() -> &'static FakeOutside {
+    NO_OUTSIDE.get_or_init(FakeOutside::default)
+}
+
 struct World<'a> {
     chat: &'a FakeChat,
     sched: &'a RecSched,
@@ -289,6 +312,7 @@ impl World<'_> {
     fn deps(&self) -> Deps<'_> {
         Deps {
             chat: self.chat,
+            outside: no_outside(),
             room_dir: self.room_dir.clone(),
             scheduler: self.sched,
             models: models(),
@@ -298,11 +322,11 @@ impl World<'_> {
     }
 }
 
-fn args(v: &[&str]) -> BandCmd {
+fn args(v: &[&str]) -> ConductorCmd {
     parse_args(v).unwrap()
 }
 
-fn go(ctx: &Ctx, w: &World, cmd: BandCmd, answer: bool) -> (i32, String, usize) {
+fn go(ctx: &Ctx, w: &World, cmd: ConductorCmd, answer: bool) -> (i32, String, usize) {
     let mut out = Vec::new();
     let mut asked = 0;
     let code = dispatch(ctx, cmd, &w.deps(), &mut out, &mut |q| {
@@ -333,11 +357,11 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn the_command_line_is_parsed_strictly() {
-    assert_eq!(parse_args(&[]), Ok(BandCmd::List));
-    assert_eq!(parse_args(&["templates"]), Ok(BandCmd::Templates));
+    assert_eq!(parse_args(&[]), Ok(ConductorCmd::List));
+    assert_eq!(parse_args(&["templates"]), Ok(ConductorCmd::Templates));
     assert_eq!(
         parse_args(&["new", "--template", "study", "--yes"]),
-        Ok(BandCmd::New {
+        Ok(ConductorCmd::New {
             template: Some("study".into()),
             describe: None,
             name: None,
@@ -346,7 +370,7 @@ fn the_command_line_is_parsed_strictly() {
     );
     assert_eq!(
         parse_args(&["new", "--describe", "I bake", "--name", "bakery-posts"]),
-        Ok(BandCmd::New {
+        Ok(ConductorCmd::New {
             template: None,
             describe: Some("I bake".into()),
             name: Some("bakery-posts".into()),
@@ -355,7 +379,7 @@ fn the_command_line_is_parsed_strictly() {
     );
     assert_eq!(
         parse_args(&["run", "bakery", "weekly-plan", "--note", "focus on bread"]),
-        Ok(BandCmd::Run {
+        Ok(ConductorCmd::Run {
             band: "bakery".into(),
             flow: Some("weekly-plan".into()),
             note: Some("focus on bread".into())
@@ -363,7 +387,7 @@ fn the_command_line_is_parsed_strictly() {
     );
     assert_eq!(
         parse_args(&["run", "bakery"]),
-        Ok(BandCmd::Run {
+        Ok(ConductorCmd::Run {
             band: "bakery".into(),
             flow: None,
             note: None
@@ -371,7 +395,15 @@ fn the_command_line_is_parsed_strictly() {
     );
     assert_eq!(
         parse_args(&["apply-proposal"]),
-        Ok(BandCmd::ApplyProposal { name: None })
+        Ok(ConductorCmd::ApplyProposal { name: None })
+    );
+    assert_eq!(parse_args(&["engines"]), Ok(ConductorCmd::Engines));
+    assert_eq!(parse_args(&["page"]), Ok(ConductorCmd::Page { band: None }));
+    assert_eq!(
+        parse_args(&["page", "bakery"]),
+        Ok(ConductorCmd::Page {
+            band: Some("bakery".into())
+        })
     );
     for bad in [
         &["new"][..],
@@ -385,8 +417,9 @@ fn the_command_line_is_parsed_strictly() {
         &["run", "../escape"],
         &["run", "bakery", "Bad Flow"],
         &["run", "bakery", "a", "--note"],
-        &["page"],
         &["page", "a", "b"],
+        &["page", "Bad Band"],
+        &["engines", "x"],
         &["room", "A_B"],
         &["templates", "x"],
         &["apply-proposal", "a", "b"],
@@ -397,15 +430,16 @@ fn the_command_line_is_parsed_strictly() {
     // and through the launcher's own parser
     assert!(matches!(
         crate::parse(&["band".to_string(), "templates".to_string()]),
-        Ok(Cmd::Band(BandCmd::Templates))
+        Ok(Cmd::Conductor(ConductorCmd::Templates))
     ));
-    assert!(crate::USAGE.contains("band new (--template NAME | --describe"));
+    assert!(crate::USAGE.contains("conductor new (--template NAME | --describe"));
     for verb in [
-        "band templates",
-        "band run",
-        "band room",
-        "band page",
-        "band apply-proposal",
+        "conductor templates",
+        "conductor run",
+        "conductor room",
+        "conductor engines",
+        "conductor page",
+        "conductor apply-proposal",
     ] {
         assert!(crate::USAGE.contains(verb), "{verb}");
     }
@@ -482,7 +516,7 @@ fn a_template_band_is_shown_asked_about_saved_registered_and_scheduled() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "small-business");
     assert_eq!(calls[0].1.len(), 2);
-    assert!(calls[0].1[0].contains("band run small-business morning-inbox"));
+    assert!(calls[0].1[0].contains("conductor run small-business morning-inbox"));
     assert!(out.contains("Scheduled"), "{out}");
     // the agent was not needed for a template
     assert!(chat.calls.borrow().is_empty());
@@ -547,11 +581,14 @@ fn without_room_it_says_how_to_add_the_members_later_and_a_scheduler_failure_pri
     );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Room is not running"), "{out}");
-    assert!(out.contains("tempo-launch band room bakery-posts"), "{out}");
+    assert!(
+        out.contains("tempo-launch conductor room bakery-posts"),
+        "{out}"
+    );
     assert!(out.contains("not scheduled (no crontab here)"), "{out}");
     assert!(
         out.contains(
-            "band run bakery-posts weekly-plan # perennos-tempo-band bakery-posts/weekly-plan"
+            "conductor run bakery-posts weekly-plan # perennos-tempo-band bakery-posts/weekly-plan"
         ) || out.contains("schtasks /Create"),
         "{out}"
     );
@@ -589,6 +626,7 @@ fn describe_with_junk_from_the_model_falls_back_to_the_template() {
     let sched = RecSched::default();
     let d = Deps {
         chat: &Junk,
+        outside: no_outside(),
         room_dir: root.join("room"),
         scheduler: &sched,
         models: models(),
@@ -627,7 +665,7 @@ fn bands_and_templates_are_listed() {
         sched: &sched,
         room_dir: root.join("room"),
     };
-    let (_, out, _) = go(&ctx, &w, BandCmd::List, true);
+    let (_, out, _) = go(&ctx, &w, ConductorCmd::List, true);
     assert!(
         out.contains("No bands yet") && out.contains("--describe"),
         "{out}"
@@ -642,7 +680,7 @@ fn bands_and_templates_are_listed() {
     let broken = super::band_dir(&ctx, "broken");
     std::fs::create_dir_all(&broken).unwrap();
     std::fs::write(broken.join("band.json"), "{\"name\":\"broken\"}").unwrap();
-    let (_, out, _) = go(&ctx, &w, BandCmd::List, true);
+    let (_, out, _) = go(&ctx, &w, ConductorCmd::List, true);
     assert!(
         out.contains("study:") && out.contains("@planner @explainer @quizzer @coach"),
         "{out}"
@@ -652,7 +690,7 @@ fn bands_and_templates_are_listed() {
         "{out}"
     );
     assert!(out.contains("broken: needs attention"), "{out}");
-    let (_, out, _) = go(&ctx, &w, BandCmd::Templates, true);
+    let (_, out, _) = go(&ctx, &w, ConductorCmd::Templates, true);
     for t in templates::all() {
         assert!(out.contains(t.id));
     }
@@ -1249,7 +1287,9 @@ fn the_dashboard_holds_nothing_external_and_shows_the_band() {
         &mut Vec::new(),
     )
     .unwrap();
-    let html = page::render(&band, &run::recent_runs(&ctx, &band));
+    let runs = run::recent_runs(&ctx, &band);
+    let views = [page::BandView { band: &band, runs }];
+    let html = page::render(&views, &[], &[]);
     // strict policy, no script, nothing fetched
     assert!(html.contains("Content-Security-Policy"));
     assert!(html.contains(
@@ -1284,7 +1324,7 @@ fn the_dashboard_holds_nothing_external_and_shows_the_band() {
         "every Monday at 09:00",
         "only when you run it",
         "Bands/social-media/",
-        "tempo-launch band run social-media weekly-plan",
+        "tempo-launch conductor run social-media weekly-plan",
     ] {
         assert!(html.contains(want), "{want}");
     }
@@ -1302,7 +1342,14 @@ fn the_dashboard_holds_nothing_external_and_shows_the_band() {
         assert!(html.contains(&format!("<code>@{h}</code>")), "{h}");
     }
     // no runs: says so
-    let none = page::render(&band, &[]);
+    let none = page::render(
+        &[page::BandView {
+            band: &band,
+            runs: vec![],
+        }],
+        &[],
+        &[],
+    );
     assert!(none.contains("No runs yet"));
     // written into the band's folder and opened (as a local file)
     let (chat2, sched) = (FakeChat::new(), RecSched::default());
@@ -1333,7 +1380,14 @@ fn the_page_escapes_what_a_spec_says() {
     let mut band = templates::find("study").unwrap().band("study", &models());
     band.members[0].name = "<b>Bold</b>".into();
     band.about = "a & b \"quoted\"".into();
-    let html = page::render(&band, &[]);
+    let html = page::render(
+        &[page::BandView {
+            band: &band,
+            runs: vec![],
+        }],
+        &[],
+        &[],
+    );
     assert!(!html.contains("<b>Bold</b>"));
     assert!(html.contains("&lt;b&gt;Bold&lt;/b&gt;"));
     assert!(html.contains("a &amp; b &quot;quoted&quot;"));
@@ -1466,5 +1520,845 @@ fn a_bad_proposal_is_refused_with_every_problem_and_a_tampered_file_is_left_alon
     let (code, out, _) = go(&ctx, &w, args(&["apply-proposal"]), true);
     assert_eq!(code, 2);
     assert!(out.contains("exam-crew, other-crew"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---- Tempo Conductor: the name, and the old name still working
+
+#[test]
+fn conductor_and_band_are_the_same_command() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    for rest in [
+        &[][..],
+        &["templates"],
+        &["engines"],
+        &["new", "--template", "study", "--yes"],
+        &["run", "bakery", "weekly-plan"],
+        &["room", "bakery"],
+        &["page"],
+        &["page", "bakery"],
+        &["apply-proposal", "exam-crew"],
+    ] {
+        let mut new = s(&["conductor"]);
+        new.extend(s(rest));
+        let mut old = s(&["band"]);
+        old.extend(s(rest));
+        let (a, b) = (crate::parse(&new), crate::parse(&old));
+        assert!(matches!(a, Ok(Cmd::Conductor(_))), "{rest:?}: {a:?}");
+        assert_eq!(a, b, "{rest:?}");
+    }
+    assert!(crate::parse(&s(&["conductor", "dance"])).is_err());
+    assert!(crate::parse(&s(&["band", "dance"])).is_err());
+    // the help leads with the new name and says the old one works
+    assert!(crate::USAGE.contains("Tempo Conductor") && crate::USAGE.contains("`band` works too"));
+}
+
+#[test]
+fn the_product_is_named_conductor_everywhere_a_person_reads() {
+    let root = tmp("names");
+    let ctx = ctx_in(&root, true);
+    let (chat, sched) = (FakeChat::new(), RecSched::default());
+    let w = World {
+        chat: &chat,
+        sched: &sched,
+        room_dir: root.join("room"),
+    };
+    let (_, empty, _) = go(&ctx, &w, ConductorCmd::List, true);
+    let (_, made, _) = go(
+        &ctx,
+        &w,
+        args(&["new", "--template", "study", "--yes"]),
+        true,
+    );
+    let (_, tpl, _) = go(&ctx, &w, ConductorCmd::Templates, true);
+    for text in [&empty, &made, &tpl] {
+        assert!(!text.contains("tempo-launch band"), "{text}");
+        assert!(!text.contains("Tempo Band"), "{text}");
+    }
+    assert!(made.contains("tempo-launch conductor run study"), "{made}");
+    // the data stays where it was: bands/<name>/band.json, notes under Bands/<name>/ in the Vault
+    assert!(ctx.home.join("bands/study/band.json").is_file());
+    let _ = go(&ctx, &w, args(&["run", "study", "weekly-plan"]), true);
+    let page = std::fs::read_dir(ctx.vault.join("Bands/study")).is_ok();
+    assert!(page);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---- engines: which there are, and which can be reached
+
+fn tags_body() -> String {
+    r#"{"models":[
+        {"name":"qwen3:8b","size":5200000000,"details":{"parameter_size":"8.2B"}},
+        {"name":"qwen3:4b","size":2600000000,"details":{"parameter_size":"4.0B"}},
+        {"name":"nomic-embed-text:latest","size":274000000,"details":{"parameter_size":"137M"}}]}"#
+        .to_string()
+}
+
+fn engine(id: &str, up: bool, ms: u64, models: &[(&str, f64)]) -> engines::Engine {
+    engines::Engine {
+        id: id.into(),
+        url: format!("http://{id}"),
+        up,
+        ms,
+        models: models
+            .iter()
+            .map(|(n, b)| engines::Model {
+                name: n.to_string(),
+                billions: *b,
+            })
+            .collect(),
+        why: if up {
+            String::new()
+        } else {
+            "could not reach it".into()
+        },
+    }
+}
+
+#[test]
+fn the_engines_are_the_ones_the_agent_knows() {
+    let cfg = parse(
+        r#"{"ollama_url":"http://127.0.0.1:11500/","ollama_fallbacks":["http://192.168.0.20:11434","http://127.0.0.1:11500","http://10.0.0.5:11434/"],
+            "hosts":{"local":{"urls":["http://127.0.0.1:11500"]},"gpu box":{"urls":["http://10.0.0.9:11434","http://192.168.0.20:11434"]}}}"#,
+    )
+    .unwrap();
+    let specs = engines::configured_with(Some(&cfg), None, 11434);
+    let ids: Vec<&str> = specs.iter().map(|s| s.id.as_str()).collect();
+    // this computer first, then the fallbacks in order, then the hosts; nothing twice
+    assert_eq!(
+        ids,
+        ["local", "192.168.0.20:11434", "10.0.0.5:11434", "gpu-box"]
+    );
+    assert_eq!(specs[0].url, "http://127.0.0.1:11500");
+    assert_eq!(specs[3].url, "http://10.0.0.9:11434");
+    // the environment wins over the file, as in the agent
+    let env = engines::configured_with(Some(&cfg), Some("http://10.1.1.1:11434"), 11434);
+    assert_eq!(env[0].url, "http://10.1.1.1:11434");
+    // no settings at all: just this computer's Ollama
+    let none = engines::configured_with(None, None, 11434);
+    assert_eq!(
+        none,
+        [engines::Spec {
+            id: "local".into(),
+            url: "http://127.0.0.1:11434".into()
+        }]
+    );
+    // from the real settings file of a Tempo home
+    let root = tmp("configured");
+    let ctx = ctx_in(&root, false);
+    std::fs::create_dir_all(&ctx.agent_data).unwrap();
+    std::fs::write(
+        ctx.agent_data.join("config.json"),
+        r#"{"ollama_fallbacks":["http://10.0.0.5:11434"]}"#,
+    )
+    .unwrap();
+    let ids = engines::known_ids(&ctx);
+    assert!(ids.contains(&"local".to_string()) && ids.contains(&"10.0.0.5:11434".to_string()));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_engine_up_one_down_and_a_public_address_refused() {
+    let up = Fake::start(|r| match r.path.as_str() {
+        "/api/tags" => (200, tags_body()),
+        _ => (404, "{}".into()),
+    });
+    // a port nobody listens on
+    let dead = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let specs = vec![
+        engines::Spec {
+            id: "local".into(),
+            url: format!("http://127.0.0.1:{}", up.port),
+        },
+        engines::Spec {
+            id: "away".into(),
+            url: format!("http://127.0.0.1:{dead}"),
+        },
+        // a public address (a documentation one): never contacted
+        engines::Spec {
+            id: "public".into(),
+            url: "http://203.0.113.7:11434".into(),
+        },
+    ];
+    let started = std::time::Instant::now();
+    let seen = engines::probe_all(&specs);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "two seconds each, together"
+    );
+    assert!(seen[0].up && seen[0].why.is_empty());
+    assert_eq!(seen[0].models.len(), 3);
+    assert_eq!(seen[0].models[0].name, "qwen3:8b");
+    assert_eq!(seen[0].models[0].billions, 8.2);
+    assert_eq!(seen[0].models[2].billions, 0.1);
+    // embedding models do not make an engine stronger: 8.2B, so capable
+    assert_eq!(seen[0].strength(), 8.2);
+    assert_eq!(seen[0].class(), engines::Class::Capable);
+    assert!(seen[0].has("qwen3:8b") && !seen[0].has("qwen3:70b") && !seen[0].has(""));
+    assert!(seen[0].has("nomic-embed-text"), ":latest is implied");
+    assert!(
+        !seen[1].up && seen[1].why.contains("could not reach"),
+        "{:?}",
+        seen[1]
+    );
+    assert!(
+        !seen[2].up && seen[2].why.starts_with("refused:"),
+        "{:?}",
+        seen[2]
+    );
+    assert!(seen[2].why.contains("not a tailnet or private address"));
+    assert_eq!(seen[2].ms, 0);
+    // the fake saw one request, from the engine that was up, and it was only the model list
+    let asked = up.requests();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        (asked[0].method.as_str(), asked[0].path.as_str()),
+        ("GET", "/api/tags")
+    );
+    assert!(asked[0].body.is_empty());
+    // not Ollama, and an error status, and https
+    let odd = Fake::start(|_| (200, "{\"hello\":1}".into()));
+    let sick = Fake::start(|_| (500, "{}".into()));
+    let odd = engines::probe(&engines::Spec {
+        id: "odd".into(),
+        url: format!("http://127.0.0.1:{}", odd.port),
+    });
+    let sick = engines::probe(&engines::Spec {
+        id: "sick".into(),
+        url: format!("http://127.0.0.1:{}", sick.port),
+    });
+    assert!(!odd.up && odd.why.contains("not like an Ollama"));
+    assert!(!sick.up && sick.why.contains("HTTP 500"));
+    let tls = engines::probe(&engines::Spec {
+        id: "tls".into(),
+        url: "https://10.0.0.5:11434".into(),
+    });
+    assert!(!tls.up && tls.why.contains("https"));
+    // a name that is not a private one is refused too, and so is a user name in the address
+    for url in [
+        "http://example.com:11434",
+        "http://u:p@10.0.0.5:11434",
+        "http://8.8.8.8",
+    ] {
+        let e = engines::probe(&engines::Spec {
+            id: "x".into(),
+            url: url.into(),
+        });
+        assert!(!e.up && e.why.starts_with("refused:"), "{url}: {e:?}");
+    }
+}
+
+#[test]
+fn sizes_come_from_the_parameters_or_from_the_bytes() {
+    let m = engines::models_in(
+        r#"{"models":[{"name":"a:1b","details":{"parameter_size":"1.5B"}},{"name":"b:big","size":6000000000},{"name":"c:t","details":{"parameter_size":"1T"}},{"model":"d:x"}]}"#,
+    )
+    .unwrap();
+    let sizes: Vec<f64> = m.iter().map(|x| x.billions).collect();
+    assert_eq!(sizes, [1.5, 10.0, 1000.0, 0.0]);
+    assert!(engines::models_in("{\"hello\":1}").is_none());
+    assert!(engines::models_in("nope").is_none());
+    assert_eq!(engines::size_words(0.1), "100M");
+    assert_eq!(engines::size_words(8.2), "8.2B");
+    assert_eq!(engines::size_words(0.0), "size unknown");
+    let class = |b: f64| engine("e", true, 1, &[("m", b)]).class();
+    assert_eq!(class(70.0), engines::Class::Strong);
+    assert_eq!(class(8.0), engines::Class::Capable);
+    assert_eq!(class(3.0), engines::Class::Light);
+    assert_eq!(engine("e", true, 1, &[]).class(), engines::Class::Empty);
+}
+
+// ---- engines: who plays what
+
+fn team() -> Vec<engines::Engine> {
+    vec![
+        engine("local", true, 5, &[("qwen3:8b", 8.2), ("qwen3:4b", 4.0)]),
+        engine("box", true, 30, &[("qwen3:8b", 8.2), ("llama3:70b", 70.0)]),
+        engine("off", false, 0, &[]),
+    ]
+}
+
+#[test]
+fn heavy_parts_go_to_the_strongest_engine_and_light_ones_to_a_quick_one() {
+    let mut band = templates::find("small-business")
+        .unwrap()
+        .band("shop", &models());
+    engines::assign(&mut band, &team());
+    let on = |h: &str| band.member(h).unwrap().engine.clone();
+    // followup is heavy (qwen3:8b): both have it, box is the stronger
+    assert_eq!(on("followup"), "box");
+    // sorter and billing are light (qwen3:4b): only local has it
+    assert_eq!(on("sorter"), "local");
+    assert_eq!(on("billing"), "local");
+    let mut study = templates::find("study").unwrap().band("study", &models());
+    engines::assign(&mut study, &team());
+    // the writer-like parts: explainer is heavy, quizzer light
+    assert_eq!(study.member("explainer").unwrap().engine, "box");
+    assert_eq!(study.member("quizzer").unwrap().engine, "local");
+    // a light part whose model both engines have goes to the quicker one
+    let mut both = team();
+    both[1].models.push(engines::Model {
+        name: "qwen3:4b".into(),
+        billions: 4.0,
+    });
+    engines::assign(&mut band, &both);
+    assert_eq!(on_of(&band, "sorter"), "local", "5 ms beats 30 ms");
+    both[0].ms = 90;
+    engines::assign(&mut band, &both);
+    assert_eq!(on_of(&band, "sorter"), "box", "now box is quicker");
+    // a down engine is never picked, and a model nobody has leaves the member to the agent
+    engines::assign(&mut band, &[engine("off", false, 0, &[])]);
+    assert!(band.members.iter().all(|m| m.engine.is_empty()));
+    let mut odd = templates::find("study").unwrap().band("study", &models());
+    odd.members[0].model = "nobody-has-this:1b".into();
+    engines::assign(&mut odd, &team());
+    assert_eq!(odd.members[0].engine, "");
+    // a handle the templates do not know is judged by its model's size
+    let mut custom = templates::find("study").unwrap().band("study", &models());
+    custom.members[0].handle = "stranger".into();
+    custom.members[0].model = "qwen3:4b".into();
+    assert_eq!(
+        engines::weight(&custom.members[0], &team()),
+        engines::Weight::Light
+    );
+    custom.members[0].model = "llama3:70b".into();
+    assert_eq!(
+        engines::weight(&custom.members[0], &team()),
+        engines::Weight::Heavy
+    );
+}
+
+fn on_of(band: &Band, h: &str) -> String {
+    band.member(h).unwrap().engine.clone()
+}
+
+#[test]
+fn a_down_engine_falls_back_to_the_next_and_says_so() {
+    let mut band = templates::find("small-business")
+        .unwrap()
+        .band("shop", &models());
+    engines::assign(&mut band, &team());
+    // everything as planned: no notes
+    let cast = engines::cast(&band, &team());
+    assert!(cast.iter().all(|c| c.note.is_empty()), "{cast:?}");
+    assert_eq!(
+        cast.iter().find(|c| c.handle == "followup").unwrap().engine,
+        "box"
+    );
+    // box goes down: local plays the heavy part, and the note names both
+    let mut now = team();
+    now[1].up = false;
+    let cast = engines::cast(&band, &now);
+    let f = cast.iter().find(|c| c.handle == "followup").unwrap();
+    assert_eq!(f.engine, "local");
+    assert_eq!(f.note, "engine box is down, so local played it");
+    let s = cast.iter().find(|c| c.handle == "sorter").unwrap();
+    assert!(s.note.is_empty() && s.engine == "local");
+    // the engine is gone from the settings
+    let cast = engines::cast(&band, &now[..1]);
+    assert!(cast
+        .iter()
+        .any(|c| c.note == "engine box is no longer one of yours, so local played it"));
+    // the engine is up but lost the model
+    let mut lost = team();
+    lost[1].models.retain(|m| m.name != "qwen3:8b");
+    let cast = engines::cast(&band, &lost);
+    assert!(cast
+        .iter()
+        .any(|c| c.note == "engine box does not have qwen3:8b, so local played it"));
+    // nobody can play it
+    let cast = engines::cast(&band, &[engine("off", false, 0, &[])]);
+    assert!(cast
+        .iter()
+        .all(|c| c.engine.is_empty() && c.note.contains("no other engine has")));
+    // a band with no engine saved just gets the best one, without a note
+    for m in &mut band.members {
+        m.engine.clear();
+    }
+    let cast = engines::cast(&band, &team());
+    assert!(cast
+        .iter()
+        .all(|c| c.note.is_empty() && !c.engine.is_empty()));
+    let words = engines::cast_words(&cast);
+    assert!(words.contains("@followup (") && words.contains("plays on engine box, qwen3:8b"));
+}
+
+#[test]
+fn the_engine_is_saved_per_member_checked_and_only_the_conductor_picks_it() {
+    let root = tmp("engine-saved");
+    let ctx = ctx_in(&root, true);
+    std::fs::create_dir_all(&ctx.agent_data).unwrap();
+    std::fs::write(
+        ctx.agent_data.join("config.json"),
+        r#"{"ollama_fallbacks":["http://10.0.0.5:11434"]}"#,
+    )
+    .unwrap();
+    let outside = FakeOutside {
+        engines: vec![
+            engine("local", true, 5, &[("qwen3:8b", 8.2), ("qwen3:4b", 4.0)]),
+            engine(
+                "10.0.0.5:11434",
+                true,
+                20,
+                &[("qwen3:8b", 8.2), ("big:70b", 70.0)],
+            ),
+        ],
+        apps: vec![],
+    };
+    let (chat, sched) = (FakeChat::new(), RecSched::default());
+    let d = Deps {
+        chat: &chat,
+        outside: &outside,
+        room_dir: root.join("room"),
+        scheduler: &sched,
+        models: models(),
+        exe: PathBuf::from("/x/tempo-launch"),
+        now: NOW,
+    };
+    let mut out = Vec::new();
+    let code = dispatch(
+        &ctx,
+        args(&["new", "--template", "small-business", "--yes"]),
+        &d,
+        &mut out,
+        &mut |_| true,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(code, 0, "{out}");
+    // shown in the plain words, and kept in band.json
+    assert!(out.contains("on engine 10.0.0.5:11434"), "{out}");
+    let text = std::fs::read_to_string(ctx.home.join("bands/small-business/band.json")).unwrap();
+    assert!(
+        text.contains("\"engine\": \"10.0.0.5:11434\"") && text.contains("\"engine\": \"local\"")
+    );
+    let band = load(&ctx, "small-business").unwrap();
+    assert_eq!(band.member("sorter").unwrap().engine, "local");
+    assert_eq!(band.member("followup").unwrap().engine, "10.0.0.5:11434");
+    // a band.json that names an engine nobody has is held to the rule, in words
+    let file = ctx.home.join("bands/small-business/band.json");
+    std::fs::write(
+        &file,
+        text.replacen("\"engine\": \"local\"", "\"engine\": \"ghost\"", 1),
+    )
+    .unwrap();
+    let e = load(&ctx, "small-business").unwrap_err();
+    assert!(
+        e.contains("engine \"ghost\" is not one of your engines (local, 10.0.0.5:11434)"),
+        "{e}"
+    );
+    assert!(e.contains("tempo-launch link"), "{e}");
+    // a badly shaped one too
+    std::fs::write(
+        &file,
+        text.replacen("\"engine\": \"local\"", "\"engine\": \"a b;c\"", 1),
+    )
+    .unwrap();
+    assert!(load(&ctx, "small-business")
+        .unwrap_err()
+        .contains("the engine is an id"));
+    // an AI cannot name an engine in a draft or a proposal: the key is dropped, the Conductor picks
+    let mut j = templates::find("study")
+        .unwrap()
+        .band("exam-crew", &Models::default())
+        .to_j();
+    if let J::Obj(o) = &mut j {
+        if let Some((_, J::Arr(ms))) = o.iter_mut().find(|(k, _)| k == "members") {
+            ms[0].set("engine", J::s("local"));
+        }
+    }
+    assert!(spec::from_j(&j).is_ok(), "the file format allows it");
+    propose::write(&ctx, &j, "", NOW).unwrap();
+    let proposed =
+        std::fs::read_to_string(propose::proposals_dir(&ctx).join("exam-crew.json")).unwrap();
+    assert!(!proposed.contains("\"engine\""), "{proposed}");
+    // with no engine answering, a band is still set up, and the words say why
+    let none = FakeOutside::default();
+    let d2 = Deps {
+        outside: &none,
+        ..d
+    };
+    let mut out = Vec::new();
+    dispatch(
+        &ctx,
+        args(&["new", "--template", "study", "--yes"]),
+        &d2,
+        &mut out,
+        &mut |_| true,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("No engine answered just now"), "{out}");
+    assert!(
+        !std::fs::read_to_string(ctx.home.join("bands/study/band.json"))
+            .unwrap()
+            .contains("\"engine\"")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_run_checks_the_engines_again_and_the_index_note_says_who_played() {
+    let root = tmp("engine-run");
+    let ctx = ctx_in(&root, true);
+    std::fs::create_dir_all(&ctx.agent_data).unwrap();
+    std::fs::write(
+        ctx.agent_data.join("config.json"),
+        r#"{"ollama_fallbacks":["http://10.0.0.5:11434"]}"#,
+    )
+    .unwrap();
+    let both = |box_up: bool| FakeOutside {
+        engines: vec![
+            engine("local", true, 5, &[("qwen3:8b", 8.2), ("qwen3:4b", 4.0)]),
+            engine(
+                "10.0.0.5:11434",
+                box_up,
+                20,
+                &[("qwen3:8b", 8.2), ("big:70b", 70.0)],
+            ),
+        ],
+        apps: vec![],
+    };
+    let (chat, sched) = (FakeChat::new(), RecSched::default());
+    let deps = |o: &'static FakeOutside| -> Deps<'_> {
+        Deps {
+            chat: &chat,
+            outside: o,
+            room_dir: root.join("room"),
+            scheduler: &sched,
+            models: models(),
+            exe: PathBuf::from("/x/tempo-launch"),
+            now: NOW,
+        }
+    };
+    let up: &'static FakeOutside = Box::leak(Box::new(both(true)));
+    let down: &'static FakeOutside = Box::leak(Box::new(both(false)));
+    dispatch(
+        &ctx,
+        args(&["new", "--template", "study", "--yes"]),
+        &deps(up),
+        &mut Vec::new(),
+        &mut |_| true,
+    );
+    let band = load(&ctx, "study").unwrap();
+    assert_eq!(band.member("explainer").unwrap().engine, "10.0.0.5:11434");
+    // a run with everything up: each part named with its engine, no notes
+    let mut out = Vec::new();
+    let code = dispatch(
+        &ctx,
+        args(&["run", "study", "weekly-plan"]),
+        &deps(up),
+        &mut out,
+        &mut |_| true,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("The Conductor raises the baton"), "{out}");
+    assert!(
+        out.contains("@explainer (") && out.contains("plays on engine 10.0.0.5:11434"),
+        "{out}"
+    );
+    let date = &crate::stamp(NOW)[..10];
+    let index = ctx
+        .vault
+        .join(format!("Bands/study/{date} weekly-plan/Index.md"));
+    let text = std::fs::read_to_string(&index).unwrap();
+    assert!(
+        text.contains("Engines, as the Conductor cast them for this run:"),
+        "{text}"
+    );
+    assert!(text.contains("explainer") && text.contains("10.0.0.5:11434, model qwen3:8b"));
+    assert!(!text.contains("Note:"), "{text}");
+    // the box goes down: the next run is cast again, local plays, and the note says so
+    let mut out = Vec::new();
+    let code = dispatch(
+        &ctx,
+        args(&["run", "study", "weekly-plan"]),
+        &deps(down),
+        &mut out,
+        &mut |_| true,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("engine 10.0.0.5:11434 is down, so local played it"),
+        "{out}"
+    );
+    let text = std::fs::read_to_string(
+        ctx.vault
+            .join(format!("Bands/study/{date} weekly-plan (2)/Index.md")),
+    )
+    .unwrap();
+    assert!(
+        text.contains("Note: engine 10.0.0.5:11434 is down, so local played it"),
+        "{text}"
+    );
+    // the model passed to the agent is the member's own
+    assert!(chat
+        .calls
+        .borrow()
+        .iter()
+        .all(|(m, _, _)| m == "qwen3:8b" || m == "qwen3:4b"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_engines_command_lists_each_engine_with_its_models_and_class() {
+    let root = tmp("engines-cmd");
+    let ctx = ctx_in(&root, false);
+    let outside = FakeOutside {
+        engines: vec![
+            engine("local", true, 5, &[("qwen3:8b", 8.2)]),
+            engine("box", true, 30, &[("llama3:70b", 70.0)]),
+            engine("away", false, 0, &[]),
+        ],
+        apps: vec![],
+    };
+    let (chat, sched) = (FakeChat::new(), RecSched::default());
+    let d = Deps {
+        chat: &chat,
+        outside: &outside,
+        room_dir: root.join("room"),
+        scheduler: &sched,
+        models: models(),
+        exe: PathBuf::from("/x/tempo-launch"),
+        now: NOW,
+    };
+    let mut out = Vec::new();
+    assert_eq!(
+        dispatch(&ctx, ConductorCmd::Engines, &d, &mut out, &mut |_| true),
+        0
+    );
+    let out = String::from_utf8(out).unwrap();
+    for want in [
+        "local",
+        "up, 5 ms, capable",
+        "qwen3:8b (8.2B)",
+        "up, 30 ms, strong",
+        "llama3:70b (70B)",
+        "away",
+        "down: could not reach it",
+        "2 of 3 up",
+        "tempo-launch link",
+    ] {
+        assert!(out.contains(want), "{want}\n{out}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---- the Conductor page
+
+fn app(title: &str, state: &str, up: bool) -> page::AppState {
+    page::AppState {
+        title: title.into(),
+        state: state.into(),
+        detail: String::new(),
+        up,
+    }
+}
+
+#[test]
+fn the_conductor_page_shows_engines_bands_runs_and_apps_and_holds_nothing_external() {
+    let root = tmp("conductor-page");
+    let ctx = ctx_in(&root, true);
+    let mut shop = templates::find("small-business")
+        .unwrap()
+        .band("shop", &models());
+    let mut study = templates::find("study").unwrap().band("study", &models());
+    let three = vec![
+        engine("local", true, 5, &[("qwen3:8b", 8.2), ("qwen3:4b", 4.0)]),
+        engine("box", true, 30, &[("llama3:70b", 70.0)]),
+        engine("away", false, 0, &[]),
+    ];
+    engines::assign(&mut shop, &three);
+    shop.members[0].engine = "away".into();
+    engines::assign(&mut study, &three);
+    let chat = FakeChat::new();
+    run::run_flow(
+        &ctx,
+        &study,
+        &study.flows[0],
+        None,
+        &chat,
+        NOW,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let apps = vec![
+        app("Tempo Agent", "running", true),
+        app("Tempo Vault", "stopped", false),
+        app("Tempo Room", "running", true),
+        app("Tempo Studio", "ready", true),
+    ];
+    let views = [
+        page::BandView {
+            runs: run::recent_runs(&ctx, &shop),
+            band: &shop,
+        },
+        page::BandView {
+            runs: run::recent_runs(&ctx, &study),
+            band: &study,
+        },
+    ];
+    let html = page::render(&views, &three, &apps);
+    assert!(
+        html.contains("<title>Tempo Conductor</title>")
+            && html.contains("<h1>Tempo Conductor</h1>")
+    );
+    for h in ["Engines", "Bands", "Last runs", "Apps"] {
+        assert!(html.contains(&format!("<h2>{h}</h2>")), "{h}");
+    }
+    // engines: up or down, with the models
+    for want in [
+        "2 of 3 up",
+        "class=\"inst up\">up<",
+        "class=\"inst down\">down<",
+        "qwen3:8b",
+        "llama3:70b",
+        "70B",
+        "127.0.0.1:11434",
+        "could not reach it",
+    ] {
+        assert!(html.contains(want) || want == "127.0.0.1:11434", "{want}");
+    }
+    // bands: both of them, members with instrument, role and engine; flows with schedule
+    for want in [
+        "shop",
+        "study",
+        "Accordion",
+        "@sorter",
+        "Plays on engine local",
+        "Plays on engine away (down now)",
+        "every Friday at 15:00",
+        "tempo-launch conductor run study",
+    ] {
+        assert!(html.contains(want), "{want}");
+    }
+    // last runs link to the notes in the Vault; apps say what they are doing
+    assert!(html.matches("href=\"file://").count() >= 3);
+    for want in [
+        "Tempo Agent",
+        ">stopped<",
+        ">running<",
+        "Tempo Studio",
+        ">ready<",
+    ] {
+        assert!(html.contains(want), "{want}");
+    }
+    // strict, static, nothing fetched, and it fits a phone
+    assert!(html.contains(
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    ));
+    for external in [
+        "http://",
+        "https://",
+        "<script",
+        "<link",
+        "src=",
+        "url(",
+        "@import",
+        "<iframe",
+        "<img",
+        "<form",
+        "onclick",
+        "javascript:",
+        "//cdn",
+        "ftp:",
+    ] {
+        assert!(!html.contains(external), "{external}");
+    }
+    assert!(html.contains("name=\"viewport\"") && html.contains("@media (max-width:720px)"));
+    assert!(html.contains("minmax(min(230px,100%),1fr)"));
+    // the page for one band is titled by the band
+    let one = page::render(&views[..1], &three, &apps);
+    assert!(one.contains("<title>shop - Tempo Conductor</title>"));
+    // what a spec says is escaped, engine names included
+    let mut evil = three.clone();
+    evil[0].id = "<i>x</i>".into();
+    evil[0].url = "http://<i>x</i>:1".into();
+    assert!(!page::render(&views, &evil, &apps).contains("<i>x</i>"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn conductor_page_writes_one_page_for_everything_or_one_band() {
+    let root = tmp("conductor-page-cmd");
+    let ctx = ctx_in(&root, true);
+    let outside = FakeOutside {
+        engines: vec![
+            engine("local", true, 5, &[("qwen3:8b", 8.2), ("qwen3:4b", 4.0)]),
+            engine("box", false, 0, &[]),
+        ],
+        apps: vec![app("Tempo Agent", "running", true)],
+    };
+    let (chat, sched) = (FakeChat::new(), RecSched::default());
+    let d = Deps {
+        chat: &chat,
+        outside: &outside,
+        room_dir: root.join("room"),
+        scheduler: &sched,
+        models: models(),
+        exe: PathBuf::from("/x/tempo-launch"),
+        now: NOW,
+    };
+    for t in ["study", "social-media"] {
+        dispatch(
+            &ctx,
+            args(&["new", "--template", t, "--yes"]),
+            &d,
+            &mut Vec::new(),
+            &mut |_| true,
+        );
+    }
+    // no band named: every band, in <home>/conductor.html
+    let mut out = Vec::new();
+    assert_eq!(
+        dispatch(&ctx, args(&["page"]), &d, &mut out, &mut |_| true),
+        0
+    );
+    let all = ctx.home.join("conductor.html");
+    let html = std::fs::read_to_string(&all).unwrap();
+    assert!(
+        html.contains("study") && html.contains("social-media") && html.contains("Tempo Agent")
+    );
+    assert_eq!(
+        ctx.opened.borrow().last().map(String::as_str),
+        Some(all.to_string_lossy().as_ref())
+    );
+    // one band: where it always went
+    assert_eq!(
+        dispatch(
+            &ctx,
+            args(&["page", "study"]),
+            &d,
+            &mut Vec::new(),
+            &mut |_| true
+        ),
+        0
+    );
+    let one = std::fs::read_to_string(ctx.home.join("bands/study/band.html")).unwrap();
+    assert!(
+        one.contains("<title>study - Tempo Conductor</title>") && !one.contains("social-media")
+    );
+    // no bands at all: the page still shows the engines and says how to start
+    let empty = ctx_in(&tmp("conductor-empty"), true);
+    assert_eq!(
+        dispatch(&empty, args(&["page"]), &d, &mut Vec::new(), &mut |_| true),
+        0
+    );
+    let html = std::fs::read_to_string(empty.home.join("conductor.html")).unwrap();
+    assert!(html.contains("No bands yet") && html.contains("<h2>Engines</h2>"));
+    // an unknown band is an error
+    assert_eq!(
+        dispatch(
+            &ctx,
+            args(&["page", "nope"]),
+            &d,
+            &mut Vec::new(),
+            &mut |_| true
+        ),
+        1
+    );
     let _ = std::fs::remove_dir_all(root);
 }

@@ -1,4 +1,4 @@
-//! `band new --describe "..."`: the local model fits the closest template to a sentence about the
+//! `conductor new --describe "..."`: the local model fits the closest template to a sentence about the
 //! owner's work. Whatever it sends back is checked like any other spec, and when it is not usable
 //! the template is used as it is. The model never picks models, folders or tools: the launcher does.
 
@@ -60,6 +60,7 @@ fn normalised(mut j: J, name: &str) -> J {
         }
     };
     strip(&mut j, "members", "model");
+    strip(&mut j, "members", "engine");
     strip(&mut j, "flows", "notes_to");
     if let J::Obj(o) = &mut j {
         o.retain(|(k, _)| k != "version");
@@ -135,7 +136,7 @@ pub fn from_description(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::band::spec::problems;
+    use crate::conductor::spec::problems;
     use std::cell::RefCell;
 
     struct Canned {
@@ -172,7 +173,7 @@ mod tests {
 
     #[test]
     fn junk_from_the_model_falls_back_to_the_template() {
-        let template = crate::band::templates::find("social-media")
+        let template = crate::conductor::templates::find("social-media")
             .unwrap()
             .band("social-media", &models());
         for junk in [
@@ -196,7 +197,7 @@ mod tests {
     #[test]
     fn a_draft_with_a_bad_spec_is_refused_and_the_template_used() {
         // a member with a tool-sounding extra key, a flow pointing at nobody, a role too long
-        let mut b = crate::band::templates::find("social-media")
+        let mut b = crate::conductor::templates::find("social-media")
             .unwrap()
             .band("x", &Models::default())
             .to_j();
@@ -225,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_good_draft_is_used_with_the_launchers_own_models_and_folder() {
-        let base = crate::band::templates::find("social-media").unwrap();
+        let base = crate::conductor::templates::find("social-media").unwrap();
         let mut j = base.band("whatever", &models()).to_j();
         // the model renames a member and changes its role, wraps the JSON in chatter, and tries
         // to choose a model and a folder

@@ -1,15 +1,20 @@
-//! Tempo Band: a team of AI members for the owner's own workflow.
+//! Tempo Conductor: ties the owner to their workflows and to their engines.
 //!
-//! `tempo-launch band new` sets a band up (from a template, or drafted by the local model from a
-//! sentence about the work), puts each member in Room as a teammate to @mention, and schedules the
-//! flows. `band run` walks a flow through the agent, one member after the next, and files every
-//! step as a linked note in the Vault. `band page` writes a static dashboard.
+//! The Conductor sets up bands (teams of AI members), runs them, and picks which engine plays
+//! each part. `tempo-launch conductor new` sets a band up (from a template, or drafted by the
+//! local model from a sentence about the work), puts each member in Room as a teammate to
+//! @mention, schedules the flows and gives every member an engine. `conductor run` raises the
+//! baton: it walks a flow through the agent, one member after the next, and files every step as
+//! a linked note in the Vault. `conductor engines` shows every engine the owner has, and
+//! `conductor page` writes one static page with the engines, the bands, the last runs and the
+//! apps. `tempo-launch band ...` still works and means the same.
 //!
 //! The one rule: no member ever posts, sends, buys or deletes anything outside this computer.
 //! Members chat as guests (no tools); the launcher writes their notes, and only under the band's
 //! own notes folder.
 
 pub mod draft;
+pub mod engines;
 pub mod net;
 pub mod page;
 pub mod propose;
@@ -85,7 +90,7 @@ pub fn with_guard(role: &str) -> String {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum BandCmd {
+pub enum ConductorCmd {
     List,
     Templates,
     New {
@@ -100,8 +105,10 @@ pub enum BandCmd {
         note: Option<String>,
     },
     Page {
-        band: String,
+        /// One band, or every band.
+        band: Option<String>,
     },
+    Engines,
     Room {
         band: String,
     },
@@ -114,18 +121,19 @@ fn band_arg(v: Option<&&str>, what: &str) -> Result<String, String> {
     match v {
         Some(b) if slug_ok(b, 40) => Ok(b.to_string()),
         Some(b) => Err(format!(
-            "band {what}: \"{b}\" is not a band name (lowercase letters, digits and hyphens)"
+            "conductor {what}: \"{b}\" is not a band name (lowercase letters, digits and hyphens)"
         )),
-        None => Err(format!("band {what} needs the band's name")),
+        None => Err(format!("conductor {what} needs the band's name")),
     }
 }
 
-pub fn parse_args(rest: &[&str]) -> Result<BandCmd, String> {
+pub fn parse_args(rest: &[&str]) -> Result<ConductorCmd, String> {
     let Some((verb, args)) = rest.split_first() else {
-        return Ok(BandCmd::List);
+        return Ok(ConductorCmd::List);
     };
     match *verb {
-        "templates" if args.is_empty() => Ok(BandCmd::Templates),
+        "templates" if args.is_empty() => Ok(ConductorCmd::Templates),
+        "engines" if args.is_empty() => Ok(ConductorCmd::Engines),
         "new" => {
             let (mut template, mut describe, mut name, mut yes) = (None, None, None, false);
             let mut i = 0;
@@ -134,7 +142,7 @@ pub fn parse_args(rest: &[&str]) -> Result<BandCmd, String> {
                 args.get(*i)
                     .filter(|v| !v.starts_with("--") || flag == "--describe")
                     .map(|v| v.to_string())
-                    .ok_or_else(|| format!("band new: {flag} needs a value"))
+                    .ok_or_else(|| format!("conductor new: {flag} needs a value"))
             };
             while i < args.len() {
                 match args[i] {
@@ -149,39 +157,39 @@ pub fn parse_args(rest: &[&str]) -> Result<BandCmd, String> {
                         describe = Some(a["--describe=".len()..].to_string())
                     }
                     a if a.starts_with("--name=") => name = Some(a["--name=".len()..].to_string()),
-                    other => return Err(format!("band new: unknown argument {other}")),
+                    other => return Err(format!("conductor new: unknown argument {other}")),
                 }
                 i += 1;
             }
             match (&template, &describe) {
                 (None, None) => {
                     return Err(
-                        "band new needs --template NAME or --describe \"what you do\"".into(),
+                        "conductor new needs --template NAME or --describe \"what you do\"".into(),
                     )
                 }
                 (Some(_), Some(_)) => {
-                    return Err("band new takes --template or --describe, not both".into())
+                    return Err("conductor new takes --template or --describe, not both".into())
                 }
                 (Some(t), None) if templates::find(t).is_none() => {
                     let ids: Vec<&str> = templates::all().iter().map(|t| t.id).collect();
                     return Err(format!(
-                        "band new: no template called {t}; the templates are {}",
+                        "conductor new: no template called {t}; the templates are {}",
                         ids.join(", ")
                     ));
                 }
                 (None, Some(d)) if d.trim().is_empty() => {
-                    return Err("band new: --describe needs a sentence about your work".into())
+                    return Err("conductor new: --describe needs a sentence about your work".into())
                 }
                 _ => {}
             }
             if let Some(n) = &name {
                 if !slug_ok(n, 40) {
                     return Err(format!(
-                        "band new: \"{n}\" is not a band name (lowercase letters, digits and hyphens)"
+                        "conductor new: \"{n}\" is not a band name (lowercase letters, digits and hyphens)"
                     ));
                 }
             }
-            Ok(BandCmd::New {
+            Ok(ConductorCmd::New {
                 template,
                 describe,
                 name,
@@ -198,39 +206,44 @@ pub fn parse_args(rest: &[&str]) -> Result<BandCmd, String> {
                         i += 1;
                         note = Some(
                             args.get(i)
-                                .ok_or("band run: --note needs some text")?
+                                .ok_or("conductor run: --note needs some text")?
                                 .to_string(),
                         );
                     }
                     f if !f.starts_with("--") && flow.is_none() => flow = Some(f.to_string()),
-                    other => return Err(format!("band run: unknown argument {other}")),
+                    other => return Err(format!("conductor run: unknown argument {other}")),
                 }
                 i += 1;
             }
             if let Some(f) = &flow {
                 if !slug_ok(f, 40) {
-                    return Err(format!("band run: \"{f}\" is not a flow name"));
+                    return Err(format!("conductor run: \"{f}\" is not a flow name"));
                 }
             }
-            Ok(BandCmd::Run { band, flow, note })
+            Ok(ConductorCmd::Run { band, flow, note })
         }
-        "page" if args.len() == 1 => Ok(BandCmd::Page {
-            band: band_arg(args.first(), "page")?,
+        "page" if args.len() <= 1 => Ok(ConductorCmd::Page {
+            band: args
+                .first()
+                .map(|b| band_arg(Some(b), "page"))
+                .transpose()?,
         }),
-        "room" if args.len() == 1 => Ok(BandCmd::Room {
+        "room" if args.len() == 1 => Ok(ConductorCmd::Room {
             band: band_arg(args.first(), "room")?,
         }),
-        "apply-proposal" if args.len() <= 1 => Ok(BandCmd::ApplyProposal {
+        "apply-proposal" if args.len() <= 1 => Ok(ConductorCmd::ApplyProposal {
             name: args
                 .first()
                 .map(|n| band_arg(Some(n), "apply-proposal"))
                 .transpose()?,
         }),
-        "page" | "room" => Err(format!("band {verb} takes one band name")),
-        "templates" => Err("band templates takes no arguments".into()),
-        "apply-proposal" => Err("band apply-proposal takes at most one name".into()),
+        "room" => Err("conductor room takes one band name".into()),
+        "page" => Err("conductor page takes at most one band name".into()),
+        "templates" => Err("conductor templates takes no arguments".into()),
+        "engines" => Err("conductor engines takes no arguments".into()),
+        "apply-proposal" => Err("conductor apply-proposal takes at most one name".into()),
         other => Err(format!(
-            "band: unknown command {other} (try: templates, new, run, room, page, apply-proposal)"
+            "band: unknown command {other} (try: templates, new, run, engines, room, page, apply-proposal)"
         )),
     }
 }
@@ -253,7 +266,7 @@ pub fn load(ctx: &Ctx, name: &str) -> Result<Band, String> {
     let file = band_dir(ctx, name).join("band.json");
     let text = std::fs::read_to_string(&file).map_err(|_| {
         format!(
-            "no band called {name}. `tempo-launch band` lists yours; `tempo-launch band new --template social-media` makes one"
+            "no band called {name}. `tempo-launch conductor` lists yours; `tempo-launch conductor new --template social-media` sets one up"
         )
     })?;
     let band = spec::from_json(&text)
@@ -263,6 +276,14 @@ pub fn load(ctx: &Ctx, name: &str) -> Result<Band, String> {
             "{} says the band is called {}, but its folder is {name}",
             file.display(),
             band.name
+        ));
+    }
+    let wrong = engines::unknown(&band, &engines::known_ids(ctx));
+    if !wrong.is_empty() {
+        return Err(format!(
+            "{} has problems:\n  - {}",
+            file.display(),
+            wrong.join("\n  - ")
         ));
     }
     Ok(band)
@@ -308,10 +329,18 @@ fn saved(ctx: &Ctx) -> Vec<(String, Result<Band, String>)> {
 
 // ---- the commands
 
+/// What the Conductor looks at: the engines (each asked once, two seconds at most) and the apps.
+pub trait Outside {
+    fn engines(&self) -> Vec<engines::Engine>;
+    fn apps(&self) -> Vec<page::AppState>;
+}
+
 /// Everything the commands need from outside, so tests can stand in for the agent, Room and the
 /// scheduler.
 pub struct Deps<'a> {
     pub chat: &'a dyn Chat,
+    /// The engines and the apps, as they are right now.
+    pub outside: &'a dyn Outside,
     pub room_dir: PathBuf,
     pub scheduler: &'a dyn schedule::Scheduler,
     pub models: Models,
@@ -324,14 +353,34 @@ fn list(ctx: &Ctx, out: &mut dyn Write) -> i32 {
     if all.is_empty() {
         let _ = writeln!(
             out,
-            "No bands yet. A band is a small team of AI members for your own workflow.\n\nTry one:\n  tempo-launch band templates\n  tempo-launch band new --template social-media\n  tempo-launch band new --describe \"I run a bakery's Instagram and want posts planned weekly\""
+            "No bands yet. The Conductor sets up a band for you: a small team of AI members for your own workflow, each playing on the engine that suits the part.\n\nTry one:\n  tempo-launch conductor templates\n  tempo-launch conductor new --template social-media\n  tempo-launch conductor new --describe \"I run a bakery's Instagram and want posts planned weekly\""
         );
         return 0;
     }
+    let _ = writeln!(
+        out,
+        "{} {} up to the Conductor's baton.\n",
+        all.len(),
+        if all.len() == 1 {
+            "band is"
+        } else {
+            "bands are"
+        }
+    );
     for (name, band) in all {
         match band {
             Ok(b) => {
-                let who: Vec<String> = b.members.iter().map(|m| format!("@{}", m.handle)).collect();
+                let who: Vec<String> = b
+                    .members
+                    .iter()
+                    .map(|m| {
+                        if m.engine.is_empty() {
+                            format!("@{}", m.handle)
+                        } else {
+                            format!("@{} ({})", m.handle, m.engine)
+                        }
+                    })
+                    .collect();
                 let _ = writeln!(out, "{name}: {}\n  members: {}", b.about, who.join(" "));
                 for f in &b.flows {
                     let _ = writeln!(out, "  flow {}: {}", f.name, f.every.words());
@@ -360,7 +409,10 @@ fn templates_list(out: &mut dyn Write) -> i32 {
             who.join(", ")
         );
     }
-    let _ = writeln!(out, "\nSet one up: tempo-launch band new --template NAME");
+    let _ = writeln!(
+        out,
+        "\nSet one up: tempo-launch conductor new --template NAME"
+    );
     0
 }
 
@@ -389,7 +441,17 @@ pub fn set_up(
     ask: &mut dyn FnMut(&str) -> bool,
 ) -> Done {
     let exists = band_dir(ctx, &band.name).join("band.json").is_file();
+    let seen = d.outside.engines();
+    let mut picked = band.clone();
+    engines::assign(&mut picked, &seen);
+    let band = &picked;
     let _ = writeln!(out, "\n{}", in_words(band, ctx.vault.is_dir()));
+    if !seen.iter().any(|e| e.up) {
+        let _ = writeln!(
+            out,
+            "No engine answered just now, so no member has an engine of its own yet: the agent uses its usual order. `tempo-launch conductor engines` shows what the Conductor sees.\n"
+        );
+    }
     if exists {
         let _ = writeln!(
             out,
@@ -417,14 +479,14 @@ pub fn set_up(
         .map_or(String::new(), |f| format!(" {}", f.name));
     let _ = writeln!(
         out,
-        "\nThe band is ready. Try it:\n  tempo-launch band run {}{first}\n  tempo-launch band page {}",
+        "\nThe band is tuned and ready. Raise the baton:\n  tempo-launch conductor run {}{first}\n  tempo-launch conductor page {}",
         band.name, band.name
     );
     Done::Applied
 }
 
 fn put_in_room(band: &Band, d: &Deps, out: &mut dyn Write) {
-    let later = format!("tempo-launch band room {}", band.name);
+    let later = format!("tempo-launch conductor room {}", band.name);
     let Some(link) = net::find_room(&d.room_dir) else {
         let _ = writeln!(
             out,
@@ -490,12 +552,12 @@ fn schedule_flows(band: &Band, d: &Deps, out: &mut dyn Write) {
 
 fn new_band(
     ctx: &Ctx,
-    cmd: BandCmd,
+    cmd: ConductorCmd,
     d: &Deps,
     out: &mut dyn Write,
     ask: &mut dyn FnMut(&str) -> bool,
 ) -> i32 {
-    let BandCmd::New {
+    let ConductorCmd::New {
         template,
         describe,
         name,
@@ -541,8 +603,8 @@ fn room_cmd(ctx: &Ctx, name: &str, d: &Deps, out: &mut dyn Write) -> i32 {
     0
 }
 
-fn run_flow_cmd(ctx: &Ctx, cmd: BandCmd, d: &Deps, out: &mut dyn Write) -> i32 {
-    let BandCmd::Run { band, flow, note } = cmd else {
+fn run_flow_cmd(ctx: &Ctx, cmd: ConductorCmd, d: &Deps, out: &mut dyn Write) -> i32 {
+    let ConductorCmd::Run { band, flow, note } = cmd else {
         return 2;
     };
     let band = match load(ctx, &band) {
@@ -574,7 +636,8 @@ fn run_flow_cmd(ctx: &Ctx, cmd: BandCmd, d: &Deps, out: &mut dyn Write) -> i32 {
         );
         return 2;
     };
-    match run::run_flow(ctx, &band, flow, note.as_deref(), d.chat, d.now, out) {
+    let cast = engines::cast(&band, &d.outside.engines());
+    match run::run_flow_cast(ctx, &band, flow, note.as_deref(), d.chat, d.now, &cast, out) {
         Ok(_) => 0,
         Err(e) => {
             eprintln!("tempo-launch: {e}");
@@ -583,15 +646,20 @@ fn run_flow_cmd(ctx: &Ctx, cmd: BandCmd, d: &Deps, out: &mut dyn Write) -> i32 {
     }
 }
 
-fn page_cmd(ctx: &Ctx, name: &str, out: &mut dyn Write) -> i32 {
-    let band = match load(ctx, name) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("tempo-launch: {e}");
-            return 1;
-        }
+fn page_cmd(ctx: &Ctx, name: Option<&str>, d: &Deps, out: &mut dyn Write) -> i32 {
+    let bands: Vec<Band> = match name {
+        Some(n) => match load(ctx, n) {
+            Ok(b) => vec![b],
+            Err(e) => {
+                eprintln!("tempo-launch: {e}");
+                return 1;
+            }
+        },
+        None => saved(ctx).into_iter().filter_map(|(_, b)| b.ok()).collect(),
     };
-    match page::write(ctx, &band) {
+    let engines = d.outside.engines();
+    let apps = d.outside.apps();
+    match page::write(ctx, name, &bands, &engines, &apps) {
         Ok(file) => {
             let _ = writeln!(out, "Wrote {}", file.display());
             match ctx.open(&file.to_string_lossy()) {
@@ -609,22 +677,39 @@ fn page_cmd(ctx: &Ctx, name: &str, out: &mut dyn Write) -> i32 {
     }
 }
 
-/// Run one `band` command with its outside world given.
+fn engines_cmd(d: &Deps, out: &mut dyn Write) -> i32 {
+    let seen = d.outside.engines();
+    let _ = writeln!(
+        out,
+        "The Conductor asked each of your engines what it has (two seconds each):\n"
+    );
+    let _ = write!(out, "{}", engines::describe(&seen));
+    let up = seen.iter().filter(|e| e.up).count();
+    let _ = writeln!(
+        out,
+        "\n{up} of {} up. Heavy parts (writing, planning, building) go to the strongest engine that has their model, light ones (sorting, scheduling) to the quickest. Add an engine with `tempo-launch link http://192.168.0.20:11434`.",
+        seen.len()
+    );
+    0
+}
+
+/// Run one `conductor` command with its outside world given.
 pub fn dispatch(
     ctx: &Ctx,
-    cmd: BandCmd,
+    cmd: ConductorCmd,
     d: &Deps,
     out: &mut dyn Write,
     ask: &mut dyn FnMut(&str) -> bool,
 ) -> i32 {
     match cmd {
-        BandCmd::List => list(ctx, out),
-        BandCmd::Templates => templates_list(out),
-        BandCmd::New { .. } => new_band(ctx, cmd, d, out, ask),
-        BandCmd::Run { .. } => run_flow_cmd(ctx, cmd, d, out),
-        BandCmd::Page { band } => page_cmd(ctx, &band, out),
-        BandCmd::Room { band } => room_cmd(ctx, &band, d, out),
-        BandCmd::ApplyProposal { name } => {
+        ConductorCmd::List => list(ctx, out),
+        ConductorCmd::Templates => templates_list(out),
+        ConductorCmd::New { .. } => new_band(ctx, cmd, d, out, ask),
+        ConductorCmd::Run { .. } => run_flow_cmd(ctx, cmd, d, out),
+        ConductorCmd::Page { band } => page_cmd(ctx, band.as_deref(), d, out),
+        ConductorCmd::Engines => engines_cmd(d, out),
+        ConductorCmd::Room { band } => room_cmd(ctx, &band, d, out),
+        ConductorCmd::ApplyProposal { name } => {
             propose::apply_proposal(ctx, name.as_deref(), d, out, ask)
         }
     }
@@ -669,10 +754,28 @@ fn real_models(ctx: &Ctx, now: u64) -> Models {
     }
 }
 
-/// `tempo-launch band ...`.
-pub fn run(ctx: &Ctx, cmd: BandCmd) -> i32 {
+/// The engines (looked at in the order the agent knows them) and the apps, for real.
+struct RealOutside<'a> {
+    ctx: &'a Ctx,
+}
+
+impl Outside for RealOutside<'_> {
+    fn engines(&self) -> Vec<engines::Engine> {
+        engines::probe_all(&engines::configured(self.ctx))
+    }
+
+    fn apps(&self) -> Vec<page::AppState> {
+        page::real_apps(self.ctx)
+    }
+}
+
+/// `tempo-launch conductor ...` (and `band ...`).
+pub fn run(ctx: &Ctx, cmd: ConductorCmd) -> i32 {
     let now = crate::unix_now();
-    let wants_models = matches!(cmd, BandCmd::New { .. } | BandCmd::ApplyProposal { .. });
+    let wants_models = matches!(
+        cmd,
+        ConductorCmd::New { .. } | ConductorCmd::ApplyProposal { .. }
+    );
     let models = if wants_models {
         real_models(ctx, now)
     } else {
@@ -680,8 +783,10 @@ pub fn run(ctx: &Ctx, cmd: BandCmd) -> i32 {
     };
     let chat = RealChat { ctx };
     let sched = schedule::RealScheduler;
+    let outside = RealOutside { ctx };
     let deps = Deps {
         chat: &chat,
+        outside: &outside,
         room_dir: net::room_dir(ctx),
         scheduler: &sched,
         models,

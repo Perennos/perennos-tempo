@@ -1,4 +1,4 @@
-//! `band run`: walk a flow's members in order. Each gets the flow's goal and the step before it,
+//! `conductor run`: the Conductor raises the baton and walks a flow's members in order. Each gets the flow's goal and the step before it,
 //! answers in a guest conversation (no tools), and the launcher files the answer as a note:
 //!
 //! `<notes folder>/<date> <flow>/<n> <member>.md`, with front matter and `[[links]]` to the step
@@ -8,6 +8,7 @@
 //! is written outside that one folder. Material the owner wants a flow to read goes in an `Inbox`
 //! folder next to the runs; only the first step sees it.
 
+use super::engines::Cast;
 use super::spec::{Band, Flow};
 use super::{with_guard, Chat};
 use crate::{civil, redact, write_atomic, Ctx};
@@ -161,6 +162,7 @@ fn link(base: &str, folder: &str, file: &str, label: &str) -> String {
     format!("[[{base}{folder}/{file}|{label}]]")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_note(
     band: &Band,
     flow: &Flow,
@@ -169,6 +171,7 @@ fn index_note(
     date: &str,
     done: &[Step],
     stopped: Option<&str>,
+    cast: &[Cast],
 ) -> String {
     let mut t = format!(
         "---\nband: {}\nflow: {}\nkind: flow-index\ndate: {date}\ntags: [tempo-band]\n---\n# {}, {date}\n\nGoal: {}\n\n",
@@ -191,6 +194,30 @@ fn index_note(
     }
     if let Some(why) = stopped {
         t.push_str(&format!("\nThe flow stopped early: {why}\n"));
+    }
+    let used: Vec<&Cast> = flow
+        .steps
+        .iter()
+        .filter_map(|h| cast.iter().find(|c| &c.handle == h))
+        .collect();
+    if !used.is_empty() {
+        t.push_str("\nEngines, as the Conductor cast them for this run:\n");
+        for c in used {
+            let on = if c.engine.is_empty() {
+                "the agent's own order".to_string()
+            } else {
+                c.engine.clone()
+            };
+            t.push_str(&format!(
+                "- {} ({}): {on}, model {}",
+                c.handle, c.name, c.model
+            ));
+            if !c.note.is_empty() {
+                t.push_str(&format!(". Note: {}", c.note));
+            }
+            t.push('\n');
+        }
+        t.push_str("The agent decides which engine answers: it tries the first one it knows and moves on only when one cannot be reached.\n");
     }
     t.push_str("\nDrafts by AI members on this computer. Nothing here was posted or sent.\n");
     t
@@ -265,7 +292,7 @@ fn make_run_folder(root: &Path, date: &str, flow: &str) -> Result<(PathBuf, Stri
     Err("a hundred runs of this flow today already; look in the notes folder".into())
 }
 
-/// Run `flow` of `band`: every step through `chat`, every answer filed as a note.
+/// Run `flow` of `band` with every member on the agent's own order.
 pub fn run_flow(
     ctx: &Ctx,
     band: &Band,
@@ -275,13 +302,29 @@ pub fn run_flow(
     now: u64,
     out: &mut dyn Write,
 ) -> Result<Outcome, String> {
+    run_flow_cast(ctx, band, flow, note, chat, now, &[], out)
+}
+
+/// Run `flow` of `band`: every step through `chat`, every answer filed as a note. `cast` says
+/// which engine and model each member plays on (see `engines::cast`); the index note keeps it.
+#[allow(clippy::too_many_arguments)]
+pub fn run_flow_cast(
+    ctx: &Ctx,
+    band: &Band,
+    flow: &Flow,
+    note: Option<&str>,
+    chat: &dyn Chat,
+    now: u64,
+    cast: &[Cast],
+    out: &mut dyn Write,
+) -> Result<Outcome, String> {
     let at = places(ctx, band, flow);
     let date = date_of(now);
     let (dir, folder) = make_run_folder(&at.root, &date, &flow.name)?;
     let inbox = read_inbox(&at.inbox);
     let _ = writeln!(
         out,
-        "Running {} / {} ({} steps). Notes go to {}",
+        "The Conductor raises the baton: {} / {} ({} steps). Notes go to {}",
         band.name,
         flow.name,
         flow.steps.len(),
@@ -290,6 +333,12 @@ pub fn run_flow(
     if !inbox.is_empty() {
         let _ = writeln!(out, "  Reading what is in {}", at.inbox.display());
     }
+    let cues: Vec<Cast> = flow
+        .steps
+        .iter()
+        .filter_map(|h| cast.iter().find(|c| &c.handle == h).cloned())
+        .collect();
+    let _ = write!(out, "{}", super::engines::cast_words(&cues));
     let mut done: Vec<Step> = Vec::new();
     let mut notes = Vec::new();
     let mut last_text = String::new();
@@ -307,14 +356,27 @@ pub fn run_flow(
         );
         let previous = done.last().map(|s| (s.name.as_str(), last_text.as_str()));
         let ask = step_text(band, flow, n, handle, note, &inbox, previous);
-        let answer = match chat.say(&m.model, &with_guard(&m.role), &ask) {
+        let model = cast
+            .iter()
+            .find(|c| &c.handle == handle)
+            .map_or(m.model.as_str(), |c| c.model.as_str());
+        let answer = match chat.say(model, &with_guard(&m.role), &ask) {
             Ok(a) => redact(a.trim()),
             Err(e) => {
                 let why = format!("{} could not answer ({e})", m.name);
                 let _ = write_atomic(
                     &index,
-                    index_note(band, flow, &at.link_base, &folder, &date, &done, Some(&why))
-                        .as_bytes(),
+                    index_note(
+                        band,
+                        flow,
+                        &at.link_base,
+                        &folder,
+                        &date,
+                        &done,
+                        Some(&why),
+                        cast,
+                    )
+                    .as_bytes(),
                 );
                 return Err(format!(
                     "{why}. What was done so far is in {}",
@@ -347,7 +409,7 @@ pub fn run_flow(
         done.push(step);
         write_atomic(
             &index,
-            index_note(band, flow, &at.link_base, &folder, &date, &done, None).as_bytes(),
+            index_note(band, flow, &at.link_base, &folder, &date, &done, None, cast).as_bytes(),
         )
         .map_err(|e| format!("could not write {}: {e}", index.display()))?;
     }

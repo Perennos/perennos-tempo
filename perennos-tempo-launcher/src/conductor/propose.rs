@@ -1,6 +1,6 @@
-//! Band proposals: the owner's own AI (through `tempo-launch mcp`) can design a band with them and
+//! Band proposals, for the Conductor: the owner's own AI (through `tempo-launch mcp`) can design a band with them and
 //! write it down as a proposal. It cannot set anything up: the owner applies it with
-//! `tempo-launch band apply-proposal`, which shows the band in words and asks y/N.
+//! `tempo-launch conductor apply-proposal`, which shows the band in words and asks y/N.
 //!
 //! A proposal is a file in `<Tempo home>/bands/proposals/<band>.json`. It is read back with the
 //! same strict checks as any band.json, because an AI wrote it.
@@ -13,7 +13,7 @@ use crate::{file_stamp, stamp, write_atomic, Ctx};
 use std::io::Write;
 use std::path::PathBuf;
 
-pub const APPLY_COMMAND: &str = "tempo-launch band apply-proposal";
+pub const APPLY_COMMAND: &str = "tempo-launch conductor apply-proposal";
 
 pub fn proposals_dir(ctx: &Ctx) -> PathBuf {
     super::bands_dir(ctx).join("proposals")
@@ -40,7 +40,7 @@ pub fn waiting(ctx: &Ctx) -> Vec<String> {
 /// real ones from this computer's plan when the owner applies it. Every problem is returned in
 /// words, so the AI can fix its draft.
 pub fn write(ctx: &Ctx, band: &J, note: &str, now: u64) -> Result<String, String> {
-    let b = from_j(band).map_err(|p| {
+    let b = from_j(&spec::without_engines(band.clone())).map_err(|p| {
         format!(
             "The band has problems; fix them and propose again:\n- {}",
             p.join("\n- ")
@@ -69,7 +69,7 @@ fn read(ctx: &Ctx, name: &str) -> Result<(Band, String), String> {
     let Some(b) = doc.get("band") else {
         return Err("the proposal holds no band".into());
     };
-    let band = from_j(b).map_err(|p| {
+    let band = from_j(&spec::without_engines(b.clone())).map_err(|p| {
         format!(
             "the proposal has problems, so it was left alone:\n- {}",
             p.join("\n- ")
@@ -95,7 +95,7 @@ fn settle_models(band: &mut Band, models: &Models) {
     }
 }
 
-/// `tempo-launch band apply-proposal [NAME]`.
+/// `tempo-launch conductor apply-proposal [NAME]`.
 pub fn apply_proposal(
     ctx: &Ctx,
     name: Option<&str>,
@@ -208,7 +208,7 @@ pub fn templates_facts() -> J {
     o(vec![
         (
             "what_a_band_is",
-            J::s("A small team of AI members for the owner's own workflow. Each member is a teammate in Room that the owner can @mention, and flows walk the members one after another and file their drafts as linked notes in the Vault. Members have no tools: they never post, send, buy or delete anything outside the computer."),
+            J::s("A small team of AI members for the owner's own workflow, set up and led by the Tempo Conductor. Each member is a teammate in Room that the owner can @mention, and flows walk the members one after another and file their drafts as linked notes in the Vault. When the owner sets a band up, the Conductor picks which of the owner's engines plays each part (heavy parts on the strongest engine that has their model, light ones on a quick one), so do not name engines. Members have no tools: they never post, send, buy or delete anything outside the computer."),
         ),
         (
             "rules",

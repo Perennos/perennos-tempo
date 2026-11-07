@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub mod band;
+pub mod conductor;
 pub mod home;
 pub mod setup;
 pub mod tempo_home;
@@ -72,17 +72,24 @@ usage: tempo-launch [command]
   mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
                     the plan and the status, and write a proposal you apply yourself;
                     --scan prints the scan facts to paste into any AI
-  band              Tempo Band, a team of AI members for your own workflow: lists your bands
-  band templates    the ready-made bands (social-media, music-release, small-business, dev-team,
+  conductor         Tempo Conductor: sets up bands (teams of AI members) for your own workflow,
+                    runs them, and picks which of your engines plays each part (`band` works too)
+  conductor templates
+                    the ready-made bands (social-media, music-release, small-business, dev-team,
                     research, content-creator, study)
-  band new (--template NAME | --describe \"TEXT\") [--name BAND] [--yes]
-                    set up a band: shows who is in it, what they do and when they run, asks y/N,
-                    then adds them to Room as teammates (if Room runs) and schedules their flows
-  band run BAND [FLOW] [--note TEXT]
+  conductor new (--template NAME | --describe \"TEXT\") [--name BAND] [--yes]
+                    set up a band: shows who is in it, what they do, which engine plays each
+                    part and when they run, asks y/N, then adds them to Room (if Room runs)
+                    and schedules their flows
+  conductor run BAND [FLOW] [--note TEXT]
                     walk a flow through its members; each step becomes a linked note in the Vault
-  band room BAND    add the band's members to Room as teammates (when Room was not running)
-  band page BAND    write and open the band's dashboard page
-  band apply-proposal [NAME]
+  conductor engines every engine you have (this computer's Ollama and the ones you linked):
+                    up or down, their models, and how strong each is
+  conductor room BAND
+                    add the band's members to Room as teammates (when Room was not running)
+  conductor page [BAND]
+                    write and open the Conductor page: engines, bands, last runs, apps
+  conductor apply-proposal [NAME]
                     show the band your AI proposed (see mcp) and set it up only after your y/N
   version
 
@@ -1888,8 +1895,8 @@ pub enum Cmd {
     Mcp {
         scan: bool,
     },
-    /// `band ...`: Tempo Band.
-    Band(band::BandCmd),
+    /// `conductor ...` (also `band ...`): Tempo Conductor.
+    Conductor(conductor::ConductorCmd),
     Help,
     Version,
 }
@@ -2026,7 +2033,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                 scan: rest.contains(&"--scan"),
             }
         }
-        "band" => Cmd::Band(band::parse_args(&rest)?),
+        "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2092,7 +2099,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         } else {
             setup::mcp::run_stdio(ctx)
         }),
-        Cmd::Band(b) => Ok(band::run(ctx, b)),
+        Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
         Cmd::Schedule {
             remove,
             print,
@@ -4501,15 +4508,16 @@ mod tests {
         assert!(html.contains("claude mcp add tempo-setup --"));
         assert!(html.contains("claude_desktop_config.json") && html.contains("mcpServers"));
         assert!(html.contains("only the scan facts") || html.contains("Only the scan facts"));
-        // Tempo Band: every template, the describe example, and the AI's two band tools
-        assert!(html.contains("Start a band for your work"));
-        for t in band::templates::all() {
+        // Tempo Conductor: every template, the describe example, and the AI's two band tools
+        assert!(html.contains("Let the Conductor set up a band for your work"));
+        assert!(html.contains("tempo-launch conductor engines"));
+        for t in conductor::templates::all() {
             assert!(html.contains(t.id), "{}", t.id);
         }
-        assert!(html.contains("tempo-launch band new --describe"));
+        assert!(html.contains("tempo-launch conductor new --describe"));
         assert!(html.contains("bakery&#39;s Instagram") || html.contains("bakery's Instagram"));
-        assert!(html.contains("band_templates") && html.contains("band_propose"));
-        assert!(html.contains("tempo-launch band apply-proposal"));
+        assert!(html.contains("conductor_templates") && html.contains("conductor_propose"));
+        assert!(html.contains("tempo-launch conductor apply-proposal"));
         // offline and strict: no outside address, no script, no form, a locked-down policy
         assert!(html.contains("default-src 'none'"));
         for bad in [

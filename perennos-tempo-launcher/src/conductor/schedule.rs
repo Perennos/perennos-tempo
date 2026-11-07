@@ -1,6 +1,6 @@
 //! Scheduled flows. A flow that runs `daily` or `weekly` becomes one entry in the system's own
 //! scheduler, the way the learning task does: a Windows scheduled task, or a crontab line. Each
-//! entry just runs `tempo-launch band run <band> <flow>`, with no window.
+//! entry just runs `tempo-launch conductor run <band> <flow>`, with no window.
 //!
 //! The lines are built as plain text (so they are tested everywhere) and installed by
 //! `RealScheduler`. When installing is not possible, the same lines are printed for the person.
@@ -58,7 +58,7 @@ fn win_command(exe: &Path, band: &str, flow: &str) -> Result<String, String> {
             "the task command cannot hold a quote, a % or a line break; {p} has one"
         ));
     }
-    let c = format!("\"{p}\" band run {band} {flow}");
+    let c = format!("\"{p}\" conductor run {band} {flow}");
     if c.len() > 261 {
         return Err("the task command is longer than Windows allows (261 characters); install Perennos Tempo in a shorter folder".into());
     }
@@ -86,7 +86,7 @@ pub fn entry(exe: &Path, band: &str, flow: &str, every: Every) -> Result<Option<
         return Err("the program's folder name has a control character; install Perennos Tempo in a plainer folder".into());
     }
     let cron = format!(
-        "{min} {hour} * * {dow} {} band run {band} {flow} {CRON_MARK} {band}/{flow}",
+        "{min} {hour} * * {dow} {} conductor run {band} {flow} {CRON_MARK} {band}/{flow}",
         cron_word(exe)?
     );
     let mut task: Vec<String> = [
@@ -224,7 +224,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             d.cron,
-            "30 8 * * * \"/opt/tempo/tempo-launch\" band run bakery morning # perennos-tempo-band bakery/morning"
+            "30 8 * * * \"/opt/tempo/tempo-launch\" conductor run bakery morning # perennos-tempo-band bakery/morning"
         );
         // Monday is 1 in cron, Sunday 0
         let w = entry(&exe(), "bakery", "plan", Every::Weekly(0, 9, 5))
@@ -255,7 +255,7 @@ mod tests {
                 "/TN",
                 "Perennos Tempo Band bakery plan",
                 "/TR",
-                "\"C:\\Tempo\\tempo-launch.exe\" band run bakery plan",
+                "\"C:\\Tempo\\tempo-launch.exe\" conductor run bakery plan",
                 "/SC",
                 "WEEKLY",
                 "/D",
@@ -270,7 +270,7 @@ mod tests {
         assert!(d
             .task
             .ends_with(&["/SC".into(), "DAILY".into(), "/ST".into(), "07:05".into()]));
-        assert!(d.line().contains("band run b-b f-f"));
+        assert!(d.line().contains("conductor run b-b f-f"));
     }
 
     #[test]
@@ -288,8 +288,8 @@ mod tests {
     fn a_rerun_replaces_only_this_bands_lines() {
         let existing = vec![
             "17 * * * * tempo-launch learn # perennos-tempo-vault-learn".to_string(),
-            "0 9 * * 1 x band run bakery plan # perennos-tempo-band bakery/plan".to_string(),
-            "0 9 * * 1 x band run bakery-two plan # perennos-tempo-band bakery-two/plan"
+            "0 9 * * 1 x conductor run bakery plan # perennos-tempo-band bakery/plan".to_string(),
+            "0 9 * * 1 x conductor run bakery-two plan # perennos-tempo-band bakery-two/plan"
                 .to_string(),
             "5 5 * * * backup".to_string(),
         ];
@@ -304,14 +304,14 @@ mod tests {
 
     #[test]
     fn entries_cover_each_scheduled_flow_of_a_band() {
-        let t = crate::band::templates::find("small-business").unwrap();
-        let b = t.band("shop", &crate::band::Models::default());
+        let t = crate::conductor::templates::find("small-business").unwrap();
+        let b = t.band("shop", &crate::conductor::Models::default());
         let e = entries(&b, &exe()).unwrap();
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].flow, "morning-inbox");
-        let music = crate::band::templates::find("music-release")
+        let music = crate::conductor::templates::find("music-release")
             .unwrap()
-            .band("m", &crate::band::Models::default());
+            .band("m", &crate::conductor::Models::default());
         assert!(entries(&music, &exe()).unwrap().is_empty());
     }
 }

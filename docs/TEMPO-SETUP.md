@@ -185,34 +185,34 @@ A stdio MCP server (JSON-RPC 2.0, one message per line). Tools:
 | `setup_plan` (read-only) | the recommended models and runtime, with size, licence and why; nothing is fetched |
 | `tempo_status` (read-only) | which Tempo apps are installed and running, whether settings exist, how many other computers are linked, whether a proposal is waiting |
 | `setup_propose` | writes a proposed settings change to `<Tempo home>/proposed-settings.json` and returns the command for you to run |
-| `band_templates` (read-only) | the ready-made Tempo Bands and the rules a band follows (see "Tempo Band" below) |
-| `band_propose` | writes a proposed band to `<Tempo home>/bands/proposals/<name>.json` and returns the command for you to run; `band apply-proposal` shows it and asks y/N |
+| `conductor_templates` (read-only) | the ready-made bands and the rules a band follows (see "Tempo Conductor" below) |
+| `conductor_propose` | writes a proposed band to `<Tempo home>/bands/proposals/<name>.json` and returns the command for you to run; `conductor apply-proposal` shows it and asks y/N |
 
 **What is shared.** Only the scan facts and the plan. Never files, notes or chats, and no user name, folder, computer name or address (a test checks this). What the tools answer becomes part of your conversation with that AI, so it reaches that AI's provider. It is opt-in: nothing connects unless you add the entry to your AI, and Tempo never calls out to any AI. Remove the entry to stop.
 
 **The AI never applies anything.** `setup_propose` accepts only `models`, `fast_models`, `embed_model`, `ollama_url` and `ollama_fallbacks` (private, tailnet or local addresses only). You apply it with `tempo-launch setup --apply-proposal`: it shows each change as `-` and `+` lines, shows the AI's note labelled as the AI's, and asks y/N (there is no `--yes`). On yes it writes the settings (old file to the trash) and moves the proposal to `<Tempo home>/setup/`. The agent reads settings when it starts, so run `tempo-launch stop` and `tempo-launch start` afterwards.
 
-## Tempo Band: a team of AI members for your own work
+## Tempo Conductor: your workflows, your engines
 
-Setup chooses the models; a band puts them to work. A *band* is a small team of AI members set up for your own workflow, all on your own computer. For a social media account it is a researcher, a writer, an editor and a scheduler. You can talk to each member in Room like a person (`@writer`), and a *flow* walks them one after another and files what they make as linked notes in your Vault, so the second-brain graph shows the chain.
+Setup chooses the models; the Conductor puts them to work. The Conductor ties you to your workflows and to your engines: it sets up your bands, raises the baton when one runs, and cues each member on the engine that suits the part. (`tempo-launch band ...` still works and means the same; so do the older tool names `band_templates` and `band_propose`.) A *band* is the name for the team of members: a small team of AI members set up for your own workflow, all on your own computer. For a social media account it is a researcher, a writer, an editor and a scheduler. You can talk to each member in Room like a person (`@writer`), and a *flow* walks them one after another and files what they make as linked notes in your Vault, so the second-brain graph shows the chain.
 
 **The rule.** No member ever posts, sends, buys or deletes anything outside the computer. Members chat as guests with the local agent, with no tools and no access to your files. The most they do is write drafts: the launcher files each answer as a note, only under the band's own folder in the Vault. A member whose `may` is `talk` only answers in Room; one whose `may` is `draft` can be a step in a flow.
 
 ### Start one
 
 ```
-tempo-launch band templates
-tempo-launch band new --template social-media
-tempo-launch band new --describe "I run a bakery's Instagram and want posts planned weekly" --name bakery-posts
+tempo-launch conductor templates
+tempo-launch conductor new --template social-media
+tempo-launch conductor new --describe "I run a bakery's Instagram and want posts planned weekly" --name bakery-posts
 ```
 
 The templates are `social-media`, `music-release`, `small-business` (inbox, invoices and follow-ups, all as drafts), `dev-team` (planner, builder, Soundcheck reviewer, release notes), `research`, `content-creator` and `study`; each has 3 to 5 members and 1 or 2 flows. With `--describe`, the model on this computer picks the closest template by the words in your sentence and rewrites the roles to fit your work. Its answer is checked like any other spec; if it is not usable, you get the template as it is, and Tempo says so.
 
-`band new` always shows the band in plain words first: who is in it, what each member does, what the flows are, when they run and where the notes go. Then it asks y/N (`--yes` skips the question). On yes it:
+`conductor new` always shows the band in plain words first: who is in it, what each member does, what the flows are, when they run and where the notes go. Then it asks y/N (`--yes` skips the question). On yes it:
 
 1. saves `<Tempo home>/bands/<name>/band.json` (an earlier one goes to `<Tempo home>/trash/<date>/`);
-2. if Room is running, makes a room named after the band and adds each member as an `agent` teammate (through Room's owner calls, with the control key Room writes in its data folder; only `127.0.0.1` is ever called). If Room is not running it prints `tempo-launch band room <name>` to run later. A handle that is already a teammate with a different role (another band's, say) is left alone and reported: rename that member in `band.json` and run `band room` again;
-3. registers each `daily` or `weekly` flow with the system scheduler, as a crontab line on Linux or a scheduled task on Windows, each running `tempo-launch band run <band> <flow>` with no window. On a Mac, or when the scheduler refuses, it prints the line to add yourself.
+2. if Room is running, makes a room named after the band and adds each member as an `agent` teammate (through Room's owner calls, with the control key Room writes in its data folder; only `127.0.0.1` is ever called). If Room is not running it prints `tempo-launch conductor room <name>` to run later. A handle that is already a teammate with a different role (another band's, say) is left alone and reported: rename that member in `band.json` and run `conductor room` again;
+3. registers each `daily` or `weekly` flow with the system scheduler, as a crontab line on Linux or a scheduled task on Windows, each running `tempo-launch conductor run <band> <flow>` with no window. On a Mac, or when the scheduler refuses, it prints the line to add yourself.
 
 ### The spec: `<Tempo home>/bands/<name>/band.json`
 
@@ -230,13 +230,13 @@ The templates are `social-media`, `music-release`, `small-business` (inbox, invo
 }
 ```
 
-A band has 2 to 8 members and 1 to 4 flows. `handle` is 2 to 24 lowercase letters, digits or hyphens; `instrument` is one word; `role` is at most 2000 characters (Room and the agent take the same, and Tempo adds a short house rule to it when it fits); `model` comes from the plan above (empty means the agent's usual model). `every` is `manual`, `daily HH:MM` or `weekly <mon..sun> HH:MM`. `notes_to` must be `Bands/<name>/` or a folder inside it. The spec is checked strictly when it is written and again whenever it is read, so a hand-edited file is held to the same rules: unknown keys, a step that is not a member (or only talks), a folder outside the band's own, an overlong role and a schedule that is not one are each refused, and every problem is listed in words.
+A band has 2 to 8 members and 1 to 4 flows. `handle` is 2 to 24 lowercase letters, digits or hyphens; `instrument` is one word; `role` is at most 2000 characters (Room and the agent take the same, and Tempo adds a short house rule to it when it fits); `model` comes from the plan above (empty means the agent's usual model); `engine` is optional and is the Conductor's pick for the member (see "Engines" below). `every` is `manual`, `daily HH:MM` or `weekly <mon..sun> HH:MM`. `notes_to` must be `Bands/<name>/` or a folder inside it. The spec is checked strictly when it is written and again whenever it is read, so a hand-edited file is held to the same rules: unknown keys, a step that is not a member (or only talks), a folder outside the band's own, an overlong role and a schedule that is not one are each refused, and every problem is listed in words.
 
 ### Run a flow
 
 ```
-tempo-launch band run bakery-posts weekly-plan
-tempo-launch band run bakery-posts one-post --note "the new rye loaf"
+tempo-launch conductor run bakery-posts weekly-plan
+tempo-launch conductor run bakery-posts one-post --note "the new rye loaf"
 ```
 
 Each step is a guest conversation with that member's role and model. It is told the flow's goal, your `--note`, and what the step before it wrote. Each answer becomes a note, `Bands/<band>/<date> <flow>/<n> <member>.md` (dates are UTC), with front matter (`band`, `member`, `flow`, `step`) and `[[wiki links]]` to the step before and to the flow's `Index` note. Without a Vault, the notes go to `<Tempo home>/bands/<band>/runs/`. If a member cannot answer, the flow stops there and the `Index` note says so; what was written stays.
@@ -245,11 +245,19 @@ Material for a flow goes in `Bands/<band>/Inbox/` (or `<Tempo home>/bands/<band>
 
 ### The dashboard
 
-`tempo-launch band page <band>` writes and opens `<Tempo home>/bands/<band>/band.html`: members as cards with their instrument and what they do, the flows with their schedule, the latest runs with links to their notes, and a "Talk to them in Room" hint with each `@handle`. Like the welcome page it is static, with a strict Content-Security-Policy and no script; it loads nothing.
+`tempo-launch conductor page` writes and opens `<Tempo home>/conductor.html`, one place to see everything: the **Engines** (up or down, with their models), the **Bands** (members with their instrument, role and engine, the flows and their schedules), the **Last runs** with links to their notes in the Vault, and the **Apps** (whether the agent, Vault, Room and Studio are running). `conductor page <band>` writes `<Tempo home>/bands/<band>/band.html` with just that band. Like the welcome page it is static, with a strict Content-Security-Policy and no script; it loads nothing, and it fits a phone.
+
+### Engines: who plays each part
+
+The Conductor knows every engine you have: this computer's Ollama (or Tempo's own), every address you added with `tempo-launch link` (the agent's `ollama_fallbacks`), and every address of a `hosts` entry in the agent's settings. `tempo-launch conductor engines` asks each one for its models (a quick `GET /api/tags`, two seconds at most, only at private, tailnet or loopback addresses, exactly as `link` allows; any other address is refused without a connection) and shows whether it is up, its models with their sizes, and a rough class from the biggest one: strong (20B and up), capable (7B and up) or light.
+
+When a band is set up, and again whenever a flow runs, the Conductor casts the members. The heavy ones (writer, planner, builder and their kind) go to the strongest reachable engine that has their model; the light ones (scheduler, sorter) go to the quickest one that has theirs. The choice is saved per member as an optional `engine` field in `band.json` (an id from `conductor engines`, checked against your engines whenever the file is read). If the engine chosen is down when a run starts, or has lost the model, the next best one plays the part, and the run's `Index` note says so ("engine box is down, so local played it").
+
+What the agent allows: a conversation can name a model but not an engine. The agent tries `ollama_url` first and then `ollama_fallbacks` in order, and keeps a conversation on the engine that answered. So the Conductor passes the member's model and records the engine it expects to answer; where a request really goes is the agent's own failover. Engines are never started or changed, and nothing about them leaves your network.
 
 ### Let your AI design the band with you
 
-`tempo-launch mcp` has two more tools for the AI you already use: `band_templates` (read-only: the ready-made bands and the rules) and `band_propose`, which writes `<Tempo home>/bands/proposals/<name>.json` and returns the command for you. Nothing is set up until you run `tempo-launch band apply-proposal [NAME]`: it shows the band in plain words, shows the AI's note labelled as the AI's, and asks y/N (there is no `--yes`). A proposal may say `fast` or `heavy` for a member's model, or leave it out; Tempo fills in this computer's models when you apply it. The proposal is checked strictly again when it is read.
+`tempo-launch mcp` has two more tools for the AI you already use: `conductor_templates` (read-only: the ready-made bands and the rules) and `conductor_propose`, which writes `<Tempo home>/bands/proposals/<name>.json` and returns the command for you. Nothing is set up until you run `tempo-launch conductor apply-proposal [NAME]`: it shows the band in plain words, shows the AI's note labelled as the AI's, and asks y/N (there is no `--yes`). A proposal may say `fast` or `heavy` for a member's model, or leave it out; Tempo fills in this computer's models when you apply it, and the Conductor picks each member's engine then (an `engine` written in a proposal is dropped). The proposal is checked strictly again when it is read.
 
 ## Re-run it
 
