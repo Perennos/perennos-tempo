@@ -2003,7 +2003,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         }
         "link" => match rest.as_slice() {
             [u] if !u.starts_with("--") => Cmd::Link(u.to_string()),
-            _ => return Err("link takes one address, like http://192.168.1.20:11434".into()),
+            _ => return Err("link takes one address, like http://192.168.0.20:11434".into()),
         },
         "mcp" => {
             only(&["--scan"])?;
@@ -4548,8 +4548,8 @@ mod tests {
         assert_eq!(parse(&s(&["welcome"])), Ok(Cmd::Welcome));
         assert!(parse(&s(&["welcome", "x"])).is_err());
         assert_eq!(
-            parse(&s(&["link", "http://192.168.1.20:11434"])),
-            Ok(Cmd::Link("http://192.168.1.20:11434".into()))
+            parse(&s(&["link", "http://192.168.0.20:11434"])),
+            Ok(Cmd::Link("http://192.168.0.20:11434".into()))
         );
         assert!(parse(&s(&["link"])).is_err() && parse(&s(&["link", "a", "b"])).is_err());
         assert_eq!(parse(&s(&["mcp"])), Ok(Cmd::Mcp { scan: false }));
@@ -4581,11 +4581,11 @@ mod tests {
         }
         assert!(!ctx.agent_data.join("config.json").exists());
         // a private one is added, with the default port, into a new file
-        let (code, said) = run("http://192.168.1.20", None);
+        let (code, said) = run("http://192.168.0.20", None);
         assert_eq!(code, 0, "{said}");
         let cfg = ctx.agent_data.join("config.json");
         let j = setup::json::parse(&fs::read_to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(j.strs("ollama_fallbacks"), ["http://192.168.1.20:11434"]);
+        assert_eq!(j.strs("ollama_fallbacks"), ["http://192.168.0.20:11434"]);
         // a second one is appended, other keys and the old file are kept, a repeat changes nothing
         fs::write(
             &cfg,
@@ -4606,7 +4606,7 @@ mod tests {
         assert!(said.contains("already"));
         assert_eq!(fs::read_to_string(&cfg).unwrap(), before);
         // a tailnet address works; a file TEMPO_AGENT_CONFIG names is left alone
-        assert_eq!(run("http://100.101.102.103:11434", None).0, 0);
+        assert_eq!(run("http://10.20.30.40:11434", None).0, 0);
         let pinned = root.join("pinned.json");
         fs::write(&pinned, "{}").unwrap();
         let (code, said) = run("http://10.1.1.1:11434", Some(pinned.clone()));

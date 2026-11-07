@@ -251,7 +251,7 @@ pub fn tools() -> Vec<J> {
                     "settings",
                     o(vec![
                         ("type", J::s("object")),
-                        ("description", J::s("The settings to change, e.g. {\"models\":[\"qwen3:8b\"],\"ollama_fallbacks\":[\"http://192.168.1.20:11434\"]}")),
+                        ("description", J::s("The settings to change, e.g. {\"models\":[\"qwen3:8b\"],\"ollama_fallbacks\":[\"http://192.168.0.20:11434\"]}")),
                         (
                             "properties",
                             o(vec![
@@ -698,7 +698,7 @@ mod tests {
         std::fs::create_dir_all(&ctx.agent_data).unwrap();
         let cfg = ctx.agent_data.join("config.json");
         std::fs::write(&cfg, r#"{"models":["old:7b"],"temperature":0.2}"#).unwrap();
-        let args = r#"{"name":"setup_propose","arguments":{"note":"The GPU box is faster.\nUse it.","settings":{"models":["qwen3:8b"],"ollama_fallbacks":["http://192.168.1.20"]}}}"#;
+        let args = r#"{"name":"setup_propose","arguments":{"note":"The GPU box is faster.\nUse it.","settings":{"models":["qwen3:8b"],"ollama_fallbacks":["http://192.168.0.20"]}}}"#;
         let (t, err) = text_of(&rpc(&s, 1, "tools/call", args));
         assert!(!err, "{t}");
         assert!(
@@ -711,7 +711,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             p.get("settings").unwrap().strs("ollama_fallbacks"),
-            ["http://192.168.1.20:11434"]
+            ["http://192.168.0.20:11434"]
         );
         assert_eq!(p.str("note"), Some("The GPU box is faster. Use it."));
         assert_eq!(
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!((code, asked), (0, 1));
         let now = parse(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(now.strs("models"), ["qwen3:8b"]);
-        assert_eq!(now.strs("ollama_fallbacks"), ["http://192.168.1.20:11434"]);
+        assert_eq!(now.strs("ollama_fallbacks"), ["http://192.168.0.20:11434"]);
         assert_eq!(now.f64("temperature"), Some(0.2));
         assert!(!ctx.home.join("proposed-settings.json").exists());
         assert!(ctx.home.join("trash").is_dir());
