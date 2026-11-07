@@ -17,33 +17,34 @@ Write the way the founder talks to a friend he respects: direct, warm, a bit che
 
 robust, leverage, seamless (in copy), comprehensive, utilize, empower, solution, synergy, cutting-edge, best-in-class, "users", "simply", "just" (when it hides effort), "ledger", "claim", "open source" (say **source-available**, or "free to use, not to resell"). No personal names, emails or home-network details, ever.
 
-## Names
+## Music is the house style
 
-Tempo is for many kinds of work, so names stay wide. A good name is short, evocative and makes the feature obvious, with a little character, like a fashion house naming a line rather than an engineer naming a module. Music is one good source (it's where Tempo, Studio, Soundcheck and the Conductor came from), but it isn't a rule: don't force a theme onto everything.
+Tempo is a band that plays on your own machines. Names, workflows and little touches come from music when it fits naturally, and never when it would confuse.
 
-What we have so far:
-
-| Name | What it is |
+| In music | In Tempo |
 | --- | --- |
-| Tempo | the whole suite |
-| Vault | your notes and second brain |
+| The tempo | the whole suite, keeping time |
 | Studio | sound: mixing, mastering, analysis |
 | Room | the private room where people and AI members talk |
-| Soundcheck | code and security review before you ship |
-| Conductor | sets up your bands of AI members and runs each part on the right engine |
-| Fleet | your machines, working as one |
+| Soundcheck | code and security review before you go live |
+| Conductor | sets up your bands and cues each part on the right engine |
+| Band, members, instruments | the team of AI members for a workflow |
+| Encore | run it again on what changed |
+| Rehearsal | the dry run, the tests |
+| Setlist | a flow's steps, in order |
+| Fleet | the machines in one field |
 
 How to name something new:
 
-1. Say what it does in plain words first. Then find a word that makes that obvious and has some character.
+1. Find the music word for what it does. A good one makes the feature obvious ("Soundcheck" is checking before the show).
 2. Keep the plain meaning next to it the first time: "All clear. Ready to play. (Ready)".
-3. Commands stay short and clear (`tempo-launch conductor run`); the character is in the words around them.
-4. If nothing fits cleanly, use the plain word. Clarity beats a clever name.
+3. Commands stay short and clear: `tempo-launch conductor run`, not a pun. The wink is in the words around it.
+4. If no music word fits cleanly, use the plain word. Clarity beats a stretched metaphor.
 
 ## Small things that matter
 
 - Headings: an italic serif line with a small numbered label above it ("01 — What this computer can run").
-- Status lines read like a person talking: "Made on the studio box, 6.2 s."
+- Status lines read like a crew member talking: "Made on the studio box, 6.2 s."
 - Easter eggs are rare, kind and never in machine output (JSON, SARIF, logs).
 - Comments in code explain *why*, in a sentence a person would say.
 - Commit messages say what changed for the person using it.
