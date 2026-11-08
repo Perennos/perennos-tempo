@@ -238,12 +238,29 @@ fn accept_loop(listener: TcpListener, sh: Arc<Shared>) -> std::thread::JoinHandl
 }
 
 pub fn start(hub: Arc<Hub>, opts: ServeOpts) -> Result<Running, String> {
-    let listener = TcpListener::bind((opts.bind, opts.port))
-        .map_err(|e| format!("cannot listen on {}:{}: {e}", opts.bind, opts.port))?;
+    let specific = !opts.bind.is_loopback() && !opts.bind.is_unspecified();
+    let loopback_listener = if specific {
+        Some(
+            TcpListener::bind((Ipv4Addr::LOCALHOST, opts.port))
+                .map_err(|e| format!("cannot reserve the owner's loopback listener: {e}"))?,
+        )
+    } else {
+        None
+    };
+    let port = match &loopback_listener {
+        Some(l) => l.local_addr().map_err(|e| e.to_string())?.port(),
+        None => opts.port,
+    };
+    let listener = TcpListener::bind((opts.bind, port))
+        .map_err(|e| format!("cannot listen on {}:{}: {e}", opts.bind, port))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let port = addr.port();
+    let loopback = loopback_listener
+        .as_ref()
+        .map(TcpListener::local_addr)
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let mut extra = opts.allow_hosts.clone();
-    let specific = !opts.bind.is_loopback() && !opts.bind.is_unspecified();
     if specific {
         extra.push(match opts.bind {
             IpAddr::V6(v6) => format!("[{v6}]:{port}"),
@@ -290,12 +307,8 @@ pub fn start(hub: Arc<Hub>, opts: ServeOpts) -> Result<Running, String> {
     let mut threads = vec![accept_loop(listener, main.clone())];
     let mut shared = vec![main.clone()];
     // With --bind on a tailnet or LAN address, the owner still has loopback on the same port.
-    let mut loopback = None;
-    if specific {
-        if let Ok(l) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-            loopback = l.local_addr().ok();
-            threads.push(accept_loop(l, main.clone()));
-        }
+    if let Some(l) = loopback_listener {
+        threads.push(accept_loop(l, main.clone()));
     }
     let mut webhook = None;
     if let Some(wa) = &hub.bridges.whatsapp {
