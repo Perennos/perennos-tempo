@@ -552,7 +552,8 @@ impl Node {
                 ..self.frame('m', &m.name, topic, id, body)
             })
             .collect();
-        let (acks, err) = self.exchange(m, &frames, 'a', Duration::from_secs(5));
+        let response_timeout = Duration::from_secs(if frames.len() > 1 { 30 } else { 5 });
+        let (acks, err) = self.exchange(m, &frames, 'a', response_timeout);
         let done: Vec<String> = acks.into_iter().map(|a| a.id).collect();
         self.mark(&done);
         let left: Vec<String> = rows
