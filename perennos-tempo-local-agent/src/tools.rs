@@ -2951,7 +2951,8 @@ mod tests {
         let stopped = run(&e, &c, "command_stop", json!({"id": "bg-1"}));
         assert!(stopped.starts_with("[bg-1: stopped after"), "{stopped}");
         let r = run(&e, &c, "command_output", json!({"id": "1"}));
-        assert!(r.starts_with("[1: stopped after"), "{r}");
+        assert!(untrusted::has_marker(&r), "{r}");
+        assert!(untrusted_body(&r).starts_with("[1: stopped after"));
         // a quick one: wait for it to finish
         let quick = sh("echo done-here", "Write-Output done-here");
         let r = run(
@@ -3027,7 +3028,7 @@ mod tests {
         for _ in 0..100 {
             let o = run(e, c, "command_output", json!({"id": "bg-1"}));
             let body = untrusted_body(&o);
-            if let Some(p) = body.split("pid=").nth(1) {
+            if let Some(p) = body.lines().find_map(|line| line.strip_prefix("pid=")) {
                 let p: String = p.chars().take_while(char::is_ascii_digit).collect();
                 if !p.is_empty() {
                     return p;
