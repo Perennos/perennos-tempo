@@ -4062,7 +4062,9 @@ mod tests {
             assert!(r.starts_with("refused"), "{url}: {r}");
         }
         assert!(util::public_ip("93.184.216.34".parse().unwrap()));
-        assert!(!util::public_ip(std::net::Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(!util::public_ip(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::new(172, 16, 0, 1)
+        )));
     }
 
     #[test]
