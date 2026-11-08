@@ -1248,7 +1248,6 @@ impl Env {
     /// Note that this conversation read something untrusted (the status line says so once a turn).
     pub fn mark_untrusted(&self, conv: &Conv) {
         let first_this_turn = !conv.guest && self.taint.borrow().get(&conv.id) != Some(&conv.turns);
-        conv.set_taint("read untrusted content");
         if first_this_turn {
             self.taint.borrow_mut().insert(conv.id.clone(), conv.turns);
             self.taint_notice.borrow_mut().insert(conv.id.clone());
