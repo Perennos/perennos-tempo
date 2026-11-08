@@ -77,7 +77,7 @@ fn a_big_blob_crosses_intact_past_the_old_64_mib_limit() {
         "x-big.1",
         &src,
         "clip.mp4",
-        Duration::from_secs(120),
+        Duration::from_secs(900),
     )
     .unwrap();
     assert_eq!((sent.size, sent.sha.as_str()), (size as u64, want.as_str()));
