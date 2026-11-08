@@ -140,6 +140,28 @@ jobs:
           cat SHA256SUMS.txt
           n=$(wc -l < SHA256SUMS.txt)
           [ "$n" -ge 4 ] || { echo "expected at least 4 files (Linux tarball and .deb, macOS tarball, Windows installer), got $n"; exit 1; }
+      - name: README download names match the built assets
+        env:
+          VERSION: ${{ needs.versions.outputs.version }}
+        run: |
+          set -eu
+          quick_table=$(awk '/^\| Computer \| File \|$/{found=1; next} found && /^\|/{print; next} found{exit}' README.md)
+          downloads_table=$(awk '/^\| File \| For \|$/{found=1; next} found && /^\|/{print; next} found{exit}' README.md)
+          count=0
+          for f in dist/*; do
+            name=${f#dist/}
+            [ "$name" = "SHA256SUMS.txt" ] && continue
+            case "$name" in
+              *"$VERSION"*) ;;
+              *) echo "asset has no version $VERSION: $name"; exit 1 ;;
+            esac
+            template=$(printf '%s' "$name" | sed "s/$VERSION/<version>/")
+            printf '%s\n' "$downloads_table" | grep -Fq "$name" || { echo "Downloads table is missing $name"; exit 1; }
+            printf '%s\n' "$quick_table" | grep -Fq "$template" || { echo "Quick start table is missing $template"; exit 1; }
+            printf 'README matches %s\n' "$name"
+            count=$((count + 1))
+          done
+          [ "$count" -eq 4 ] || { echo "expected four versioned downloads, got $count"; exit 1; }
       - name: Build provenance (a download can be checked against this workflow)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
