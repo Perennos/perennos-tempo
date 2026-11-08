@@ -146,8 +146,8 @@ jobs:
         run: |
           set -eu
           quick_table=$(awk '/^\| Computer \| File \|$/{found=1; next} found && /^\|/{print; next} found{exit}' README.md)
-          downloads_table=$(awk '/^\| File \| For \|$/{found=1; next} found && /^\|/{print; next} found{exit}' README.md)
           count=0
+          expected=()
           for f in dist/*; do
             name=${f#dist/}
             [ "$name" = "SHA256SUMS.txt" ] && continue
@@ -156,12 +156,19 @@ jobs:
               *) echo "asset has no version $VERSION: $name"; exit 1 ;;
             esac
             template=$(printf '%s' "$name" | sed "s/$VERSION/<version>/")
-            printf '%s\n' "$downloads_table" | grep -Fq "$name" || { echo "Downloads table is missing $name"; exit 1; }
-            printf '%s\n' "$quick_table" | grep -Fq "$template" || { echo "Quick start table is missing $template"; exit 1; }
-            printf 'README matches %s\n' "$name"
+            expected+=("$template")
+            printf 'Built asset: %s\n' "$name"
             count=$((count + 1))
           done
           [ "$count" -eq 4 ] || { echo "expected four versioned downloads, got $count"; exit 1; }
+          expected=$(printf '%s\n' "${expected[@]}" | sort)
+          documented=$(printf '%s\n' "$quick_table" | sed -n 's/.*`\([^`]*\)`.*/\1/p' | sort)
+          [ "$documented" = "$expected" ] || {
+            echo "README download table differs from built assets"
+            printf 'Expected:\n%s\nDocumented:\n%s\n' "$expected" "$documented"
+            exit 1
+          }
+          printf 'README download table matches all %s built assets\n' "$count"
       - name: Build provenance (a download can be checked against this workflow)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
