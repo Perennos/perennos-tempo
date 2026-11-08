@@ -2966,7 +2966,7 @@ mod tests {
     fn a_pin_the_settings_no_longer_list_is_ignored() {
         let (a, _b, mut ag, mut conv) =
             two_engines(vec![text_resp("from the main one")], vec![], |_| {});
-        conv.engine = Some("http://10.9.9.9:11434".into());
+        conv.engine = Some("http://stale-engine.invalid:11434".into());
         assert_eq!(say(&mut ag, &mut conv, "hello"), "from the main one");
         assert_eq!(a.bodies("/api/chat").len(), 1);
     }

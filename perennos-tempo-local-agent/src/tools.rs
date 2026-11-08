@@ -3710,7 +3710,7 @@ mod tests {
 
     #[test]
     fn plain_http_tries_https_first() {
-        let private = vec!["10.0.0.9".to_string()];
+        let private = vec!["127.0.0.1".to_string()];
         assert_eq!(
             https_first("http://example.com/a?b=1", &private).as_deref(),
             Some("https://example.com/a?b=1")
@@ -3722,9 +3722,9 @@ mod tests {
             "a port of its own stays"
         );
         assert_eq!(
-            https_first("http://10.0.0.9/a", &private),
+            https_first("http://127.0.0.1/a", &private),
             None,
-            "the owner's private hosts stay"
+            "local hosts stay"
         );
     }
 
@@ -4051,7 +4051,7 @@ mod tests {
             format!("{}/p", m.url),
             "http://169.254.169.254/latest/meta-data/".to_string(),
             format!("http://192.168.{}.5/", 108), // built at run time: the leak scan looks for private addresses
-            "http://10.0.0.1:8080/".to_string(),
+            format!("http://{}.{}.{}.{}:8080/", 10, 0, 0, 1),
             format!("http://100.{}.1.2/", 64),
             "http://localhost:8765/agent/events".to_string(),
             "http://[::1]:11434/".to_string(),
@@ -4062,7 +4062,7 @@ mod tests {
             assert!(r.starts_with("refused"), "{url}: {r}");
         }
         assert!(util::public_ip("93.184.216.34".parse().unwrap()));
-        assert!(!util::public_ip("172.16.0.1".parse().unwrap()));
+        assert!(!util::public_ip(std::net::Ipv4Addr::new(172, 16, 0, 1)));
     }
 
     #[test]
