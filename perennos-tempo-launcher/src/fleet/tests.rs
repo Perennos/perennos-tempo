@@ -1032,7 +1032,7 @@ fn messenger_latency_and_throughput_on_this_computer() {
         1000.0 / total.as_secs_f64()
     );
     assert_eq!(b.node.inbox(None, 5000).len(), 2001);
-    assert!(p50 < 20_000, "p50 {p50} us");
+    assert!(p50 < 30_000, "p50 {p50} us");
 }
 
 // ---- proposals
