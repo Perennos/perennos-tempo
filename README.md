@@ -99,7 +99,7 @@ Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.
 | Linux (x86_64) | `perennos-tempo-source-available-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Debian and Ubuntu (x86_64) | `perennos-tempo-source-available_<version>-1_amd64.deb` |
 
-`<version>` is the number of the latest release, for example 2.0.1.
+`<version>` is the version in the latest release's asset filenames.
 
 - **Windows:** download the Setup file and double-click it. The installer is not code-signed, so Windows may show "Windows protected your PC": click **More info**, then **Run anyway**.
 - **macOS and Linux:** unpack the `.tar.gz` and run `./install.sh`. On Debian and Ubuntu, `sudo apt install ./<file>.deb` works too.
