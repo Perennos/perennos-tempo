@@ -94,10 +94,12 @@ Each app keeps its data in one Tempo home folder per computer ([docs/TEMPO-HOME.
 
 | Computer | File |
 |---|---|
-| Windows 10 and 11 (x64) | `PerennosTempo-Setup-2.0.1-x64-source-available.exe` |
-| macOS, Apple silicon | `perennos-tempo-source-available-2.0.1-aarch64-apple-darwin.tar.gz` |
-| Linux (x86_64) | `perennos-tempo-source-available-2.0.1-x86_64-unknown-linux-gnu.tar.gz` |
-| Debian and Ubuntu (x86_64) | `perennos-tempo-source-available_2.0.1-1_amd64.deb` |
+| Windows 10 and 11 (x64) | `PerennosTempo-Setup-<version>-x64-source-available.exe` |
+| macOS, Apple silicon | `perennos-tempo-source-available-<version>-aarch64-apple-darwin.tar.gz` |
+| Linux (x86_64) | `perennos-tempo-source-available-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Debian and Ubuntu (x86_64) | `perennos-tempo-source-available_<version>-1_amd64.deb` |
+
+`<version>` is the number of the latest release, for example 2.0.1.
 
 - **Windows:** download the Setup file and double-click it. The installer is not code-signed, so Windows may show "Windows protected your PC": click **More info**, then **Run anyway**.
 - **macOS and Linux:** unpack the `.tar.gz` and run `./install.sh`. On Debian and Ubuntu, `sudo apt install ./<file>.deb` works too.
