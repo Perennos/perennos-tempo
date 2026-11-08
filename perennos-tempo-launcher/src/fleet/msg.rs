@@ -491,7 +491,13 @@ impl Node {
     /// Send `frames` on the peer's connection and read one frame back for each. Returns the ids
     /// answered, and why it stopped early, if it did. A connection that has gone stale (a
     /// laptop that slept) is replaced once, without counting a failed try.
-    fn exchange(&self, m: &Machine, frames: &[Frame], want: char) -> (Vec<Frame>, Option<String>) {
+    fn exchange(
+        &self,
+        m: &Machine,
+        frames: &[Frame],
+        want: char,
+        read_timeout: Duration,
+    ) -> (Vec<Frame>, Option<String>) {
         let link = self.link(&m.name);
         let mut link = lock(&link);
         let mut reused = link.stream.is_some();
@@ -502,6 +508,7 @@ impl Node {
                     link.stream = Some(self.connect(m)?);
                 }
                 let s = link.stream.as_mut().ok_or("no connection")?;
+                let _ = s.get_ref().set_read_timeout(Some(read_timeout));
                 let mut wire = Vec::new();
                 for f in &frames[got.len()..] {
                     wire.extend(self.encode(f));
@@ -545,7 +552,7 @@ impl Node {
                 ..self.frame('m', &m.name, topic, id, body)
             })
             .collect();
-        let (acks, err) = self.exchange(m, &frames, 'a');
+        let (acks, err) = self.exchange(m, &frames, 'a', Duration::from_secs(5));
         let done: Vec<String> = acks.into_iter().map(|a| a.id).collect();
         self.mark(&done);
         let left: Vec<String> = rows
@@ -621,7 +628,7 @@ impl Node {
                 f
             })
             .collect();
-        match self.exchange(m, &frames, 'a') {
+        match self.exchange(m, &frames, 'a', Duration::from_secs(30)) {
             (_, None) => Ok(()),
             (_, Some(e)) => Err(e),
         }
@@ -631,7 +638,7 @@ impl Node {
     pub fn ephemeral(&self, m: &Machine, topic: &str, body: &[u8]) -> Result<(), String> {
         let mut f = self.frame('m', &m.name, topic, &self.next_id(), body);
         f.eph = true;
-        match self.exchange(m, &[f], 'a') {
+        match self.exchange(m, &[f], 'a', Duration::from_secs(5)) {
             (_, None) => Ok(()),
             (_, Some(e)) => Err(e),
         }
@@ -641,7 +648,7 @@ impl Node {
     pub fn ping(&self, m: &Machine) -> Result<u64, String> {
         let f = self.frame('p', &m.name, "", &self.next_id(), b"");
         let t = Instant::now();
-        match self.exchange(m, &[f], 'o') {
+        match self.exchange(m, &[f], 'o', Duration::from_secs(5)) {
             (_, None) => Ok(t.elapsed().as_micros() as u64),
             (_, Some(e)) => Err(e),
         }
