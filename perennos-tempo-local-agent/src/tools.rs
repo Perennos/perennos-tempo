@@ -7,6 +7,7 @@ use crate::fstools;
 use crate::mcp::McpHost;
 use crate::ollama;
 use crate::rag::Rag;
+use crate::untrusted;
 use crate::util::{self, cap, head_chars, http_json, is_secret_path, resolve, Guard, RESULT_CAP};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -703,6 +704,19 @@ pub const CHANGES: &[&str] = &[
     "comfy_image",
 ];
 
+/// Calls that need owner approval after this conversation has read untrusted content.
+pub const EFFECTFUL: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "trash",
+    "comfy_image",
+    "run_command",
+    "command_stop",
+    "fetch_url",
+    "delegate",
+];
+
 /// Programs that read only when run with nothing after them, or only the options listed: with
 /// other options they write a file (`tree -o`), set the clock (`date -s`), rename the machine
 /// (`hostname x`), drop the network (`ipconfig /release`) or change the GPU (`nvidia-smi -pl`).
@@ -1224,16 +1238,17 @@ impl Env {
         }
     }
 
-    /// GUARD: this turn has taken in something that may be someone else's instructions (a web
-    /// page, a file from outside the project, an unmarked connector's answer, a room guest's
-    /// words). A guest conversation always counts. The next turn starts clean.
+    /// GUARD: untrusted content stays tainted for this conversation; guests always count.
     pub fn tainted(&self, conv: &Conv) -> bool {
-        conv.guest || self.taint.borrow().get(&conv.id) == Some(&conv.turns)
+        conv.guest || conv.taint().is_some() || self.taint.borrow().get(&conv.id) == Some(&conv.turns)
     }
 
-    /// Note that this turn read something untrusted (the status line says so once).
+    /// Note that this conversation read something untrusted (the status line says so once a turn).
     pub fn mark_untrusted(&self, conv: &Conv) {
-        if !self.tainted(conv) {
+        let first_this_turn = !conv.guest
+            && self.taint.borrow().get(&conv.id) != Some(&conv.turns);
+        conv.set_taint("read untrusted content");
+        if first_this_turn {
             self.taint.borrow_mut().insert(conv.id.clone(), conv.turns);
             self.taint_notice.borrow_mut().insert(conv.id.clone());
         }
@@ -1262,7 +1277,7 @@ impl Env {
     }
 
     /// What a builtin just read may be someone else's words: note it.
-    fn note_untrusted(&self, conv: &Conv, name: &str, a: &Value, out: &str) {
+    fn note_untrusted(&self, conv: &Conv, name: &str, a: &Value, out: String) -> String {
         let failed = [
             "refused",
             "denied",
@@ -1273,16 +1288,34 @@ impl Env {
         .iter()
         .any(|p| out.starts_with(p));
         if failed {
-            return;
+            return out;
+        }
+        if untrusted::has_marker(&out) {
+            self.mark_untrusted(conv);
+            return out;
         }
         let from_outside = || {
             a.get("path")
                 .and_then(Value::as_str)
                 .is_some_and(|p| self.outside_project(conv, p))
         };
+        let reads = matches!(
+            name,
+            "read_file" | "list_dir" | "grep" | "glob" | "search_memory" | "run_command"
+        );
+        let asked = ["path", "command"]
+            .iter()
+            .filter_map(|k| a[*k].as_str())
+            .any(|p| untrusted::is_room_path(p) || untrusted::mentions_room_path(p));
+        if reads && (asked || untrusted::mentions_room_path(&out)) {
+            conv.set_taint(&format!("{name} read Room messages"));
+            self.mark_untrusted(conv);
+            return untrusted::wrap(&format!("{name}: Room messages"), &out);
+        }
         if name == "fetch_url" || (matches!(name, "read_file" | "grep") && from_outside()) {
             self.mark_untrusted(conv);
         }
+        out
     }
 
     /// Once tainted, a write outside the conversation's folder asks (the words it would write
@@ -1649,8 +1682,7 @@ impl Env {
             _ => Ok(format!("unknown tool {name}")),
         };
         let out = r.unwrap_or_else(|e| e);
-        self.note_untrusted(conv, name, a, &out);
-        out
+        self.note_untrusted(conv, name, a, out)
     }
 
     fn list_dir(&self, a: &Value) -> Result<String, String> {
