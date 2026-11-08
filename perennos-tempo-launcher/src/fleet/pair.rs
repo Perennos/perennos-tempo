@@ -404,11 +404,10 @@ fn take_attempt(p: &Paths, now: u64) -> Result<String, &'static str> {
                     return Err("no invitation is open");
                 }
                 i.tries += 1;
+                write_invite(p, &i).map_err(|_| "could not keep count")?;
                 if i.tries >= TRIES {
-                    // the last allowed try: it is used, and the invitation is gone either way
+                    // Persist exhaustion before best-effort cleanup so a failed deletion stays burned.
                     let _ = std::fs::remove_file(p.file(INVITE_FILE));
-                } else {
-                    write_invite(p, &i).map_err(|_| "could not keep count")?;
                 }
                 Ok(i.code)
             })();
