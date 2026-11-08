@@ -2927,7 +2927,10 @@ mod tests {
             json!({"command": slow, "background": true}),
         );
         assert!(r.starts_with("started in the background as bg-1"), "{r}");
-        assert!(!e.tainted(&c), "background start acknowledgment was tainted: {r}");
+        assert!(
+            !e.tainted(&c),
+            "background start acknowledgment was tainted: {r}"
+        );
         // its output arrives while it runs
         let mut seen = String::new();
         for _ in 0..100 {
@@ -3538,7 +3541,7 @@ mod tests {
                 &e,
                 &c,
                 "run_command",
-                json!({"command": "echo oops; exit 3"})
+                json!({"command": "echo oops; exit 3"}),
             );
             assert!(untrusted::has_marker(&output), "{output}");
             assert!(untrusted_body(&output).starts_with("[exit 3]\noops"));
