@@ -133,12 +133,7 @@ impl BlobHandler {
             ("why".into(), J::s(why)),
         ])
         .compact();
-        let _ = node.send_until_delivered(
-            &m,
-            "bsdone",
-            body.as_bytes(),
-            Duration::from_secs(30),
-        );
+        let _ = node.send_until_delivered(&m, "bsdone", body.as_bytes(), Duration::from_secs(30));
     }
 
     fn begin(&self, node: &Arc<Node>, from: &str, xfer: &str, body: &[u8]) {
