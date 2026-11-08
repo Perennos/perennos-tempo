@@ -796,8 +796,10 @@ pub(super) fn join_with(
     );
     let io = |e: std::io::Error| format!("the connection broke ({e})");
     let mut ok = [0u8; 1];
-    let said =
-        |s: &mut TcpStream| String::from_utf8_lossy(&get(s, 300).unwrap_or_default()).into_owned();
+    let said = |s: &mut TcpStream| match get(s, 300) {
+        Ok(reason) => String::from_utf8_lossy(&reason).into_owned(),
+        Err(e) => format!("could not read the computer's refusal ({e})"),
+    };
     // a computer that turns us away does it before it has read all we sent: its reason is
     // waiting to be read, so a failed write is followed by a read
     let sent = s

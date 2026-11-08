@@ -99,6 +99,8 @@ pub struct Conv {
     pub on_event: Option<EventHook>,
     /// A guest conversation (a chat room, other people): no tools, no memory, no owner context.
     pub guest: bool,
+    /// Set once this conversation has read untrusted content; it stays set across turns.
+    taint: std::sync::Mutex<Option<String>>,
     /// The folder commands run in and files are found from (`/cd`); None: the config's.
     pub cwd: Option<PathBuf>,
     /// How much the agent may do without asking (`/mode`).
@@ -139,6 +141,21 @@ pub fn valid_model(m: &str) -> bool {
         && m.len() <= 100
         && m.chars()
             .all(|c| c.is_ascii_alphanumeric() || ":.-_/".contains(c))
+}
+
+impl Conv {
+    /// Why this conversation has read untrusted content, if it has.
+    pub fn taint(&self) -> Option<String> {
+        self.taint.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Keep the first reason; untrusted content never clears inside a conversation.
+    pub fn set_taint(&self, why: &str) {
+        let mut taint = self.taint.lock().unwrap_or_else(|e| e.into_inner());
+        if taint.is_none() {
+            *taint = Some(why.chars().take(300).collect());
+        }
+    }
 }
 
 /// What the agent may do in a conversation, as Claude Code's modes: `Default` asks as always;
@@ -234,6 +251,7 @@ impl Conv {
             mcp_offered: vec![],
             on_event: None,
             guest: false,
+            taint: std::sync::Mutex::new(None),
             cwd: None,
             permission: cfg.permission,
             turns: 0,
@@ -254,6 +272,7 @@ impl Conv {
             c.messages = d["messages"].as_array().cloned().unwrap_or_default();
             c.events = d["events"].as_array().cloned().unwrap_or_default();
             c.guest = d["mode"] == "guest";
+            c.taint = std::sync::Mutex::new(d["untrusted"].as_str().map(str::to_string));
             c.cwd = d["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir());
             c.permission = d["permission"]
                 .as_str()
@@ -313,7 +332,7 @@ impl Conv {
         }
         if std::fs::write(
             &tmp,
-            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" },
+            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" }, "untrusted": self.taint(),
                 "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine, "format": self.format, "band": self.band, "part": self.part,
                 "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
@@ -437,12 +456,14 @@ mod tests {
         let c = cfg();
         let mut cv = Conv::open(&c, Some("keep")).unwrap();
         cv.messages.push(json!({"role": "user", "content": "hi"}));
+        cv.set_taint("room message");
         cv.emit("user", "hi");
         cv.save();
         assert!(!cv.path.with_extension("json.tmp").exists());
         let again = Conv::open(&c, Some("keep")).unwrap();
         assert_eq!(again.messages.len(), 1);
         assert_eq!(again.events.len(), 1);
+        assert_eq!(again.taint().as_deref(), Some("room message"));
     }
 
     #[test]

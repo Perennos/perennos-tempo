@@ -19,6 +19,7 @@ pub mod soundcheck;
 pub mod soundcheck_mcp;
 pub mod tempo_home;
 pub mod tools;
+pub mod untrusted;
 pub mod util;
 pub mod voice;
 pub mod woodshed;
