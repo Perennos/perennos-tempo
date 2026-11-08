@@ -400,6 +400,9 @@ fn take_attempt(p: &Paths, now: u64) -> Result<String, &'static str> {
                     let _ = std::fs::remove_file(p.file(INVITE_FILE));
                     return Err("the code ran out");
                 }
+                if i.tries >= TRIES {
+                    return Err("no invitation is open");
+                }
                 i.tries += 1;
                 if i.tries >= TRIES {
                     // the last allowed try: it is used, and the invitation is gone either way
