@@ -570,6 +570,35 @@ impl Node {
         Ok(!self.is_pending(&id))
     }
 
+    /// Retry this durable message until the peer acknowledges it or `limit` expires.
+    pub(crate) fn send_until_delivered(
+        &self,
+        m: &Machine,
+        topic: &str,
+        body: &[u8],
+        limit: Duration,
+    ) -> Result<bool, String> {
+        let id = self.enqueue(&m.name, topic, body)?;
+        let until = Instant::now() + limit;
+        let mut delay = Duration::from_millis(100);
+        loop {
+            let _ = self.deliver(m);
+            if !self.is_pending(&id) {
+                return Ok(true);
+            }
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            let _ = lock(&self.db).execute(
+                "UPDATE outbox SET next_try=0 WHERE id=?1 AND delivered=0",
+                params![id],
+            );
+            std::thread::sleep(delay.min(remaining));
+            delay = (delay * 2).min(Duration::from_secs(2));
+        }
+    }
+
     fn is_pending(&self, id: &str) -> bool {
         lock(&self.db)
             .query_row(
@@ -746,5 +775,34 @@ impl Node {
                 out.clear();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod delivery_retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_durable_message_retries_when_the_peer_returns() {
+        let a = super::super::tests::rig("retry-a", [7; 32]);
+        let mut b = super::super::tests::rig("retry-b", [7; 32]);
+        let mb = super::super::tests::link(&a, &b);
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], b.port));
+        b.handle.take().expect("receiver listener").stop();
+
+        let node = a.node.clone();
+        let send = std::thread::spawn(move || {
+            node.send_until_delivered(&mb, "retry-probe", b"ready", Duration::from_secs(5))
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let listener = super::super::serve::listen(&b.node, &[address]).unwrap();
+
+        assert!(send.join().unwrap().unwrap());
+        assert!(b
+            .node
+            .inbox(Some("retry-probe"), 10)
+            .iter()
+            .any(|m| m.body.as_slice() == b"ready"));
+        drop(listener);
     }
 }

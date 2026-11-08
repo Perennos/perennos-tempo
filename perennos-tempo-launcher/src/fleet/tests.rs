@@ -22,11 +22,11 @@ thread_local! {
     static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Once per run: scratch folders an earlier, interrupted run left over (over two hours old).
+/// Once per run: scratch folders an earlier, interrupted run left over (over 30 minutes old).
 fn sweep_stale() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let old = Duration::from_secs(2 * 60 * 60);
+        let old = Duration::from_secs(30 * 60);
         let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
             return;
         };
