@@ -109,6 +109,29 @@ jobs:
           name: dist-windows-latest
           path: dist/
           if-no-files-found: error
+      - name: Store MSIX package (unsigned; separate from release files)
+        if: github.event_name == 'workflow_dispatch' && vars.MSIX_IDENTITY_NAME != '' && vars.MSIX_PUBLISHER != '' && vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $stage = Get-ChildItem installer/windows/build/stage -Directory |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if (-not $stage) { throw 'The Windows source-available build stage is missing.' }
+          $out = Join-Path $env:RUNNER_TEMP 'store-msix'
+          ./installer/windows/msix/build-msix.ps1 -Store `
+            -IdentityName $env:MSIX_IDENTITY_NAME `
+            -Publisher $env:MSIX_PUBLISHER `
+            -PublisherDisplayName $env:MSIX_PUBLISHER_DISPLAY_NAME `
+            -Apps vault,studio,room -Prebuilt $stage.FullName -OutDir $out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: github.event_name == 'workflow_dispatch' && vars.MSIX_IDENTITY_NAME != '' && vars.MSIX_PUBLISHER != '' && vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+        with:
+          name: store-msix
+          path: ${{ runner.temp }}/store-msix/
+          if-no-files-found: error
 
   draft:
     name: SHA256SUMS.txt and the draft release
@@ -128,7 +151,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir got
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir got \
+            --pattern 'dist-ubuntu-latest' --pattern 'dist-macos-latest' --pattern 'dist-windows-latest'
           mkdir -p dist
           find got -type f ! -name '*.sha256' -exec mv {} dist/ \;
           ls -la dist
