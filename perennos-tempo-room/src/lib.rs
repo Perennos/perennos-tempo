@@ -9,11 +9,14 @@ pub mod cli;
 pub mod hub;
 pub mod mcp;
 pub mod server;
+pub mod stage_hook;
+pub mod stage_phrase;
 pub mod store;
 pub mod team;
 pub mod tempo_home;
 pub mod util;
 pub mod vault;
+pub mod voice;
 
 #[cfg(test)]
 pub mod testutil;

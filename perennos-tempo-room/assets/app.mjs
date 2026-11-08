@@ -1,5 +1,6 @@
 // Perennos Tempo Room: the app. No framework, no build step, no inline script or style, and no
 // innerHTML with anything a person typed: every message is built from text nodes.
+import { mountVoice, addressTo } from '/voice.mjs'; // talk to Tempo: heard on the owner's computer (see voice.mjs)
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -13,6 +14,8 @@ const save = (k, v) => { try { localStorage.setItem('tempo-room:' + k, v); } cat
 const wide = () => window.matchMedia('(min-width: 860px)').matches;
 const coarse = () => window.matchMedia('(pointer: coarse)').matches;
 
+let voice = null; // the mic (voice.mjs)
+const voiceGuests = new Map(); // room -> may members use the mic
 const S = {
   me: null,
   rooms: [],
@@ -98,14 +101,35 @@ async function copy(text, input) {
 
 // ---------------------------------------------------------------- theme and greeting
 
-const THEMES = ['charcoal', 'ink', 'paper'];
-function applyTheme(t) {
-  if (!THEMES.includes(t)) t = 'charcoal';
+const THEMES = ['system', 'light', 'dark'];
+const systemLight = () => window.matchMedia('(prefers-color-scheme: light)').matches;
+function paintTheme(t) {
   document.documentElement.dataset.theme = t;
+  const light = t === 'light' || (t === 'system' && systemLight());
   const meta = document.querySelector('meta[name=theme-color]');
-  if (meta) meta.content = t === 'paper' ? '#efe9dc' : t === 'ink' ? '#070708' : '#1b1a1b';
+  if (meta) meta.content = light ? '#f1ece1' : '#1b1a1b';
   $('theme').firstElementChild.textContent = t;
+}
+// Changes the screen with a View Transition (a slow dissolve and rise) where there is one, at once where not.
+function swap(change) {
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (document.startViewTransition && !calm) document.startViewTransition(change);
+  else change();
+}
+// Fades between themes: a View Transition where there is one, a short colour transition where not.
+function applyTheme(t, animate = false) {
+  if (t === 'charcoal' || t === 'ink') t = t === 'ink' ? 'dark' : 'system'; // the old names
+  if (t === 'paper') t = 'light';
+  if (!THEMES.includes(t)) t = 'system';
   save('theme', t);
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (animate && !calm && document.startViewTransition) document.startViewTransition(() => paintTheme(t));
+  else if (animate && !calm) {
+    const root = document.documentElement;
+    root.classList.add('tt-fading');
+    paintTheme(t);
+    setTimeout(() => root.classList.remove('tt-fading'), 400);
+  } else paintTheme(t);
 }
 
 function greet() {
@@ -171,8 +195,11 @@ async function refreshMe() {
 }
 
 async function boot() {
-  applyTheme(load('theme') || 'charcoal');
+  applyTheme(load('theme') || 'system');
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => paintTheme(document.documentElement.dataset.theme));
   wire();
+  // The slow field behind the join and empty screens: only where WebGL works, never blocks the app.
+  import('/field.mjs').then((m) => m.mountField($('field'))).catch(() => {});
   const h = parseHash();
   if (h.owner) {
     try { await api('owner', { token: h.owner }); } catch (e) { toast(e.message, 8000); }
@@ -334,15 +361,18 @@ async function openRoom(id, push) {
   S.unread.delete(id);
   S.replyTo = null;
   updateReply();
-  document.body.classList.add('in-room');
-  $('chat').hidden = false;
-  $('back').hidden = false;
-  $('invite').hidden = S.me.role !== 'owner';
-  roomHeader(r);
+  swap(() => {
+    document.body.classList.add('in-room');
+    $('chat').hidden = false;
+    $('back').hidden = false;
+    $('invite').hidden = S.me.role !== 'owner';
+    roomHeader(r);
+  });
   if (push && !wide()) history.pushState({ room: id }, '');
   $('text').value = load('draft:' + id) || '';
   autosize();
   const j = await api('messages?room=' + enc(id) + '&limit=60');
+  voice?.refresh();
   S.msgs.set(id, j.messages);
   S.more.set(id, j.more !== false);
   if (j.thinking) {
@@ -361,11 +391,13 @@ function closeRoom() {
   saveDraft();
   S.room = null;
   save('room', '');
-  document.body.classList.remove('in-room');
-  $('chat').hidden = true;
-  $('back').hidden = true;
-  $('room-sep').hidden = true;
-  $('room-crumb').hidden = true;
+  swap(() => {
+    document.body.classList.remove('in-room');
+    $('chat').hidden = true;
+    $('back').hidden = true;
+    $('room-sep').hidden = true;
+    $('room-crumb').hidden = true;
+  });
   closeSuggest();
   renderRooms();
 }
@@ -611,7 +643,9 @@ function addMsg(m) {
   const prev = list.length > 1 ? list[list.length - 2] : null;
   const sameDay = prev && dayLabel(prev.t) === dayLabel(m.t);
   if (!sameDay) box.append(el('div', 'day', dayLabel(m.t)));
-  box.append(msgNode(m, sameDay ? prev : null));
+  const node = msgNode(m, sameDay ? prev : null);
+  node.classList.add('new');
+  box.append(node);
   if (end || isMine(m)) box.scrollTop = box.scrollHeight;
   else $('jump').hidden = false;
 }
@@ -692,6 +726,7 @@ function onMessage(room, m) {
   r.last = m;
   r.count = Math.max(r.count, m.id);
   addMsg(m);
+  if (m.kind === 'tempo' && room === S.room && S.askedByVoice && Date.now() - S.askedByVoice < 180000) { S.askedByVoice = 0; voice?.say(m.text); }
   const away = room !== S.room || document.hidden;
   if (away && !isMine(m) && m.kind !== 'system') S.unread.set(room, (S.unread.get(room) || 0) + 1);
   renderRoomsSoon();
@@ -707,6 +742,7 @@ function updateTitle() {
 function renderThinking() {
   const since = S.room ? S.thinking.get(S.room) : 0;
   $('thinking').hidden = !since;
+  document.documentElement.dataset.busy = since ? 'true' : 'false'; // the insignia's circuit runs faster while Tempo thinks
   if (since) {
     const s = Math.floor((Date.now() - since) / 1000);
     const names = S.thinkers.get(S.room) || [];
@@ -791,12 +827,36 @@ function suggestions(q) {
   return [...new Set(names)].filter((n) => n.toLowerCase().startsWith(ql) && !(S.me && n === S.me.name && n !== 'tempo')).slice(0, 8);
 }
 
+// "/" at the start of the message lists the room's own commands, then the people you can @.
+const ROOM_COMMANDS = [
+  ['/help', 'what Tempo can do in this room'],
+  ['/bpm', 'tap four times and Tempo says the tempo'],
+  ['/tap', 'the same as /bpm'],
+  ['/mode', 'plain, warm, playful, always or mention (owner only)'],
+  ['/mute', 'quiet @someone for now (owner only)'],
+  ['/unmute', 'let @someone talk again (owner only)'],
+];
+function slashItems(q) {
+  const ql = q.toLowerCase();
+  const cmds = ROOM_COMMANDS.filter(([n]) => n.slice(1).startsWith(ql)).map(([n]) => n);
+  const who = suggestions('').map((n) => '@' + n).filter((n) => !ql || n.slice(1).toLowerCase().startsWith(ql));
+  return [...cmds, ...who].slice(0, 12);
+}
+
 function onInput() {
   autosize();
   clearTimeout(draftTimer);
   draftTimer = setTimeout(saveDraft, 400);
   const t = $('text');
   const before = t.value.slice(0, t.selectionStart);
+  const sl = before === t.value ? before.match(/^\/([a-z]*)$/i) : null;
+  if (sl) {
+    const items = slashItems(sl[1]);
+    if (!items.length) { closeSuggest(); return; }
+    S.sugg = { items, i: 0, at: 0, slash: true };
+    renderSuggest();
+    return;
+  }
   const m = before.match(/(^|\s)@([\p{L}\p{N}_]*)$/u);
   if (!m) { closeSuggest(); return; }
   const items = suggestions(m[2]);
@@ -813,7 +873,13 @@ function renderSuggest() {
     b.type = 'button';
     b.setAttribute('role', 'option');
     b.setAttribute('aria-selected', String(i === S.sugg.i));
-    if (n === 'tempo') {
+    if (S.sugg.slash && n.startsWith('/')) {
+      b.append(el('span', null, n), el('i', null, ROOM_COMMANDS.find(([c]) => c === n)[1]));
+    } else if (S.sugg.slash) {
+      const h = n.slice(1), t = ((S.people.get(S.room) || {}).team || []).find((x) => x.handle === h);
+      if (h === 'tempo') b.append(el('span', 'mark', 'tempo'), el('i', null, 'ask Perennos Tempo'));
+      else b.append(el('span', null, n), el('i', null, t ? t.name + ' · teammate' : 'in this room'));
+    } else if (n === 'tempo') {
       b.append(el('span', 'mark', 'tempo'), el('i', null, 'ask Perennos Tempo'));
     } else {
       const t = ((S.people.get(S.room) || {}).team || []).find((x) => x.handle === n);
@@ -836,7 +902,7 @@ function pick(i) {
   const name = S.sugg.items[i];
   if (name == null) return;
   const caret = t.selectionStart;
-  const ins = '@' + name + ' ';
+  const ins = S.sugg.slash ? name + ' ' : '@' + name + ' ';
   t.value = t.value.slice(0, S.sugg.at) + ins + t.value.slice(caret);
   const pos = S.sugg.at + ins.length;
   t.setSelectionRange(pos, pos);
@@ -942,8 +1008,10 @@ async function openPeople() {
       list.append(d);
     }
     box.append(list);
+    if (!owner) voiceSection(box, r, false);
     if (owner) {
       toolsSection(box, r);
+      voiceSection(box, r, true);
       teamSection(box, r, team);
       box.append(el('p', 'lbl sec', "Tempo's tone here"));
       const tone = el('div', 'seg-row');
@@ -986,6 +1054,25 @@ async function openPeople() {
 }
 
 // ---- Tools: Tempo works with its tools while the owner is alone in the room (owner only)
+
+// Talk to Tempo: the owner's per-room switch for members, and everyone's own voice options.
+function voiceSection(box, r, owner) {
+  if (!voice?.settings || voice.settings.hidden) return;
+  box.append(el('p', 'lbl sec', 'Talk to Tempo'));
+  if (owner) {
+    const label = el('label', 'switch');
+    const input = el('input');
+    input.type = 'checkbox';
+    input.setAttribute('role', 'switch');
+    input.checked = !!voiceGuests.get(r.id);
+    label.append(input, el('span', null, 'Let members use the mic here. What they say is heard by this computer, and goes nowhere else.'));
+    input.addEventListener('change', async () => {
+      try { await api('voice/guests', { room: r.id, on: input.checked }); voiceGuests.set(r.id, input.checked); } catch (e) { toast(e.message, 6000); input.checked = !input.checked; }
+    });
+    box.append(label);
+  }
+  box.append(voice.settings);
+}
 
 function toolsSection(box, r) {
   box.append(el('p', 'lbl sec', 'Tools'));
@@ -1309,7 +1396,7 @@ async function haiku() {
 function wire() {
   $('theme').addEventListener('click', () => {
     const cur = document.documentElement.dataset.theme;
-    applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
+    applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length], true);
   });
   $('join-form').addEventListener('submit', join);
   $('back').addEventListener('click', () => { if (history.state && history.state.room) history.back(); else closeRoom(); });
@@ -1342,6 +1429,16 @@ function wire() {
   $('people').addEventListener('click', openPeople);
   $('invite').addEventListener('click', openInvite);
   $('send').addEventListener('click', send);
+  voice = mountVoice({
+    comp: $('composer'), anchor: $('send'), input: $('text'),
+    send: async () => { S.askedByVoice = Date.now(); await send(); },
+    endpoint: '/room/voice', query: () => '&room=' + enc(S.room || ''),
+    address: (t) => addressTo(t, { mention: '@tempo', names: suggestions('').concat('tempo') }),
+    led: document.querySelector('[data-insignia]'),
+    store: { get: (k, d) => load(k) ?? d, set: save },
+    canUse: () => !!S.me && S.me.role !== 'guest',
+    onStatus: (c) => { if (S.room && c.owner) voiceGuests.set(S.room, !!c.guests); },
+  });
   $('text').addEventListener('input', onInput);
   $('text').addEventListener('keydown', onKey);
   $('text').addEventListener('blur', () => setTimeout(closeSuggest, 150));

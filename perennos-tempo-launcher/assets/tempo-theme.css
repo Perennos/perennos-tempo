@@ -1,0 +1,225 @@
+/* Perennos Tempo: one look for every Tempo surface. Near-black charcoal, warm cream ink, one warm
+   red-orange accent, mono labels with wide tracking, italic serif headings. No green.
+   Fonts: the site's own (Archivo, Instrument Serif Italic, JetBrains Mono Bold) and Bodoni Moda for the biggest
+   display moments (all SIL OFL 1.1), then system stacks. Archivo's width axis gives a wide grotesk through font-stretch.
+   This file is the same bytes in every Tempo crate that ships a page; change it
+   in all of them together (tests/check_theme_copies.py says if they differ).
+   Brand images and fonts: set --wm-src and --ins-src (url(...)) and declare the @font-face rules once per app, in
+   the app's own sheet (the page head for the launcher); see the brand section.
+   Themes: data-theme="dark" | "light" | (anything else, or none) = follow the system.
+   Scope: the page root (:root), or any element with class "tempo" for a module mounted in a host.
+   Pages without a script switch with the radio group `.tt-theme` (ids tt-system, tt-light, tt-dark)
+   through :has() on the root. */
+
+:root,.tempo{
+  color-scheme:dark;
+  --bg:#1b1a1b;--bg2:#201f21;--bg3:#262527;--panel:rgba(32,31,33,.86);
+  --line:rgba(236,230,218,.09);--line2:rgba(236,230,218,.18);--line3:rgba(236,230,218,.3);
+  --ink:#e9e6df;--frost:#d4d1ca;--silver:#a9aaad;--mute:#8b949b;--dim:#4f5053;
+  --warm:#ff5b1f;--warm2:#ff8a5c;--on-warm:#1b1a1b;--glow:rgba(255,91,31,.55);--warm-soft:rgba(255,91,31,.08);
+  --tag:#8fb3d1;--sand:#c9b38a;--codebg:rgba(236,230,218,.06);--hover:rgba(236,230,218,.04);--shadow:rgba(0,0,0,.5);--ins-shadow:0 10px 26px rgba(0,0,0,.45);
+  --serif:"Instrument Serif","Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Charter,Georgia,serif;
+  --sans:"Archivo",ui-sans-serif,system-ui,-apple-system,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
+  --label:"JetBrains Mono",ui-monospace,"SF Mono","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace; /* the bold face the site uses for labels */
+  --display:"Bodoni Moda","Instrument Serif","Didot","Bodoni 72","Iowan Old Style",Palatino,Georgia,serif; /* high-contrast Didone, for hero moments */
+  --r:2px;--ease:cubic-bezier(.2,.7,.2,1);--expo:cubic-bezier(.16,1,.3,1);--dur:.28s;
+  /* a 4 / 8 px rhythm */
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--s8:64px;--s9:96px;
+  /* a fluid type scale: label, small, body, lead, h3, h2, h1, hero */
+  --fs-label:10px;--fs-small:12.5px;--fs-body:clamp(14px,.35vw + 12.6px,16px);--fs-lead:clamp(16px,.7vw + 13px,20px);
+  --fs-h3:clamp(20px,1vw + 15px,28px);--fs-h2:clamp(28px,2.4vw + 15px,48px);--fs-h1:clamp(38px,5vw + 14px,80px);--fs-hero:clamp(52px,8.5vw + 8px,124px);
+  --hair:1px;--tick:9px;
+  --grain:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScyMDAnIGhlaWdodD0nMjAwJz48ZmlsdGVyIGlkPSduJyB4PScwJyB5PScwJyB3aWR0aD0nMTAwJScgaGVpZ2h0PScxMDAlJz48ZmVUdXJidWxlbmNlIHR5cGU9J2ZyYWN0YWxOb2lzZScgYmFzZUZyZXF1ZW5jeT0nLjgnIG51bU9jdGF2ZXM9JzInIHN0aXRjaFRpbGVzPSdzdGl0Y2gnLz48ZmVDb2xvck1hdHJpeCB2YWx1ZXM9JzAgMCAwIDAgLjUgMCAwIDAgMCAuNSAwIDAgMCAwIC41IDAgMCAwIC45IC0uMjgnLz48L2ZpbHRlcj48cmVjdCB3aWR0aD0nMTAwJScgaGVpZ2h0PScxMDAlJyBmaWx0ZXI9J3VybCgjbiknLz48L3N2Zz4=);
+}
+@media (min-resolution:2dppx){:root,.tempo{--hair:.5px}}
+:root[data-theme=light],.tempo[data-theme=light]{
+  color-scheme:light;
+  --bg:#f1ece1;--bg2:#e9e3d6;--bg3:#e3dccd;--panel:rgba(241,236,225,.92);
+  --line:rgba(27,26,27,.1);--line2:rgba(27,26,27,.22);--line3:rgba(27,26,27,.38);
+  --ink:#1b1a1b;--frost:#2a2a2c;--silver:#4a4a4e;--mute:#5a5754;--dim:#a7a39b;
+  --warm:#bb3610;--warm2:#9e2d0a;--on-warm:#fff;--glow:rgba(187,54,16,.4);--warm-soft:rgba(187,54,16,.07);
+  --tag:#2a6190;--sand:#7d6234;--codebg:rgba(27,26,27,.06);--hover:rgba(27,26,27,.04);--shadow:rgba(27,26,27,.22);--ins-shadow:0 8px 16px rgba(27,26,27,.38);
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]):not(:has(#tt-dark:checked)),.tempo:not([data-theme=dark]){
+    color-scheme:light;
+    --bg:#f1ece1;--bg2:#e9e3d6;--bg3:#e3dccd;--panel:rgba(241,236,225,.92);
+    --line:rgba(27,26,27,.1);--line2:rgba(27,26,27,.22);--line3:rgba(27,26,27,.38);
+    --ink:#1b1a1b;--frost:#2a2a2c;--silver:#4a4a4e;--mute:#5a5754;--dim:#a7a39b;
+    --warm:#bb3610;--warm2:#9e2d0a;--on-warm:#fff;--glow:rgba(187,54,16,.4);--warm-soft:rgba(187,54,16,.07);
+    --tag:#2a6190;--sand:#7d6234;--codebg:rgba(27,26,27,.06);--hover:rgba(27,26,27,.04);--shadow:rgba(27,26,27,.22);--ins-shadow:0 8px 16px rgba(27,26,27,.38);
+  }
+}
+:root:has(#tt-light:checked){
+  color-scheme:light;
+  --bg:#f1ece1;--bg2:#e9e3d6;--bg3:#e3dccd;--panel:rgba(241,236,225,.92);
+  --line:rgba(27,26,27,.1);--line2:rgba(27,26,27,.22);--line3:rgba(27,26,27,.38);
+  --ink:#1b1a1b;--frost:#2a2a2c;--silver:#4a4a4e;--mute:#5a5754;--dim:#a7a39b;
+  --warm:#bb3610;--warm2:#9e2d0a;--on-warm:#fff;--glow:rgba(187,54,16,.4);--warm-soft:rgba(187,54,16,.07);
+  --tag:#2a6190;--sand:#7d6234;--codebg:rgba(27,26,27,.06);--hover:rgba(27,26,27,.04);--shadow:rgba(27,26,27,.22);--ins-shadow:0 8px 16px rgba(27,26,27,.38);
+}
+
+/* ------------------------------------------------------------------ base */
+*,*::before,*::after{box-sizing:border-box}
+html{background:var(--bg);color:var(--ink);-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:var(--fs-body)/1.6 var(--sans);font-optical-sizing:auto;font-kerning:normal;font-variant-ligatures:common-ligatures;font-variant-numeric:oldstyle-nums proportional-nums;hanging-punctuation:first last;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer}
+::selection{background:var(--warm);color:var(--on-warm);text-shadow:none}
+a{color:var(--frost)}
+/* type: balanced headings, tidy paragraph ends, tabular figures wherever numbers line up */
+h1,h2,h3,h4,.tt-h,.tt-display{text-wrap:balance}
+p,li,blockquote,figcaption,dd{text-wrap:pretty}
+code,pre,kbd,samp,table,.mono,.tt-num,.tt-lbl,.tt-kbd,.tt-kicker{font-variant-numeric:lining-nums tabular-nums}
+/* paper or film grain: a still, very light noise over everything, never in the way of a click */
+html::after{content:"";position:fixed;inset:0;z-index:2147483000;pointer-events:none;background:var(--grain) 0 0/200px 200px;opacity:.22}
+:root[data-theme=light]::after{opacity:.16}
+@media (prefers-color-scheme:light){:root:not([data-theme=dark])::after{opacity:.16}}
+@media print{html::after{display:none}}
+/* thin, quiet scrollbars */
+*{scrollbar-width:thin;scrollbar-color:var(--line3) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line3);border:3px solid transparent;background-clip:padding-box;border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:var(--mute);border:3px solid transparent;background-clip:padding-box}
+[hidden]{display:none!important}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.tt-lbl{font:500 10px/1.3 var(--label);letter-spacing:.24em;text-transform:uppercase;color:var(--mute)}
+.tt-kbd{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border:1px solid var(--line2);border-radius:var(--r);font:500 9.5px/1 var(--label);color:var(--silver);letter-spacing:0}
+.tt-h{margin:0;font:italic 400 var(--fs-h2)/1.02 var(--serif);letter-spacing:-.022em;color:var(--ink)}
+/* the editorial voice: a Didone italic for the biggest moments, tight; optical size follows the font size */
+.tt-display{margin:0;font:italic 400 var(--fs-hero)/.94 var(--display);font-optical-sizing:auto;letter-spacing:-.04em;color:var(--ink)}
+.tt-display.roman{font-style:normal;letter-spacing:-.035em}
+.tt-display em{font-style:italic;color:var(--warm2)}
+.tt-wide{font-stretch:125%;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.tt-lead{font-size:var(--fs-lead);line-height:1.5;color:var(--frost);max-width:58ch}
+/* a small mono kicker above a spread headline: <p class="tt-kicker">01 - What this computer can run</p> */
+.tt-kicker{display:flex;align-items:center;gap:var(--s3);margin:0 0 var(--s3);font:700 10px/1.3 var(--label);letter-spacing:.32em;text-transform:uppercase;color:var(--warm2)}
+.tt-kicker::before{content:"";width:var(--s6);height:var(--hair);background:currentColor;flex:none}
+/* hairlines, corner ticks */
+.tt-rule{height:var(--hair);margin:var(--s6) 0;border:0;background:var(--line2)}
+.tt-ticks{position:relative}
+.tt-ticks::before{content:"";position:absolute;inset:-5px;pointer-events:none;z-index:1;
+  --c:linear-gradient(var(--line3),var(--line3));
+  background:var(--c) 0 0/var(--tick) var(--hair),var(--c) 0 0/var(--hair) var(--tick),var(--c) 100% 0/var(--tick) var(--hair),var(--c) 100% 0/var(--hair) var(--tick),var(--c) 0 100%/var(--tick) var(--hair),var(--c) 0 100%/var(--hair) var(--tick),var(--c) 100% 100%/var(--tick) var(--hair),var(--c) 100% 100%/var(--hair) var(--tick);
+  background-repeat:no-repeat;transition:inset .6s var(--expo)}
+.tt-ticks:hover::before{inset:-8px}
+/* buttons: a pill or a square, and a plain text button that draws its underline when pointed at */
+.tt-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:var(--s3);min-height:40px;padding:0 var(--s5);border:var(--hair) solid var(--line3);border-radius:999px;background:transparent;color:var(--ink);font:700 10.5px/1 var(--label);letter-spacing:.22em;text-transform:uppercase;text-decoration:none;white-space:nowrap;transition:background-color .5s var(--expo),color .5s var(--expo),border-color .5s var(--expo),transform .12s var(--ease)}
+.tt-btn:hover{background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.tt-btn.sq{border-radius:0}
+.tt-btn.warm{border-color:var(--warm);background:var(--warm);color:var(--on-warm)}
+.tt-btn.warm:hover{background:transparent;color:var(--warm2)}
+.tt-btn.quiet{border-color:transparent}
+.tt-btn:disabled{opacity:.45;cursor:default;pointer-events:none}
+.tt-link{padding:0 0 3px;border:0;background:linear-gradient(currentColor,currentColor) 0 100%/0 var(--hair) no-repeat;color:inherit;font:inherit;text-decoration:none;transition:background-size .6s var(--expo)}
+.tt-link:hover,.tt-link:focus-visible{background-size:100% var(--hair)}
+/* inputs with a floating label: <div class="tt-field"><input id=x placeholder=" "><label for=x>Name</label></div> */
+.tt-field{position:relative;display:block;padding-top:var(--s3)}
+.tt-field>input,.tt-field>textarea,.tt-field>select{display:block;width:100%;padding:var(--s4) 0 var(--s2);border:0;border-bottom:var(--hair) solid var(--line3);border-radius:0;background:transparent;color:var(--ink);font:400 16px/1.3 var(--sans);outline:none;transition:border-color .4s var(--expo)}
+.tt-field>label{position:absolute;left:0;top:calc(var(--s3) + var(--s4));font:400 15px/1.2 var(--sans);color:var(--mute);pointer-events:none;transform-origin:0 0;transition:transform .5s var(--expo),color .4s var(--expo),letter-spacing .5s var(--expo)}
+.tt-field>input:focus+label,.tt-field>input:not(:placeholder-shown)+label,.tt-field>textarea:focus+label,.tt-field>textarea:not(:placeholder-shown)+label,.tt-field>select+label{transform:translateY(calc(-1 * var(--s4) - 2px)) scale(.66);letter-spacing:.14em;text-transform:none}
+.tt-field>input:focus+label,.tt-field>textarea:focus+label{color:var(--warm2)}
+.tt-field::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5px;background:var(--warm);transform:scaleX(0);transform-origin:0 50%;transition:transform .7s var(--expo)}
+.tt-field:focus-within::after{transform:scaleX(1)}
+:focus-visible{outline:1.5px solid var(--warm);outline-offset:3px;animation:tt-ring .3s var(--expo)}
+.tt-field>input:focus-visible,.tt-field>textarea:focus-visible{outline:0;animation:none}
+@keyframes tt-ring{from{outline-offset:9px;outline-color:transparent}}
+button:active:not(:disabled),.tt-press:active{transform:translateY(1px) scale(.985)}
+button{transition:transform .12s var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease),background-color var(--dur) var(--ease)}
+
+/* ------------------------------------------------------------- the brand */
+/* The official wordmark and insignia are images, named in ONE place per app (the page or sheet that loads
+   this file sets --wm-src and --ins-src), so swapping the artwork never touches a component.
+   The wordmark is a mask painted with the ink colour: cream on dark, ink on light, from the tokens.
+   The insignia is a dark stone P; its lit channel is a living LED circuit (.tt-led) laid exactly over the
+   strip in the picture. The strip's outline is measured from perennos-insignia.webp (335 x 433) and kept
+   here, once, as --led-clip and --led-angle (the angle of the stem, as a CSS gradient angle). */
+:root,.tempo{--led-clip:polygon(16.9% 41.7%,29.1% 62.4%,38% 74.7%,47% 86.2%,52.4% 96.6%,56% 96.6%,50.6% 85.5%,42.4% 73.1%,32.1% 60%,20.9% 41.4%);--led-angle:153.6deg}
+.tt-wm{display:inline-block;height:1em;aspect-ratio:448/64;flex:none;vertical-align:middle;background:var(--ink);-webkit-mask:var(--wm-src) center/contain no-repeat;mask:var(--wm-src) center/contain no-repeat}
+.tt-brand{display:inline-flex;align-items:center;gap:9px;min-width:0;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tt-brand .tt-ins{height:30px}
+.tt-brand .tt-wm{height:15px}
+.tt-brand b{font:500 15px/1 var(--sans);font-weight:500;letter-spacing:.01em;color:var(--silver);margin-left:-2px}
+.tt-ins{position:relative;display:inline-block;flex:none;height:2em;aspect-ratio:335/433;container-type:size;background:var(--ins-src) center/contain no-repeat;filter:drop-shadow(var(--ins-shadow));transition:transform .6s var(--ease);--led-speed:1;vertical-align:middle}
+.tt-ins.hero{height:min(300px,40vw);animation:tt-float 11s ease-in-out infinite}
+.tt-ins.tilt:hover{transform:perspective(520px) rotateY(-14deg) rotateX(6deg)}
+.tt-led{position:absolute;inset:0;pointer-events:none;clip-path:var(--led-clip);mix-blend-mode:screen;opacity:.8;
+  background:linear-gradient(var(--led-angle),#7c3aed,#3b82f6,#22d3ee,#34d399,#e879f9,#7c3aed) 0 0/100% 500%;
+  -webkit-mask-image:linear-gradient(var(--led-angle),transparent 0,#000 35%,transparent 70%),linear-gradient(var(--led-angle),transparent 0,#000 25%,transparent 55%),repeating-linear-gradient(calc(var(--led-angle) + 90deg),transparent 0 1.6cqh,rgba(0,0,0,.85) 1.6cqh 2.1cqh),repeating-linear-gradient(var(--led-angle),transparent 0 3cqh,rgba(0,0,0,.8) 3cqh 3.6cqh),repeating-linear-gradient(var(--led-angle),transparent 0 .9cqh,rgba(0,0,0,.45) .9cqh 1.2cqh),linear-gradient(rgba(0,0,0,.14),rgba(0,0,0,.14));
+  mask-image:linear-gradient(var(--led-angle),transparent 0,#000 35%,transparent 70%),linear-gradient(var(--led-angle),transparent 0,#000 25%,transparent 55%),repeating-linear-gradient(calc(var(--led-angle) + 90deg),transparent 0 1.6cqh,rgba(0,0,0,.85) 1.6cqh 2.1cqh),repeating-linear-gradient(var(--led-angle),transparent 0 3cqh,rgba(0,0,0,.8) 3cqh 3.6cqh),repeating-linear-gradient(var(--led-angle),transparent 0 .9cqh,rgba(0,0,0,.45) .9cqh 1.2cqh),linear-gradient(rgba(0,0,0,.14),rgba(0,0,0,.14));
+  -webkit-mask-size:100% 600%,100% 450%,100% 100%,100% 100%,100% 12cqh,100% 100%;mask-size:100% 600%,100% 450%,100% 100%,100% 100%,100% 12cqh,100% 100%;
+  -webkit-mask-repeat:no-repeat,no-repeat,no-repeat,no-repeat,repeat-y,no-repeat;mask-repeat:no-repeat,no-repeat,no-repeat,no-repeat,repeat-y,no-repeat;
+  animation:tt-led-hue calc(30s / var(--led-speed)) linear infinite,tt-led-run calc(7s / var(--led-speed)) linear infinite}
+.tt-ins::after{content:"";position:absolute;left:7%;top:41%;width:24%;height:58%;transform:rotate(-26.4deg);transform-origin:50% 0;background:radial-gradient(closest-side,rgba(124,58,237,.6),transparent);mix-blend-mode:screen;opacity:0;pointer-events:none;animation:tt-glow calc(5s / var(--led-speed)) ease-in-out infinite}
+/* when the app is thinking the pulses run faster and brighter; at rest it is a slow drift */
+[data-busy=true] .tt-ins,.tt-ins.busy{--led-speed:2.6}
+[data-busy=true] .tt-led,.tt-ins.busy .tt-led{opacity:1}
+@keyframes tt-led-hue{to{background-position:0 100%}}
+@keyframes tt-led-run{from{-webkit-mask-position:0 0,0 0,0 0,0 0,0 0,0 0;mask-position:0 0,0 0,0 0,0 0,0 0,0 0}to{-webkit-mask-position:0 100%,0 100%,0 0,0 0,0 12cqh,0 0;mask-position:0 100%,0 100%,0 0,0 0,0 12cqh,0 0}}
+@keyframes tt-glow{0%,100%{opacity:0}50%{opacity:.55}}
+@keyframes tt-float{0%,100%{transform:translateY(0) rotate(0)}50%{transform:translateY(-9px) rotate(.8deg)}}
+
+/* ------------------------------------------------------ theme and view switch */
+/* Works as buttons (aria-pressed) or, with no script, as a radio group (inputs before their labels). */
+.tt-seg{display:inline-flex;align-items:stretch;border:var(--hair) solid var(--line3);border-radius:999px;background:transparent;overflow:hidden}
+.tt-seg>button,.tt-seg>label{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:0 14px;border:0;border-left:var(--hair) solid var(--line);background:none;color:var(--silver);font:700 9.5px/1 var(--label);letter-spacing:.22em;text-transform:uppercase;cursor:pointer;position:relative;transition:background-color .5s var(--expo),color .5s var(--expo)}
+.tt-seg>:first-child,.tt-seg>input:first-child+label{border-left:0}
+.tt-seg>button:hover,.tt-seg>label:hover{color:var(--ink);background:var(--hover)}
+.tt-seg>button[aria-pressed=true],.tt-seg>input:checked+label{color:var(--bg);background:var(--ink)}
+.tt-seg>input{position:absolute;opacity:0;width:1px;height:1px;margin:0;pointer-events:none}
+.tt-seg>input:focus-visible+label{outline:1.5px solid var(--warm);outline-offset:-3px;border-radius:999px}
+.tt-seg kbd{font:500 9px/1 var(--label);color:var(--mute);border:1px solid var(--line2);border-radius:var(--r);padding:2px 3px}
+
+/* ------------------------------------------------------------------ motion */
+@keyframes tt-rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+@keyframes tt-draw{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes tt-grain{0%{background-position:0 0}20%{background-position:-37px 22px}40%{background-position:41px -29px}60%{background-position:-23px -44px}80%{background-position:30px 38px}100%{background-position:0 0}}
+@keyframes tt-vt-out{to{opacity:0}}
+@keyframes tt-vt-in{from{opacity:0;transform:translateY(12px) scale(.994)}}
+@keyframes tt-fade{from{opacity:0}to{opacity:1}}
+@keyframes tt-ping{0%{transform:scale(1);opacity:.55}70%,100%{transform:scale(2.8);opacity:0}}
+@keyframes tt-drift{from{transform:translate3d(0,0,0)}to{transform:translate3d(32px,32px,0)}}
+@keyframes tt-breathe{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes tt-meridian{0%,100%{transform:scaleX(1)}50%{transform:scaleX(.04)}}
+/* a status dot that pulses softly while something runs: <i class="tt-dot"></i> */
+.tt-dot{position:relative;display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--warm);flex:none}
+.tt-dot.idle{background:var(--dim)}
+.tt-dot.run::after,.tt-dot.up::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--warm);animation:tt-ping 2.4s ease-out infinite}
+/* a calm page with no script: sections rise in one after the other, about 600 ms, expo-out, 60 ms apart */
+.tt-rise>*,.tt-stagger>*{animation:tt-rise .6s var(--expo) both}
+.tt-rise>:nth-child(1),.tt-stagger>:nth-child(1){animation-delay:0.04s}
+.tt-rise>:nth-child(2),.tt-stagger>:nth-child(2){animation-delay:0.10s}
+.tt-rise>:nth-child(3),.tt-stagger>:nth-child(3){animation-delay:0.16s}
+.tt-rise>:nth-child(4),.tt-stagger>:nth-child(4){animation-delay:0.22s}
+.tt-rise>:nth-child(5),.tt-stagger>:nth-child(5){animation-delay:0.28s}
+.tt-rise>:nth-child(6),.tt-stagger>:nth-child(6){animation-delay:0.34s}
+.tt-rise>:nth-child(7),.tt-stagger>:nth-child(7){animation-delay:0.40s}
+.tt-rise>:nth-child(8),.tt-stagger>:nth-child(8){animation-delay:0.46s}
+.tt-rise>:nth-child(9),.tt-stagger>:nth-child(9){animation-delay:0.52s}
+.tt-rise>:nth-child(10),.tt-stagger>:nth-child(10){animation-delay:0.58s}
+.tt-rise>:nth-child(11),.tt-stagger>:nth-child(11){animation-delay:0.64s}
+.tt-rise>:nth-child(12),.tt-stagger>:nth-child(12){animation-delay:0.70s}
+.tt-rise>:nth-child(n+13),.tt-stagger>:nth-child(n+13){animation-delay:.72s}
+/* the field behind a page: a lattice of points that drifts, a warm glow that breathes. Behind everything. */
+.tt-lattice{position:relative;isolation:isolate}
+.tt-lattice::before,.tt-lattice::after{content:"";position:fixed;pointer-events:none;z-index:-1}
+.tt-lattice::before{inset:-32px;background-image:radial-gradient(circle,var(--line3) 1px,transparent 1.5px);background-size:32px 32px;opacity:.55;-webkit-mask-image:radial-gradient(ellipse 70% 60% at 80% 12%,#000,transparent 75%);mask-image:radial-gradient(ellipse 70% 60% at 80% 12%,#000,transparent 75%);animation:tt-drift 60s linear infinite;will-change:transform}
+.tt-lattice::after{inset:0;background:radial-gradient(ellipse 50% 40% at 82% 10%,var(--warm-soft),transparent 70%);animation:tt-breathe 9s ease-in-out infinite}
+/* a card or row that rises a little when pointed at */
+.tt-lift{transition:transform .6s var(--expo),border-color .4s var(--expo),background-color .4s var(--expo)}
+.tt-lift:hover{transform:translateY(-3px);border-color:var(--line3)}
+/* a theme change fades instead of snapping (the fallback when View Transitions are missing) */
+.tt-fading,.tt-fading *,.tt-fading *::before,.tt-fading *::after{transition:background-color .3s ease,color .3s ease,border-color .3s ease,fill .3s ease,stroke .3s ease!important}
+/* page changes (View Transitions, also between generated pages that opt in to a cross-document change) */
+@view-transition{navigation:auto}
+::view-transition-old(root){animation:tt-vt-out .6s var(--expo) both}
+::view-transition-new(root){animation:tt-vt-in .6s var(--expo) both}
+::view-transition-group(bar){animation-duration:.6s;animation-timing-function:var(--expo)}
+/* Pause motion (data-motion="still" on the root or on a .tempo scope) and the system's wish for less */
+[data-motion=still] *,[data-motion=still] *::before,[data-motion=still] *::after{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+  ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
+}

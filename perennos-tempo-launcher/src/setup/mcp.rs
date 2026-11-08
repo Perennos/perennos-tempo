@@ -6,6 +6,12 @@
 //! an answer. What it can do: write a proposal into the Tempo home (`setup_propose`); the person
 //! applies it with `tempo-launch setup --apply-proposal`, after a diff and a y/N. The AI never
 //! changes a setting itself.
+//!
+//! Two more tools let the AI work with the Tempo Conductor to design a band with the owner:
+//! `conductor_templates` (read-only: the ready-made bands and the rules) and `conductor_propose`
+//! (writes a proposal; the owner sets it up with `tempo-launch conductor apply-proposal`, after a
+//! y/N, and the Conductor picks each member's engine then). The older names `band_templates` and
+//! `band_propose` still work but are not listed.
 
 use super::apply::{self, Opts};
 use super::json::{parse, J};
@@ -13,7 +19,7 @@ use super::plan::{Run, Status};
 use super::probe::{Gpu, Host, Machine};
 use super::propose;
 use super::runtime::RuntimePlan;
-use crate::{answers, Ctx, APPS};
+use crate::{answers, conductor, Ctx, APPS};
 use std::io::{BufRead, Write};
 
 pub const SERVER_NAME: &str = "tempo-setup";
@@ -276,7 +282,81 @@ pub fn tools() -> Vec<J> {
             &["settings"],
             false,
         ),
+        tool(
+            "fleet_status",
+            "The owner's fleet",
+            "How many computers the owner has in the fleet, in words, and for each other computer a label (machine-1, machine-2...), its role, whether it is in the fleet and answering, its load and free memory. No names and no addresses. Nothing is changed.",
+            none(),
+            &[],
+            true,
+        ),
+        tool(
+            "fleet_propose",
+            "Propose a fleet change",
+            "Write a proposed change to the owner's fleet for the owner to review: add computers by address (a home-network, tailnet or private address), and enable, disable or remove ones by the labels fleet_status gave. Nothing changes: it returns the command the owner runs (`tempo-launch fleet apply-proposal`), which shows the real names and asks y/N.",
+            schema(
+                r#"{"add":{"type":"array","items":{"type":"object","properties":{"addr":{"type":"string"},"name":{"type":"string"},"role":{"type":"string","enum":["engine","agent","both"]}},"required":["addr"]}},"enable":{"type":"array","items":{"type":"string"}},"disable":{"type":"array","items":{"type":"string"}},"remove":{"type":"array","items":{"type":"string"}},"note":{"type":"string","description":"One or two plain sentences for the owner: why."}}"#,
+            ),
+            &[],
+            false,
+        ),
+        tool(
+            "conductor_templates",
+            "Ready-made bands",
+            "Tempo Conductor sets up bands for the owner: a small team of AI members for the owner's own workflow (a social media team, a release team, a study group...). This lists the ready-made bands with their members, roles and flows, and the rules a band must follow. Use it to design a band with the owner. Nothing is changed.",
+            none(),
+            &[],
+            true,
+        ),
+        tool(
+            "crate_list",
+            "The Crate: free tools",
+            "The Crate is a bank of free tools (Blender, FFmpeg, Pandoc, Tesseract, whisper.cpp and more) the owner can set up and let Tempo play. This lists each with what it is for, its licence, size, whether it is installed here and whether the owner turned it on for Tempo. Nothing is changed.",
+            none(),
+            &[],
+            true,
+        ),
+        tool(
+            "crate_propose",
+            "Suggest a Crate tool",
+            "Suggest to the owner: add, remove, enable or disable a Crate tool (id from crate_list), or save a Blender script for them to read (action script, with script_name and script_text). Nothing is installed or turned on: it returns the command the owner runs, which shows what it will do and asks y/N. A script never runs until the owner has read and approved it.",
+            o(vec![
+                ("action", o(vec![("type", J::s("string")), ("enum", J::Arr(["add", "remove", "enable", "disable", "script"].iter().map(|x| J::s(x)).collect()))])),
+                ("id", o(vec![("type", J::s("string")), ("description", J::s("a tool id from crate_list"))])),
+                ("note", o(vec![("type", J::s("string")), ("description", J::s("One or two plain sentences for the owner: why."))])),
+                ("script_name", o(vec![("type", J::s("string")), ("description", J::s("for action script: a file name like make_cube.py"))])),
+                ("script_text", o(vec![("type", J::s("string")), ("description", J::s("for action script: the Python for Blender"))])),
+            ]),
+            &["action"],
+            false,
+        ),
+        tool(
+            "conductor_propose",
+            "Propose a band",
+            "Write a proposed band for the owner to review. The Conductor picks each member's engine when the owner sets it up, so leave engines out. Nothing is set up: it returns the command the owner runs (`tempo-launch conductor apply-proposal`), which shows the band in plain words and asks y/N before anything is saved, added to Room or scheduled. Members have no tools: they only talk and write drafts. Every problem with the band is returned so you can fix it and propose again.",
+            o(vec![
+                (
+                    "band",
+                    schema(
+                        r#"{"type":"object","description":"The band. Use conductor_templates for the shape and the rules.","properties":{"name":{"type":"string","description":"2 to 40 lowercase letters, digits, hyphens"},"about":{"type":"string","description":"one line, at most 200 characters"},"members":{"type":"array","items":{"type":"object","properties":{"handle":{"type":"string"},"name":{"type":"string"},"instrument":{"type":"string","description":"one fun word, like Metronome"},"role":{"type":"string","description":"the member's instruction, at most 2000 characters"},"may":{"type":"string","enum":["talk","draft"]},"model":{"type":"string","description":"fast, heavy, or leave out"}},"required":["handle","name","instrument","role","may"],"additionalProperties":false}},"flows":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array","items":{"type":"string"}},"every":{"type":"string","description":"manual, daily HH:MM, or weekly <mon..sun> HH:MM"},"notes_to":{"type":"string","description":"leave out: Bands/<name>/"}},"required":["name","goal","steps","every"],"additionalProperties":false}}},"required":["name","about","members","flows"],"additionalProperties":false}"#,
+                    ),
+                ),
+                (
+                    "note",
+                    o(vec![
+                        ("type", J::s("string")),
+                        ("description", J::s("One or two plain sentences for the owner: why you propose this band.")),
+                    ]),
+                ),
+            ]),
+            &["band"],
+            false,
+        ),
     ]
+}
+
+fn schema(text: &str) -> J {
+    parse(text).unwrap_or(J::Obj(vec![]))
 }
 
 /// Everything a tool needs from the outside world.
@@ -304,6 +384,42 @@ impl Server<'_> {
                 Ok(format!(
                     "Proposal saved in the Tempo home folder as {file}. Nothing has been changed.\nTell the owner to run this in a terminal; it shows what would change and asks y/N:\n\n  {cmd}\n\nYou cannot apply it yourself.",
                     file = propose::PROPOSAL_FILE
+                ))
+            }
+            "fleet_status" => {
+                Ok(crate::fleet::status_facts(&crate::fleet::store::Paths::of(self.ctx)).pretty())
+            }
+            "fleet_propose" => {
+                let cmd = crate::fleet::write_proposal(
+                    &crate::fleet::store::Paths::of(self.ctx),
+                    args,
+                    args.str("note").unwrap_or(""),
+                    (self.now)(),
+                )?;
+                Ok(format!(
+                    "Fleet proposal saved in the Tempo home folder. Nothing has been changed.\nTell the owner to run this in a terminal; it shows what would change and asks y/N:\n\n  {cmd}\n\nYou cannot apply it yourself."
+                ))
+            }
+            "crate_list" => {
+                Ok(crate::bank::list_facts(self.ctx, &crate::bank::detect::Sys::real()).pretty())
+            }
+            "crate_propose" => crate::bank::propose(self.ctx, args, (self.now)()),
+            "conductor_templates" | "band_templates" => {
+                Ok(conductor::propose::templates_facts().pretty())
+            }
+            "conductor_propose" | "band_propose" => {
+                let b = args
+                    .get("band")
+                    .ok_or("band is required: an object with name, about, members and flows (see conductor_templates)")?;
+                let name = conductor::propose::write(
+                    self.ctx,
+                    b,
+                    args.str("note").unwrap_or(""),
+                    (self.now)(),
+                )?;
+                Ok(format!(
+                    "Band proposal \"{name}\" saved in the Tempo home folder. Nothing has been set up.\nTell the owner to run this in a terminal; it shows the band in plain words and asks y/N:\n\n  {} {name}\n\nYou cannot apply it yourself.",
+                    conductor::propose::APPLY_COMMAND
                 ))
             }
             other => Err(format!("unknown tool {other}")),
@@ -352,7 +468,7 @@ impl Server<'_> {
                 ),
                 (
                     "instructions",
-                    J::s("Perennos Tempo setup helper. Start with setup_scan and setup_plan, explain the result to the owner in plain words, and ask whether this is one computer or several. You can only read machine facts and write a proposal with setup_propose; the owner applies it themselves with `tempo-launch setup --apply-proposal`. Never ask the owner for files, notes or chats."),
+                    J::s("Perennos Tempo setup helper. Start with setup_scan and setup_plan, explain the result to the owner in plain words, and ask whether this is one computer or several. You can only read machine facts and write a proposal with setup_propose; the owner applies it themselves with `tempo-launch setup --apply-proposal`. Never ask the owner for files, notes or chats. To help design a band with the Tempo Conductor (a small team of AI members for the owner's own workflow, each played on the engine that suits the part), read conductor_templates, talk through what the owner does, and write conductor_propose; the owner sets it up with `tempo-launch conductor apply-proposal`."),
                 ),
             ])),
             "ping" => reply(J::Obj(vec![])),
@@ -536,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_four_tools_and_marks_the_read_only_ones() {
+    fn lists_the_tools_and_marks_the_read_only_ones() {
         let root = tmp("list");
         let ctx = ctx_in(&root);
         let host = pc();
@@ -551,13 +667,27 @@ mod tests {
         let names: Vec<&str> = t.iter().filter_map(|x| x.str("name")).collect();
         assert_eq!(
             names,
-            ["setup_scan", "setup_plan", "tempo_status", "setup_propose"]
+            [
+                "setup_scan",
+                "setup_plan",
+                "tempo_status",
+                "setup_propose",
+                "fleet_status",
+                "fleet_propose",
+                "conductor_templates",
+                "crate_list",
+                "crate_propose",
+                "conductor_propose"
+            ]
         );
         for x in t {
             let ro = x.get("annotations").unwrap().bool("readOnlyHint").unwrap();
             assert_eq!(
                 ro,
-                x.str("name") != Some("setup_propose"),
+                !matches!(
+                    x.str("name"),
+                    Some("setup_propose" | "fleet_propose" | "conductor_propose" | "crate_propose")
+                ),
                 "{:?}",
                 x.str("name")
             );
@@ -565,6 +695,26 @@ mod tests {
         }
         // one line per message
         assert!(!r.compact().contains('\n'));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn crate_list_reads_and_crate_propose_only_suggests() {
+        let root = tmp("crate");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let l = s.call("crate_list", &J::Obj(vec![])).unwrap();
+        assert!(l.contains("\"blender\"") && l.contains("\"licence\""));
+        let a = parse(r#"{"action":"enable","id":"ffmpeg"}"#).unwrap();
+        let said = s.call("crate_propose", &a).unwrap();
+        assert!(said.contains("tempo-launch crate enable ffmpeg"), "{said}");
+        assert!(!root.join("crate.json").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -814,6 +964,232 @@ mod tests {
         assert_eq!(
             propose::apply_proposal(&ctx, None, 1, &mut out, &mut |_| panic!("no question")),
             1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ---- Tempo Conductor
+
+    fn call(s: &Server, name: &str, args: &str) -> (String, bool) {
+        text_of(&rpc(
+            s,
+            1,
+            "tools/call",
+            &format!(r#"{{"name":"{name}","arguments":{args}}}"#),
+        ))
+    }
+
+    const BAND_ARGS: &str = r#"{"note":"Built around your bakery.\nEnjoy.","band":{"name":"bakery-posts","about":"Weekly posts for the bakery.","members":[{"handle":"writer","name":"Crumb","instrument":"Piccolo","role":"You write short warm captions for a bakery.","may":"draft","model":"heavy"},{"handle":"editor","name":"Glaze","instrument":"Triangle","role":"You tidy captions and check them.","may":"draft"}],"flows":[{"name":"weekly-plan","goal":"Plan the week.","steps":["writer","editor"],"every":"weekly mon 09:00"}]}}"#;
+
+    #[test]
+    fn the_conductor_templates_tool_is_read_only_and_holds_no_personal_data() {
+        let root = tmp("bandtpl");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let (t, err) = call(&s, "conductor_templates", "{}");
+        assert!(!err, "{t}");
+        let j = parse(&t).unwrap();
+        assert_eq!(j.arr("templates").len(), 11);
+        for want in [
+            "social-media",
+            "dev-team",
+            "Soundcheck",
+            "never post, send, buy or delete",
+        ] {
+            assert!(t.contains(want), "{want}");
+        }
+        assert!(j.arr("rules").len() >= 4);
+        assert!(!t.contains(&root.to_string_lossy().into_owned()));
+        // it changed nothing
+        assert!(!ctx.home.join("bands").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_older_band_tool_names_still_work_as_aliases() {
+        let root = tmp("bandalias");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let (new, _) = call(&s, "conductor_templates", "{}");
+        let (old, err) = call(&s, "band_templates", "{}");
+        assert!(!err);
+        assert_eq!(new, old);
+        let (t, err) = call(&s, "band_propose", BAND_ARGS);
+        assert!(!err, "{t}");
+        assert!(
+            t.contains("tempo-launch conductor apply-proposal bakery-posts"),
+            "{t}"
+        );
+        // listed under the new names only
+        let listed = rpc(&s, 1, "tools/list", "{}").compact();
+        assert!(listed.contains("conductor_propose") && !listed.contains("band_propose"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conductor_propose_writes_a_proposal_and_only_the_owner_sets_it_up() {
+        let root = tmp("bandprop");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1_793_000_000,
+        };
+        let (t, err) = call(&s, "conductor_propose", BAND_ARGS);
+        assert!(!err, "{t}");
+        assert!(
+            t.contains("tempo-launch conductor apply-proposal bakery-posts")
+                && t.contains("Nothing has been set up")
+                && t.contains("cannot apply it yourself")
+        );
+        assert!(!t.contains(&root.to_string_lossy().into_owned()));
+        // a proposal file, and no band
+        let p = parse(
+            &std::fs::read_to_string(ctx.home.join("bands/proposals/bakery-posts.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(p.str("note"), Some("Built around your bakery. Enjoy."));
+        assert_eq!(p.get("band").unwrap().str("name"), Some("bakery-posts"));
+        assert!(!ctx.home.join("bands/bakery-posts").exists());
+        // the same proposal is what apply-proposal reads
+        assert_eq!(conductor::propose::waiting(&ctx), ["bakery-posts"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conductor_propose_refuses_a_band_with_tools_a_bad_folder_or_no_band() {
+        let root = tmp("bandbad");
+        let ctx = ctx_in(&root);
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1,
+        };
+        let with = |from: &str, to: &str| BAND_ARGS.replacen(from, to, 1);
+        for (what, args) in [
+            (
+                "a tools key",
+                with(
+                    r#""may":"draft","model":"heavy""#,
+                    r#""may":"draft","tools":["send"]"#,
+                ),
+            ),
+            (
+                "a folder elsewhere",
+                with(
+                    r#""every":"weekly mon 09:00""#,
+                    r#""every":"weekly mon 09:00","notes_to":"Documents/""#,
+                ),
+            ),
+            (
+                "a step nobody is",
+                with(
+                    r#""steps":["writer","editor"]"#,
+                    r#""steps":["writer","ghost"]"#,
+                ),
+            ),
+            (
+                "a schedule that is not one",
+                with("weekly mon 09:00", "whenever"),
+            ),
+            (
+                "a long role",
+                with(
+                    "You write short warm captions for a bakery.",
+                    &"x".repeat(2001),
+                ),
+            ),
+            (
+                "a name with capitals",
+                with(r#""name":"bakery-posts""#, r#""name":"Bakery""#),
+            ),
+            ("no band", r#"{"note":"hello"}"#.to_string()),
+            (
+                "a band that is not an object",
+                r#"{"band":"bakery"}"#.to_string(),
+            ),
+        ] {
+            let (t, err) = call(&s, "conductor_propose", &args);
+            assert!(err, "{what}: {t}");
+        }
+        // the answer lists the problems so the AI can fix them
+        let (t, _) = call(
+            &s,
+            "conductor_propose",
+            &with("weekly mon 09:00", "whenever"),
+        );
+        assert!(t.contains("not a schedule"), "{t}");
+        assert!(!ctx.home.join("bands").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fleet_status_names_no_computer_and_fleet_propose_only_writes_a_proposal() {
+        let root = tmp("fleet");
+        let ctx = ctx_in(&root);
+        let p = crate::fleet::store::Paths::of(&ctx);
+        crate::fleet::store::update(&p, |f| {
+            f.me = "mainbox".into();
+            f.machines.push(crate::fleet::store::Machine::new(
+                "tower", "10.0.0.5", "engine",
+            ));
+        })
+        .unwrap();
+        let host = pc();
+        let s = Server {
+            ctx: &ctx,
+            host: &host,
+            port: 1,
+            now: &|| 1_793_000_000,
+        };
+        let (t, err) = text_of(&rpc(&s, 1, "tools/call", r#"{"name":"fleet_status"}"#));
+        assert!(!err, "{t}");
+        assert!(
+            t.contains("Two machines, one field.") && t.contains("machine-1"),
+            "{t}"
+        );
+        for leak in ["tower", "10.0.0.5", "mainbox"] {
+            assert!(!t.contains(leak), "fleet_status leaks {leak}: {t}");
+        }
+        // a public address is refused; a private one only writes the proposal
+        let (t, err) = text_of(&rpc(
+            &s,
+            2,
+            "tools/call",
+            r#"{"name":"fleet_propose","arguments":{"add":[{"addr":"8.8.8.8"}]}}"#,
+        ));
+        assert!(err && t.contains("not a home-network"), "{t}");
+        let (t, err) = text_of(&rpc(
+            &s,
+            3,
+            "tools/call",
+            r#"{"name":"fleet_propose","arguments":{"add":[{"addr":"192.168.0.20","role":"engine"}],"disable":["machine-1"],"note":"it is the quiet one"}}"#,
+        ));
+        assert!(
+            !err && t.contains("tempo-launch fleet apply-proposal") && t.contains("cannot apply"),
+            "{t}"
+        );
+        assert!(p.file(crate::fleet::PROPOSAL_FILE).is_file());
+        assert_eq!(
+            crate::fleet::store::load(&p).machines.len(),
+            1,
+            "nothing was changed"
         );
         let _ = std::fs::remove_dir_all(root);
     }

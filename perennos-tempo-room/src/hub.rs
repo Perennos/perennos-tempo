@@ -210,7 +210,15 @@ pub struct Hub {
     /// SHA-256 of this run's control key (the CLI and MCP prove they are on this machine).
     control: Mutex<Option<String>>,
     pub stop: AtomicBool,
+    /// Stage (`@stage ...`): who plays it, the plan waiting for the owner's y or n in each
+    /// room, the rooms with a play going, and this hub as the threads it starts need it.
+    stage: Mutex<Arc<dyn crate::stage_hook::StageRunner>>,
+    stage_pending: Mutex<HashMap<String, stage::Pending>>,
+    stage_busy: Mutex<HashSet<String>>,
+    me: Mutex<std::sync::Weak<Hub>>,
 }
+
+mod stage;
 
 impl Hub {
     pub fn start(store: Store, agent_url: &str, bridges: Outbound, o: HubOpts) -> Arc<Hub> {
@@ -246,7 +254,12 @@ impl Hub {
             turn: o.turn,
             control: Mutex::new(None),
             stop: AtomicBool::new(false),
+            stage: Mutex::new(Arc::new(crate::stage_hook::Launcher::real())),
+            stage_pending: Mutex::new(HashMap::new()),
+            stage_busy: Mutex::new(HashSet::new()),
+            me: Mutex::new(std::sync::Weak::new()),
         });
+        *lock(&hub.me) = Arc::downgrade(&hub);
         // an owner conversation of a room that is no longer owner-only (a guest, an open invite or
         // a bridge arrived while Room was not running) is set aside before anything is asked
         hub.settle_owner_rooms();
@@ -593,8 +606,13 @@ impl Hub {
         if let Some(cmd) = bot::parse_slash(text) {
             return self.slash(&r, cmd);
         }
-        // Who is asked: everyone named with @, in the order named (Tempo too), each once.
         let handles: Vec<String> = team.iter().map(|t| t.handle.clone()).collect();
+        // Stage: "@stage golden hour", or those words said to Tempo. The owner at the machine
+        // only; anyone else is told it is the owner's.
+        if let Some(h) = self.stage_hook(&r, text, &handles) {
+            return h;
+        }
+        // Who is asked: everyone named with @, in the order named (Tempo too), each once.
         let mut asked = bot::find_mentions(text, &handles);
         if r.force_ask && !asked.iter().any(|a| a == "tempo") {
             asked.insert(0, "tempo".into());

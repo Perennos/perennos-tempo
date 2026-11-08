@@ -185,7 +185,7 @@ fn keep_old(home: &Path, path: &Path, text: &str, now: u64) -> Result<PathBuf, S
 }
 
 /// The settings file as an object (empty when there is none), and its text.
-fn load_settings(path: &Path) -> Result<(J, Option<String>), String> {
+pub(crate) fn load_settings(path: &Path) -> Result<(J, Option<String>), String> {
     let old = std::fs::read_to_string(path).ok();
     match &old {
         Some(t) => match parse(t) {
@@ -200,7 +200,7 @@ fn load_settings(path: &Path) -> Result<(J, Option<String>), String> {
 }
 
 /// Put `values` into the settings file; the old file goes to the trash first.
-fn store(
+pub(crate) fn store(
     ctx: &Ctx,
     path: &Path,
     mut cfg: J,

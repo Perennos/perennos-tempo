@@ -13,9 +13,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod bank;
+pub mod brand;
+pub mod conductor;
+pub mod fleet;
 pub mod home;
+pub mod retune;
 pub mod setup;
+pub mod stage;
 pub mod tempo_home;
+pub mod woodshed;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const EXE: &str = std::env::consts::EXE_SUFFIX;
@@ -64,6 +71,10 @@ usage: tempo-launch [command]
   setup --ollama [--yes]
                     only fetch Tempo's own Ollama (checked against a pinned SHA-256) when this
                     computer has none, and start it; no models are fetched
+  setup --voice [--piper] [--multilingual] [--yes]
+                    fetch whisper.cpp and a speech model that fits this computer (and with --piper,
+                    Piper and a voice for spoken replies), each checked against a pinned SHA-256,
+                    after a y/N that shows the sizes. Speech stays on this computer.
   welcome           the first-run page: what the scan found, one computer or several, and how to
                     let your AI help (opened by itself the first time, then `tempo-launch welcome`)
   link URL          add another computer's Ollama (a tailnet or home-network address) to the
@@ -71,6 +82,99 @@ usage: tempo-launch [command]
   mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
                     the plan and the status, and write a proposal you apply yourself;
                     --scan prints the scan facts to paste into any AI
+  conductor         Tempo Conductor: sets up bands (teams of AI members) for your own workflow,
+                    runs them, and picks which of your engines plays each part (`band` works too)
+  conductor templates
+                    the ready-made bands (social-media, music-release, small-business, dev-team,
+                    research, content-creator, study)
+  conductor new (--template NAME | --describe \"TEXT\") [--name BAND] [--yes]
+                    set up a band: shows who is in it, what they do, which engine plays each
+                    part and when they run, asks y/N, then adds them to Room (if Room runs)
+                    and schedules their flows
+  conductor run BAND [FLOW] [--note TEXT]
+                    walk a flow through its members; each step becomes a linked note in the Vault
+  conductor shots BAND [FLOW]
+                    the SHOT lines a band wrote for Stage in its newest run: the whole list with the
+                    machine and time for each, then y/N once, then the Conductor plays them
+  conductor sections BAND [FLOW] [--note TEXT] [--takes 1-3] [--resume RUN]
+                    play a big job as sections (sub-teams) and takes (attempts), under a budget;
+                    the producer judges the takes and the best one is kept (docs/SECTIONS.md)
+  conductor runs    the newest sectioned runs: what they used, their takes and winners
+  conductor stop [RUN]
+                    end a run at its next step, and say what got done
+  conductor takes accept|reject TAKE
+                    your say on one take, which can change the winner
+  conductor engines every engine you have (this computer's Ollama and the ones you linked):
+                    up or down, their models, and how strong each is
+  conductor room BAND
+                    add the band's members to Room as teammates (when Room was not running)
+  conductor page [BAND]
+                    write and open the Conductor page: engines, bands, last runs, apps
+  conductor apply-proposal [NAME]
+                    show the band your AI proposed (see mcp) and set it up only after your y/N
+  fleet             your own computers: `fleet` lists them, with a heading that counts them in words
+  fleet scan [--yes]
+                    find them on your own networks (asks y/N the first time; private addresses only)
+  fleet add ADDRESS|NAME [--role engine|agent|both] [--name NAME]
+  fleet remove NAME | fleet enable NAME | fleet disable NAME
+                    choose which are in the fleet (writes the agent's settings, keeps a backup)
+  fleet ssh NAME -- COMMAND | fleet check NAME | fleet setup NAME [--yes] | fleet hosts
+                    reach one with your own ssh (BatchMode, nothing stored): run a command, look at it,
+                    or set it up (shows the commands first, asks y/N)
+  fleet invite | fleet join [--code CODE] [--controller ADDRESS] [--yes]
+                    add a computer in a minute: `invite` shows a short code on the main computer, `join`
+                    finds it from the new one and asks for the code (10 minutes, once, your network only)
+  fleet allow|deny comfy_image|stage|mcp:SERVER/TOOL
+                    what this computer lets the rest of the fleet run (nothing until you say so)
+  fleet cap [GIB]   the most one file may be between computers (4 GiB unless you say so)
+  fleet init | fleet rotate | fleet serve [--quiet] | fleet send NAME \"TEXT\" | fleet inbox | fleet ping NAME
+                    the messenger between your computers: a fleet key, signed frames, a durable outbox
+  fleet page        write and open the fleet page; fleet apply-proposal applies what your AI proposed
+  crate             The Crate, a bank of free tools (Blender, FFmpeg, Pandoc and more): which are here
+  crate show ID | check | add ID [--yes] [--enable] | remove ID [--yes]
+                    one tool in full, detect them all, set one up (shows the exact command, asks
+                    y/N, never runs sudo for you), or take one away
+  crate enable ID | disable ID | folders [add|remove DIR] | review SCRIPT
+                    let Tempo play a tool, on the folders you allow; approve a Blender script
+  crate mcp         the Crate's tools as an MCP server for the agent (turned-on tools only)
+  stage             Stage (video and image workflows) on ComfyUI: re-angle, character swap, effects, camera moves, relight, lip sync
+  stage show ID | check [ID] | add ID [--yes] [--with PEDAL=CHOICE] | remove ID [--yes]
+                    one workflow in full, where it fits in your Fleet, set it up (sizes first, a look at
+                    any custom node's code, asks y/N), or take it out (to the trash)
+  stage enable ID | disable ID | cloud ID on|off | folder [PATH]
+                    let Tempo play it as a tool; allow a paid or cloud node for one workflow (never by default)
+  stage run ID --input NAME=PATH --pedal NAME=VALUE [--takes N] [--again] [--on MACHINE]
+                    play it; Pedals (modifiers) are camera, lens, light, strength, duration, seed
+  stage cue \"WORDS\" [--plan] [--yes] [--json]
+                    say it in words (\"golden hour\", \"slow orbit\"): plays the last run again with those
+                    Pedals, after showing what it understood and asking y/N
+  stage mcp         Stage's workflows as MCP tools for the agent (turned-on ones only)
+  woodshed          the Woodshed (training): your local models get better at their parts from your best takes
+  woodshed on|off BAND
+                    start or stop keeping a band's judged takes (off until you say; `default` is the usual chat)
+  woodshed status | plan [BAND] | run [BAND] [--yes] | versions [BAND]
+                    what has been kept, what a run would do, the nightly run (asks y/N; trains only on a quiet
+                    machine of your own Fleet), and every version kept
+  woodshed promote [BAND] [--yes] | rollback [BAND] | rehearse [BAND]
+                    put a version that passed its Rehearsal to work, go back, or score the newest one again
+  woodshed lessons [BAND] [--add TEXT | --edit ID TEXT | --retire ID | --restore ID]
+                    the short notes that go into a band's prompt: read them, change them (nothing is deleted)
+  woodshed reflect [BAND] [--from FILE]
+                    learn new lessons from judged takes, with a local model or a file your own cloud model wrote
+  woodshed set BAND base|hf VALUE | allow-cloud-text on|off
+                    the model a band is trained on; whether text a cloud model wrote may be trained on (off)
+  woodshed mix [show | base PATH | add NAME [PATH] | start | set TARGET name=scale ... | check | global ...]
+                    llama-server with LoRA adapters loaded and a fader per band or part, moved live
+  retune            Retune (weight edits): your frontier model edits a local model's weights, and Tempo keeps the edit only if it wins
+  retune plan MODEL [--hf REPO] [--weights DIR] [--yes]
+                    the terms (asked once), the licence, which computer, the full-precision weights and the bench's own
+                    Python folder (each a y/N with its size), and how to connect Claude Code or Claude Desktop
+  retune bench MODEL [--passes N] [--weights DIR] [--held-out FILE] [--session ID]
+                    the bench: an MCP server on stdio, with a fixed set of tools and a budget of forward passes (50)
+  retune show SESSION | check SESSION [--held-out FILE] [--outtype f16|bf16|q8_0] [--yes]
+                    list a session's edits, or apply them to a copy, make a GGUF and run the Rehearsal against the same weights unedited (--band: the band plays it once it passes)
+  retune undo MODEL | SESSION --edit | versions [MODEL]
+                    step back to the version before (or take the last edit off a session), and every version kept
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -418,7 +522,7 @@ pub fn stamp(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}Z")
 }
 
-fn file_stamp(secs: u64) -> String {
+pub(crate) fn file_stamp(secs: u64) -> String {
     let (y, mo, d, h, mi, s) = civil(secs);
     format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
@@ -1076,19 +1180,37 @@ fn ensure_exe(ctx: &Ctx, l: &Launch, exe: Option<PathBuf>, wait: bool) -> Result
 
 /// How to start Tempo's own Ollama on `port`, and its program: `ollama serve` with
 /// `OLLAMA_HOST=127.0.0.1:<port>` (this computer only). OLLAMA_MODELS is left alone, so models go
-/// where a normal Ollama keeps them. None when `setup` has not installed one.
+/// where a normal Ollama keeps them. It also gets the leaner settings in
+/// `setup::apply::ollama_tuning` (flash attention, a q8 cache, one request at a time), unless the
+/// environment or `ollama_env` in the agent's settings says otherwise. None when `setup` has not
+/// installed one.
 pub fn owned_ollama_launch(ctx: &Ctx, port: u16) -> Option<(Launch, PathBuf)> {
     let owned = setup::runtime::read_record(&ctx.home)?;
+    let settings = setup::apply::pinned_agent_settings()
+        .unwrap_or_else(|| setup::apply::agent_settings_path(&ctx.agent_data));
+    let settings = fs::read_to_string(settings)
+        .ok()
+        .and_then(|t| setup::json::parse(&t).ok());
+    let mut env = vec![(
+        "OLLAMA_HOST".to_string(),
+        PathBuf::from(format!("127.0.0.1:{port}")),
+    )];
+    env.extend(
+        setup::apply::ollama_tuning(
+            settings.as_ref(),
+            &|k| std::env::var(k).ok(),
+            cfg!(target_os = "macos"),
+        )
+        .into_iter()
+        .map(|(k, v)| (k, PathBuf::from(v))),
+    );
     let l = Launch {
         app: OLLAMA,
         port,
         args: vec!["serve".into()],
         dir: None,
         cwd: ctx.home.join("runtime"),
-        env: vec![(
-            "OLLAMA_HOST".into(),
-            PathBuf::from(format!("127.0.0.1:{port}")),
-        )],
+        env,
     };
     Some((l, owned.binary))
 }
@@ -1461,8 +1583,6 @@ impl Problem {
     }
 }
 
-const MARK_SVG: &str = r##"<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#23262d"/><path d="M18 46V18h11a9 9 0 0 1 0 18H24" fill="none" stroke="#ECE6D8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="44" cy="44" r="5" fill="#E8552F"/></svg>"##;
-
 /// The page shown when an app could not be opened: what happened, what to try, the log's last lines.
 pub fn problem_page(p: &Problem, tail: &str, when: u64) -> String {
     let tips: String = p
@@ -1483,35 +1603,20 @@ pub fn problem_page(p: &Problem, tail: &str, when: u64) -> String {
         None => String::new(),
     };
     format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} · Perennos Tempo</title>
-<style>
-:root{{color-scheme:dark}}
-body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#16181d;color:#ece6d8;font:15px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif}}
-main{{width:min(640px,100%);box-sizing:border-box;padding:48px 28px}}
-.mark{{width:44px;height:44px;margin-bottom:30px}}
-h1{{font:500 27px/1.25 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;margin:0 0 10px;letter-spacing:.005em}}
-p,li{{color:#cfc9bd}}
-p{{margin:0 0 14px}}
-ul{{margin:0 0 24px;padding-left:20px}}
-li{{margin:4px 0}}
-pre{{background:#0e1013;border:1px solid #2a2c31;border-radius:10px;padding:14px 16px;overflow:auto;max-height:340px;font:12.5px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:#a9aaad;white-space:pre-wrap;word-break:break-word}}
-code{{font:12.5px ui-monospace,"Cascadia Mono",Consolas,monospace;color:#d9dde2}}
-.small{{font-size:12.5px;color:#8a8b8f}}
-.dot{{display:inline-block;width:7px;height:7px;border-radius:50%;background:#e8552f;margin-right:8px;vertical-align:1px}}
-</style></head>
-<body><main>
-{mark}
+        r#"{top}<p class="tt-kicker">Notice</p>
 <h1>{title}</h1>
-<p>{what}</p>
+<p class="lede">{what}</p>
 <ul>{tips}</ul>
 {log}
 <p class="small"><span class="dot"></span>Nothing was changed or lost. {when}</p>
-</main></body></html>
-"#,
+{end}"#,
+        top = brand::page_top(
+            &format!("{} · Perennos Tempo", html_escape(&p.title)),
+            true,
+            false
+        ),
+        end = brand::PAGE_END,
         title = html_escape(&p.title),
-        mark = MARK_SVG,
         what = html_escape(&p.what),
         tips = tips,
         log = log,
@@ -1875,6 +1980,18 @@ pub enum Cmd {
     Mcp {
         scan: bool,
     },
+    /// `conductor ...` (also `band ...`): Tempo Conductor.
+    Conductor(conductor::ConductorCmd),
+    /// `fleet ...`: the person's own computers.
+    Fleet(fleet::FleetCmd),
+    /// `crate ...`: The Crate, a bank of free tools Tempo can set up and play.
+    Crate(bank::BankCmd),
+    /// `stage ...`: Stage (video and image workflows) on ComfyUI, see docs/STAGE.md.
+    Stage(stage::StageCmd),
+    /// `woodshed ...`: lessons, nightly LoRA training, and the Mix (see docs/WOODSHED.md).
+    Woodshed(woodshed::WoodCmd),
+    /// `retune ...`: Retune (weight edits), see docs/RETUNE.md.
+    Retune(retune::RetuneCmd),
     Help,
     Version,
 }
@@ -2011,6 +2128,12 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                 scan: rest.contains(&"--scan"),
             }
         }
+        "conductor" | "band" => Cmd::Conductor(conductor::parse_args(&rest)?),
+        "fleet" => Cmd::Fleet(fleet::parse_args(&rest)?),
+        "crate" => Cmd::Crate(bank::parse_args(&rest)?),
+        "stage" => Cmd::Stage(stage::parse_args(&rest)?),
+        "woodshed" => Cmd::Woodshed(woodshed::parse_args(&rest)?),
+        "retune" => Cmd::Retune(retune::parse_args(&rest)?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2076,6 +2199,12 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         } else {
             setup::mcp::run_stdio(ctx)
         }),
+        Cmd::Conductor(b) => Ok(conductor::run(ctx, b)),
+        Cmd::Fleet(f) => Ok(fleet::run(ctx, f)),
+        Cmd::Crate(c) => Ok(bank::run(ctx, c)),
+        Cmd::Stage(s) => Ok(stage::run(ctx, s)),
+        Cmd::Woodshed(w) => Ok(woodshed::run(ctx, w)),
+        Cmd::Retune(r) => Ok(retune::run(ctx, r)),
         Cmd::Schedule {
             remove,
             print,
@@ -2381,6 +2510,7 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
             Err(p) => ctx.note(&format!("{}: {}", p.title, p.what)),
         }
     }
+    fleet::autostart(ctx);
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut failed = 0;
     for l in waiting {
@@ -2913,6 +3043,7 @@ fn schedule(ctx: &Ctx, remove: bool, print: bool, daily: bool) -> Result<i32, Pr
     };
     ctx.note(&format!("schedule: {done}"));
     println!("{done}");
+    fleet::schedule(ctx, &exe, remove);
     Ok(0)
 }
 
@@ -4484,11 +4615,21 @@ mod tests {
         assert!(html.contains("claude mcp add tempo-setup --"));
         assert!(html.contains("claude_desktop_config.json") && html.contains("mcpServers"));
         assert!(html.contains("only the scan facts") || html.contains("Only the scan facts"));
+        // Tempo Conductor: every template, the describe example, and the AI's two band tools
+        assert!(html.contains("Let the Conductor set up a band for your work"));
+        assert!(html.contains("tempo-launch conductor engines"));
+        for t in conductor::templates::all() {
+            assert!(html.contains(t.id), "{}", t.id);
+        }
+        assert!(html.contains("tempo-launch conductor new --describe"));
+        assert!(html.contains("bakery&#39;s Instagram") || html.contains("bakery's Instagram"));
+        assert!(html.contains("conductor_templates") && html.contains("conductor_propose"));
+        assert!(html.contains("tempo-launch conductor apply-proposal"));
         // offline and strict: no outside address, no script, no form, a locked-down policy
         assert!(html.contains("default-src 'none'"));
         for bad in [
             "<script",
-            "<link",
+            "<link rel=\"stylesheet\"",
             "<form",
             "<iframe",
             "src=\"http",
@@ -4727,11 +4868,16 @@ mod tests {
         assert_eq!(exe, bin);
         assert_eq!(l.args, vec!["serve"]);
         assert_eq!(l.port, 11434);
-        // OLLAMA_HOST on this computer only; OLLAMA_MODELS (and everything else) is not touched
+        // OLLAMA_HOST on this computer only, then the leaner settings; OLLAMA_MODELS (and
+        // everything else) is not touched
         assert_eq!(
-            l.env,
-            vec![("OLLAMA_HOST".to_string(), PathBuf::from("127.0.0.1:11434"))]
+            l.env[0],
+            ("OLLAMA_HOST".to_string(), PathBuf::from("127.0.0.1:11434"))
         );
+        assert!(l
+            .env
+            .iter()
+            .all(|(k, _)| k == "OLLAMA_HOST" || setup::apply::OLLAMA_TUNING.contains(&k.as_str())));
         assert_eq!(l.log_name(), "ollama");
         let (l, _) = owned_ollama_launch(&ctx, 11500).unwrap();
         assert_eq!(l.env[0].1, PathBuf::from("127.0.0.1:11500"));

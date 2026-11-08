@@ -13,8 +13,43 @@ path = "src/lib.rs"
 name = "tempo-launch"
 path = "src/main.rs"
 
-# std only: this program starts others and opens a browser, nothing more.
+# std first. Two crates, both for the fleet messenger: SQLite (bundled, so nothing is installed
+# beside Tempo) holds the durable outbox and inbox; getrandom is the operating system's random
+# source for the fleet key.
 [dependencies]
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+getrandom = "0.2"
+# pairing with a short code (SPAKE2 over Ed25519), the key it makes protects what is sent (ChaCha20-Poly1305),
+# and each computer's identity signs its frames (Ed25519): RustCrypto, no more.
+spake2 = "0.4"
+chacha20poly1305 = "0.10"
+ed25519-dalek = "2"
+# Post-quantum half of pairing (ML-KEM-768, FIPS 203): RustCrypto's pure-Rust crate, Apache-2.0 or MIT,
+# no C and no unsafe to build. The one new crate for it; rand_core is already in its tree and only
+# lends the trait our random source plugs into. Not independently audited yet, which is why pairing
+# mixes it with SPAKE2 instead of trusting it alone.
+ml-kem = "0.3.4"
+rand_core = "0.10"
+
+# Elliptic-curve maths is unusably slow unoptimized (milliseconds a signature): keep it fast in
+# test and debug builds too, so the messenger's numbers there mean something.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+# the sealing of a 65 MiB test file through 260 frames: slow at opt-level 0 too
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
 
 [profile.release]
 opt-level = "s"

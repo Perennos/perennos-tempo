@@ -234,6 +234,10 @@ the way it does at your keyboard, and asks you before it changes anything.
 - The usual limits apply: owner asks count against `ask_per_room`, replies are capped at
   `reply_cap` and redacted, and the room still answers one question at a time.
 
+### Stage, for the owner
+
+The owner, at their own computer, can write `@stage golden hour` or `@stage re-angle the last clip with a slow orbit` (and the same words said to `@tempo` work too, which is how a spoken phrase arrives). Room reads the words with the same parser Stage uses (`src/stage_phrase.rs`, copied from the launcher byte for byte), asks `tempo-launch stage cue --plan` what they mean, shows the owner the plan (the workflow, the Pedals, which machine, about how long) and waits for `y` or `n` in the room for ten minutes. On `y` it plays (`tempo-launch stage cue --yes`) and says where the result is. Only the owner's own session can do this; a member who writes `@stage` is told it is the owner's, and a member's `@tempo golden hour` is an ordinary question with no tools. Everything Stage says back, the plan and the result path, is an owner-only message; the owner's `y` is not stored. Room finds `tempo-launch` next to itself or in a `TEMPO_BIN` folder, never by searching PATH. Rehearsed against a stand-in program for `tempo-launch`; never typed into the real page.
+
 What happens when things go wrong (each path is tested):
 
 | Situation | What people see |

@@ -35,6 +35,11 @@ pub struct Opts {
     /// `--apply-proposal`: show what the proposal an AI wrote (`tempo-launch mcp`) would change in
     /// the agent's settings, ask y/N, and only then write it. Always asks; takes no `--yes`.
     pub apply_proposal: bool,
+    /// `--voice`: fetch whisper.cpp and a model that fits (and with `--piper`, Piper and a voice) so
+    /// you can talk to Tempo. Asks y/N first. `--multilingual` picks the models that are not English-only.
+    pub voice: bool,
+    pub piper: bool,
+    pub multilingual: bool,
     pub goals: Vec<String>,
     /// `--preferred-prefix P`: save P as this computer's preferred prefix in `<home>/setup.json` (an
     /// empty value clears it) and use it now.
@@ -53,6 +58,9 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
             "--page" => o.page = true,
             "--ollama" => o.ollama = true,
             "--apply-proposal" => o.apply_proposal = true,
+            "--voice" => o.voice = true,
+            "--piper" => o.piper = true,
+            "--multilingual" => o.multilingual = true,
             "--goal" => {
                 i += 1;
                 o.goals.push(
@@ -91,6 +99,22 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
         }
         i += 1;
     }
+    if (o.piper || o.multilingual) && !o.voice {
+        return Err("setup: --piper and --multilingual go with --voice".into());
+    }
+    if o.voice
+        && (o.apply
+            || o.page
+            || o.json
+            || o.ollama
+            || o.with_d1
+            || o.apply_proposal
+            || !o.goals.is_empty()
+            || o.prefer_set
+            || o.preferred_prefix.is_some())
+    {
+        return Err("setup: --voice stands alone; add --piper, --multilingual or --yes".into());
+    }
     if o.apply_proposal
         && (o.apply
             || o.yes
@@ -115,8 +139,8 @@ pub fn parse_args(rest: &[&str]) -> Result<Opts, String> {
     {
         return Err("setup: --ollama only fetches Ollama; use it alone, or with --yes".into());
     }
-    if o.yes && !o.apply && !o.ollama {
-        return Err("setup: --yes goes with --apply or --ollama".into());
+    if o.yes && !o.apply && !o.ollama && !o.voice {
+        return Err("setup: --yes goes with --apply, --ollama or --voice".into());
     }
     if o.page && (o.apply || o.json) {
         return Err("setup: --page cannot be combined with --apply or --json".into());
@@ -164,6 +188,73 @@ fn save_preferred_prefix(home: &Path, prefix: &str, now: u64) -> Result<(), Stri
     std::fs::create_dir_all(home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
     write_atomic(&path, j.pretty().as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// What Tempo sets on its own Ollama (never on one the person runs): flash attention and a q8
+/// cache so the same memory holds a longer chat, one request at a time (memory grows with
+/// parallel requests times context on a personal computer), and room for the heavy and the
+/// quick model together.
+pub const OLLAMA_TUNING: [&str; 4] = [
+    "OLLAMA_FLASH_ATTENTION",
+    "OLLAMA_KV_CACHE_TYPE",
+    "OLLAMA_NUM_PARALLEL",
+    "OLLAMA_MAX_LOADED_MODELS",
+];
+
+/// The variables for Tempo's own Ollama, as (name, value). Anything already in the environment
+/// wins (it is left out, so the child simply inherits it), then the `ollama_env` object in the
+/// agent's settings, then these defaults. On a Mac only flash attention is set: people reported
+/// it slower with a quantised cache on Metal, so the cache stays f16 unless the person asks.
+pub fn ollama_tuning(
+    settings: Option<&J>,
+    env: &dyn Fn(&str) -> Option<String>,
+    mac: bool,
+) -> Vec<(String, String)> {
+    let mut out = vec![];
+    for name in OLLAMA_TUNING {
+        if env(name).is_some_and(|v| !v.is_empty()) {
+            continue;
+        }
+        let asked = settings
+            .and_then(|s| s.get("ollama_env"))
+            .and_then(|o| o.get(name));
+        let value = match asked {
+            Some(J::Str(v)) => v.clone(),
+            Some(J::Num(n)) => n.clone(),
+            Some(J::Bool(b)) => (*b as u8).to_string(),
+            _ => match name {
+                "OLLAMA_FLASH_ATTENTION" => "1".into(),
+                "OLLAMA_KV_CACHE_TYPE" if mac => continue,
+                "OLLAMA_KV_CACHE_TYPE" => "q8_0".into(),
+                "OLLAMA_NUM_PARALLEL" => "1".into(),
+                _ => "2".into(),
+            },
+        };
+        // a setting is a plain word or number, nothing a shell or a child could read as more
+        let plain = !value.is_empty()
+            && value.len() <= 32
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-');
+        if plain {
+            out.push((name.to_string(), value));
+        }
+    }
+    out
+}
+
+/// One line for a person who runs their own Ollama: Tempo leaves it alone, and here is what
+/// would make it leaner. None when there is no Ollama of theirs.
+pub fn ollama_tip(o: &probe::Ollama) -> Option<String> {
+    o.binary.as_ref()?;
+    let cache = if cfg!(target_os = "macos") {
+        "" // Metal: a quantised cache has been slower for some
+    } else {
+        ", OLLAMA_KV_CACHE_TYPE=q8_0"
+    };
+    Some(format!(
+        "Your own Ollama runs as you set it up and Tempo leaves it alone. To run leaner, set OLLAMA_FLASH_ATTENTION=1{cache}, OLLAMA_NUM_PARALLEL=1 and OLLAMA_MAX_LOADED_MODELS=2, then restart it."
+    ))
 }
 
 pub fn ollama_port() -> u16 {
@@ -501,6 +592,7 @@ pub fn compute(
     runtime::share_disk(&mut plan);
     let mut notes = res.report.notes();
     notes.append(&mut plan.notes);
+    notes.extend(plan::single_note(&machine, &plan));
     plan.notes = notes;
     Ok(Computed {
         machine,
@@ -801,6 +893,22 @@ pub fn run(
             confirm,
         );
     }
+    if o.voice {
+        let f = host.fetcher();
+        return super::voice::run(
+            ctx,
+            host,
+            &super::voice::Catalog::embedded(),
+            f.as_deref(),
+            port,
+            now,
+            o.piper,
+            o.multilingual,
+            o.yes,
+            out,
+            confirm,
+        );
+    }
     if o.ollama {
         return run_ollama_only(ctx, host, o, port, now, out, confirm, start_ollama);
     }
@@ -833,6 +941,9 @@ pub fn run(
     }
     if !o.json {
         say(plan::render(&c.plan).trim_end());
+        if let Some(tip) = ollama_tip(&c.machine.ollama) {
+            say(&format!("\n{tip}"));
+        }
     }
     let mut report = plan_json(&c);
     let mut code = 0;
@@ -1055,6 +1166,52 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn tempos_own_ollama_runs_lean_unless_told_otherwise() {
+        let none = |_: &str| None;
+        let got = ollama_tuning(None, &none, false);
+        let name = |n: &str| got.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str());
+        assert_eq!(name("OLLAMA_FLASH_ATTENTION"), Some("1"));
+        assert_eq!(name("OLLAMA_KV_CACHE_TYPE"), Some("q8_0"));
+        assert_eq!(name("OLLAMA_NUM_PARALLEL"), Some("1"));
+        assert_eq!(name("OLLAMA_MAX_LOADED_MODELS"), Some("2"));
+        // a Mac: flash attention only, the cache stays f16
+        let mac = ollama_tuning(None, &none, true);
+        assert!(mac.iter().any(|(k, _)| k == "OLLAMA_FLASH_ATTENTION"));
+        assert!(!mac.iter().any(|(k, _)| k == "OLLAMA_KV_CACHE_TYPE"));
+        // the person's settings override a default (text, number or yes/no), and mean it on a Mac
+        let s = parse(r#"{"ollama_env":{"OLLAMA_NUM_PARALLEL":2,"OLLAMA_KV_CACHE_TYPE":"q4_0","OLLAMA_FLASH_ATTENTION":false,"OLLAMA_MAX_LOADED_MODELS":"a b; rm"}}"#).unwrap();
+        let got = ollama_tuning(Some(&s), &none, true);
+        let name = |n: &str| got.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str());
+        assert_eq!(name("OLLAMA_NUM_PARALLEL"), Some("2"));
+        assert_eq!(name("OLLAMA_KV_CACHE_TYPE"), Some("q4_0"));
+        assert_eq!(name("OLLAMA_FLASH_ATTENTION"), Some("0"));
+        assert_eq!(
+            name("OLLAMA_MAX_LOADED_MODELS"),
+            None,
+            "not a plain word: dropped"
+        );
+        // anything already in the environment wins over both: it is left for the child to inherit
+        let env = |k: &str| (k == "OLLAMA_NUM_PARALLEL").then(|| "4".to_string());
+        let got = ollama_tuning(Some(&s), &env, false);
+        assert!(!got.iter().any(|(k, _)| k == "OLLAMA_NUM_PARALLEL"));
+    }
+
+    #[test]
+    fn the_tip_is_for_someone_who_runs_their_own_ollama() {
+        let mut o = probe::Ollama {
+            binary: None,
+            running: false,
+            version: None,
+            models: vec![],
+        };
+        assert!(ollama_tip(&o).is_none());
+        o.binary = Some(PathBuf::from("/usr/bin/ollama"));
+        let tip = ollama_tip(&o).unwrap();
+        assert!(tip.contains("OLLAMA_FLASH_ATTENTION=1") && tip.contains("leaves it alone"));
+        assert!(!tip.contains('\n'));
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

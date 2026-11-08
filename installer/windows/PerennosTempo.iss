@@ -266,6 +266,10 @@ Filename: "{#Launch}"; Parameters: "setup --ollama --yes"; Flags: runhidden wait
 ; 3. box not ticked: only write the plan too, so the page exists. In both 2 and 3 the launcher opens
 ;    the plan at the first start; no model is downloaded.
 Filename: "{#Launch}"; Parameters: "setup --apply --yes"; Flags: runhidden waituntilterminated; Components: agent; Tasks: setupmodels; Check: OllamaAvailable; StatusMsg: "Downloading models for this computer. This can take a while..."
+; Your computers. Joining runs only when a code was typed (or /JOIN=code was given): it finds the main
+; computer, joins, and sets this one up. Choosing "main" only makes the fleet key, so the first invite is instant.
+Filename: "{#Launch}"; Parameters: "fleet join --code ""{code:JoinCode}"" --yes"; Flags: runhidden waituntilterminated; Components: agent; Check: JoinWanted; StatusMsg: "Joining your main computer..."
+Filename: "{#Launch}"; Parameters: "fleet init"; Flags: runhidden waituntilterminated; Check: MainChosen; StatusMsg: "Making this computer's fleet key..."
 Filename: "{#Launch}"; Description: "Open Perennos Tempo"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
@@ -281,6 +285,8 @@ var
   VaultPage: TInputDirWizardPage;
   KeptVault: String;
   OllamaTaskDecided: Boolean;
+  RolePage: TInputOptionWizardPage;
+  JoinPage: TInputQueryWizardPage;
 
 function SetEnvironmentVariable(lpName: String; lpValue: String): BOOL;
   external 'SetEnvironmentVariableW@kernel32.dll stdcall';
@@ -491,8 +497,53 @@ begin
   Result := (not DirExists(VaultDir(''))) or IsEmptyDir(VaultDir(''));
 end;
 
+{ ---- your computers: main, or joining another }
+
+{ /JOIN=4-tiger-violet on the command line joins another computer after installing; nothing joins unless it is given. }
+function JoinParam: String;
+begin
+  Result := Trim(ExpandConstant('{param:JOIN|}'));
+end;
+
+function JoinChosen: Boolean;
+begin
+  Result := (RolePage <> nil) and (not WizardSilent) and RolePage.Values[1];
+end;
+
+function JoinCode(Param: String): String;
+begin
+  Result := JoinParam;
+  if (Result = '') and JoinChosen and (JoinPage <> nil) then
+    Result := Trim(JoinPage.Values[0]);
+end;
+
+function JoinWanted: Boolean;
+begin
+  Result := JoinCode('') <> '';
+end;
+
+{ A person who chose "main" (and an interactive install) gets the fleet key made now, so the first invite is instant. }
+function MainChosen: Boolean;
+begin
+  Result := (RolePage <> nil) and (not WizardSilent) and RolePage.Values[0];
+end;
+
 procedure InitializeWizard;
 begin
+  RolePage := CreateInputOptionPage(wpSelectTasks,
+    'Your computers',
+    'Is this your main computer, or joining another?',
+    'One strong computer needs nothing more: it plays on its own. With more than one, the main computer runs the Tempo app and the others join it, with a short code and no cables to configure.',
+    True, False);
+  RolePage.Add('This is my main computer (or my only one)');
+  RolePage.Add('This computer is joining another one (I will type its code)');
+  RolePage.Values[0] := True;
+  JoinPage := CreateInputQueryPage(RolePage.ID,
+    'Joining another computer',
+    'Type the code from your main computer',
+    'On the main computer, open a terminal and run: tempo-launch fleet invite' + #13#10 +
+    'It shows a code like 4-tiger-violet, good for 10 minutes and once only. Both computers must be on the same network.');
+  JoinPage.Add('Code:', False);
 #if HaveVault
   VaultPage := CreateInputDirPage(wpSelectComponents,
     'Your vault',
@@ -514,6 +565,10 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
+  if (JoinPage <> nil) and (PageID = JoinPage.ID) then
+    Result := (not RolePage.Values[1]) or (JoinParam <> '');
+  if (RolePage <> nil) and (PageID = RolePage.ID) then
+    Result := JoinParam <> '';
   if (VaultPage <> nil) and (PageID = VaultPage.ID) then
     Result := not WizardIsComponentSelected('vault');
 end;
@@ -521,6 +576,11 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  if (JoinPage <> nil) and (CurPageID = JoinPage.ID) and (Trim(JoinPage.Values[0]) = '') then
+  begin
+    MsgBox('Type the code the main computer showed, or go back and choose "main".', mbError, MB_OK);
+    Result := False;
+  end;
   if (VaultPage <> nil) and (CurPageID = VaultPage.ID) and (VaultDir('') = '') then
   begin
     MsgBox('Choose a folder for your vault.', mbError, MB_OK);
@@ -544,6 +604,8 @@ begin
   end;
   if MemoTasksInfo <> '' then
     Result := Result + MemoTasksInfo + NewLine + NewLine;
+  if JoinWanted then
+    Result := Result + 'Joining your main computer with the code you gave.' + NewLine + NewLine;
   Result := Result + 'Tempo''s memory and logs:' + NewLine + Space + TempoHome;
 end;
 
@@ -606,6 +668,10 @@ begin
       S := S + 'Ollama was found on this computer. The first time you open Perennos Tempo, it shows which models fit.' + #13#10#13#10
     else
       S := S + 'Ollama was not found on this computer. Perennos Tempo uses it to run models. Run "tempo-launch setup --apply", or get it from https://ollama.com/download. The first time you open Perennos Tempo, it shows which models fit this computer.' + #13#10#13#10;
+    if JoinWanted then
+      S := S + 'Joining: if this computer did not find your main computer, make sure it is on the same network, run "tempo-launch fleet invite" there, then "tempo-launch fleet join" here.' + #13#10#13#10
+    else if MainChosen then
+      S := S + 'To add another computer later: run "tempo-launch fleet invite" here, then "tempo-launch fleet join" on the new one.' + #13#10#13#10;
     S := S + 'Open Perennos Tempo any time from the Start menu. Everything stays on this computer.';
     WizardForm.FinishedLabel.Caption := S;
     WizardForm.FinishedLabel.AdjustHeight;

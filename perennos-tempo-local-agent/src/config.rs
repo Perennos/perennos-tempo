@@ -103,6 +103,9 @@ pub struct Config {
     /// More Ollama addresses (your other machines), used in this order when `ollama_url` cannot
     /// be reached; a conversation stays on the engine that served it last.
     pub ollama_fallbacks: Vec<String>,
+    /// Addresses of llama-server engines (OpenAI-compatible, with LoRA adapters loaded). A band's
+    /// part with faders set (`mix/faders.json`) plays on the first one; chats without tools only.
+    pub llama_servers: Vec<String>,
     pub data_dir: PathBuf,
     pub models: Vec<String>,
     pub fast_models: Vec<String>,
@@ -120,6 +123,9 @@ pub struct Config {
     /// prompt prefix every turn (only new tokens are processed). Default on.
     pub prefix_stable: bool,
     pub max_steps: usize,
+    /// What a run may use (`budget_tokens`, `budget_wall_s`, `budget_tool_calls`,
+    /// `budget_cloud_cents`; 0 is no limit). Applies to turns that ask for a budget.
+    pub budget: crate::budget::Budget,
     pub tool_cap: usize,
     pub retries: usize,
     pub retry_delay_ms: u64,
@@ -254,6 +260,7 @@ impl Config {
         Config {
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_fallbacks: vec![],
+            llama_servers: vec![],
             models: vec!["local-heavy".into()],
             fast_models: vec!["local-fast".into()],
             num_ctx: BTreeMap::new(),
@@ -267,6 +274,7 @@ impl Config {
             hist_chars: 11000,
             prefix_stable: true,
             max_steps: 40,
+            budget: crate::budget::Budget::default(),
             tool_cap: 40,
             retries: 3,
             retry_delay_ms: 10_000,
@@ -341,6 +349,13 @@ impl Config {
                 .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
                 .collect();
         }
+        if let Some(x) = strs(v, "llama_servers") {
+            c.llama_servers = x
+                .into_iter()
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                .collect();
+        }
         if let Some(x) = strs(v, "models").filter(|x| !x.is_empty()) {
             c.models = x;
         }
@@ -381,6 +396,18 @@ impl Config {
             if let Some(n) = num(v, k) {
                 *slot = n as usize;
             }
+        }
+        for (k, slot) in [
+            ("budget_tokens", &mut c.budget.tokens),
+            ("budget_tool_calls", &mut c.budget.tool_calls),
+            ("budget_cloud_cents", &mut c.budget.cloud_cents),
+        ] {
+            if let Some(n) = num(v, k) {
+                *slot = n.max(0.0) as u64;
+            }
+        }
+        if let Some(n) = num(v, "budget_wall_s") {
+            c.budget.wall_time = std::time::Duration::from_secs(n.max(0.0) as u64);
         }
         if let Some(b) = v.get("prefix_stable").and_then(Value::as_bool) {
             c.prefix_stable = b;
@@ -592,6 +619,22 @@ impl Config {
         h
     }
 
+    /// The configured engine a conversation may be pinned to: `url` (a trailing slash does not
+    /// matter) must be `ollama_url`, one of `ollama_fallbacks` or a URL of a host. Returns the
+    /// address as it is written in the settings.
+    pub fn find_engine(&self, url: &str) -> Option<String> {
+        let want = url.trim().trim_end_matches('/');
+        if want.is_empty() {
+            return None;
+        }
+        std::iter::once(&self.ollama_url)
+            .chain(&self.ollama_fallbacks)
+            .chain(&self.llama_servers)
+            .chain(self.hosts.values().flat_map(|h| &h.urls))
+            .find(|u| u.trim_end_matches('/') == want)
+            .cloned()
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
@@ -696,6 +739,23 @@ mod tests {
         assert_eq!(c.max_steps, 40);
         let c = Config::defaults(Some("/x/data".into()));
         assert_eq!(c.data_dir, PathBuf::from("/x/data"));
+    }
+
+    #[test]
+    fn budget_defaults_are_sensible_and_the_config_changes_them() {
+        let c = Config::defaults(Some("/x/data".into()));
+        assert_eq!(c.budget, crate::budget::Budget::default());
+        let v = json!({"budget_tokens": 5000, "budget_wall_s": 60, "budget_tool_calls": 0, "budget_cloud_cents": 5});
+        let c = Config::from_json(&v, None).unwrap();
+        assert_eq!(
+            (
+                c.budget.tokens,
+                c.budget.wall_time.as_secs(),
+                c.budget.tool_calls,
+                c.budget.cloud_cents
+            ),
+            (5000, 60, 0, 5)
+        );
     }
 
     #[test]
@@ -828,5 +888,39 @@ mod tests {
         assert_eq!(c.ollama_url, "http://127.0.0.1:9");
         assert_eq!(c.data_dir, PathBuf::from("/dd"));
         assert!(Config::load(Some("/no/such/file.json"), None, &env).is_err());
+    }
+
+    #[test]
+    fn only_a_configured_engine_can_be_found() {
+        let mut c = Config::defaults(None);
+        c.ollama_url = "http://127.0.0.1:11434".into();
+        c.ollama_fallbacks = vec!["http://10.0.0.5:11434".into()];
+        c.hosts.insert(
+            "box".into(),
+            HostCfg {
+                urls: vec!["http://192.168.0.20:11434/".into()],
+                models: vec![],
+                trust_reads: false,
+            },
+        );
+        assert_eq!(
+            c.find_engine("http://127.0.0.1:11434/").as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert!(c.find_engine("http://10.0.0.5:11434").is_some());
+        assert_eq!(
+            c.find_engine("http://192.168.0.20:11434").as_deref(),
+            Some("http://192.168.0.20:11434/"),
+            "returned as the settings write it"
+        );
+        for no in [
+            "",
+            "  ",
+            "http://10.0.0.6:11434",
+            "http://10.0.0.5:11434/x",
+            "10.0.0.5:11434",
+        ] {
+            assert!(c.find_engine(no).is_none(), "{no}");
+        }
     }
 }

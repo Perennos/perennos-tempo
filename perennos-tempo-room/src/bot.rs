@@ -22,7 +22,7 @@ fn word_char(c: char) -> bool {
 /// Byte ranges of each `@name` mention (`name` lowercase ASCII; matched ASCII-case-insensitively
 /// against the text itself, so no index from another string is ever used; a whole word, not
 /// inside an address).
-fn mention_ranges_of(text: &str, name: &str) -> Vec<(usize, usize)> {
+pub fn mention_ranges_of(text: &str, name: &str) -> Vec<(usize, usize)> {
     let needle = format!("@{name}");
     let mut out = vec![];
     for (i, c) in text.char_indices() {
@@ -78,9 +78,14 @@ pub fn mentions_tempo(text: &str) -> bool {
 
 /// The text with every `@tempo` (and the punctuation right after it) taken out.
 pub fn strip_mention(text: &str) -> String {
+    strip_mention_of(text, "tempo")
+}
+
+/// The text with every `@name` (and the punctuation right after it) taken out.
+pub fn strip_mention_of(text: &str, name: &str) -> String {
     let mut out = String::new();
     let mut at = 0;
-    for (a, b) in mention_ranges(text) {
+    for (a, b) in mention_ranges_of(text, name) {
         out.push_str(&text[at..a]);
         let rest = &text[b..];
         let skip = rest.len() - rest.trim_start_matches([',', ':', ';']).len();
@@ -173,6 +178,7 @@ pub const HELP: &str = "Here is what I can do in a room:
 - @tempo ping: am I here, and is my agent awake?
 - /help: this list. /bpm: tap a tempo (in the app).
 - Owner only: /mode plain|warm|playful (my tone), /mode always|mention (when I answer), /mute @name, /unmute @name.
+- Owner only, at your own computer: \"@stage golden hour\" or \"@stage re-angle the last clip with a slow orbit\" plays Stage's last run again with those Pedals. I say what I understood and ask y or n here first, and tell only you where the result is.
 I never run commands or change files for anyone in a room.";
 
 // ---- personality and prompts

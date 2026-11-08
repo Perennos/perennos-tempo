@@ -159,6 +159,7 @@ PerennosTempo-Setup-2.0.1-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURR
 | `/DIR="..."` | the program folder |
 | `/COMPONENTS="agent,vault,studio,room,field,cli"` | what to install (the agent is always installed) |
 | `/TASKS="openvault,addtopath,learn"` | exactly these tasks; `/MERGETASKS="desktopicon,startup"` adds to the defaults. `setupmodels` (download models now) is not a default: name it, as in `/MERGETASKS="setupmodels"`, to opt in |
+| `/JOIN=4-tiger-violet` | after installing, join the main computer that showed this code (`tempo-launch fleet join`). Nothing joins unless it is given, so a silent install stays unattended |
 | `/VAULT="D:\Notes"` | the vault folder (default: the last one, else `TEMPO_VAULT`, else `Documents\Tempo Vault`) |
 | `/LOG="file"` | Setup's log |
 
