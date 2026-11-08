@@ -3085,7 +3085,8 @@ mod tests {
         let pid = printed_pid(&e, &c);
         std::thread::sleep(Duration::from_millis(300));
         let o = run(&e, &c, "command_output", json!({"id": "bg-1"}));
-        assert!(o.starts_with("[bg-1: running for"), "{o}");
+        assert!(untrusted::has_marker(&o), "{o}");
+        assert!(untrusted_body(&o).starts_with("[bg-1: running for"));
         assert!(alive(&pid));
         let r = run(&e, &c, "command_stop", json!({"id": "bg-1"}));
         assert!(r.starts_with("[bg-1: stopped after"), "{r}");
@@ -3094,7 +3095,8 @@ mod tests {
         let (e, c, _d) = start("sleep 300 >/dev/null 2>&1 & echo pid=$!");
         let pid = printed_pid(&e, &c);
         let o = run(&e, &c, "command_output", json!({"id": "bg-1", "wait": 10}));
-        assert!(o.starts_with("[bg-1: exited 0"), "{o}");
+        assert!(untrusted::has_marker(&o), "{o}");
+        assert!(untrusted_body(&o).starts_with("[bg-1: exited 0"));
         assert!(gone_soon(&pid, alive), "{pid} outlived its shell");
     }
 
