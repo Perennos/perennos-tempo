@@ -18,6 +18,7 @@ pub mod brand;
 pub mod conductor;
 pub mod fleet;
 pub mod home;
+pub mod receipt_batches;
 pub mod retune;
 pub mod setup;
 pub mod stage;
@@ -175,6 +176,10 @@ usage: tempo-launch [command]
                     list a session's edits, or apply them to a copy, make a GGUF and run the Rehearsal against the same weights unedited (--band: the band plays it once it passes)
   retune undo MODEL | SESSION --edit | versions [MODEL]
                     step back to the version before (or take the last edit off a session), and every version kept
+  receipts export --case ID --out NEW_FILE
+                    sign the fixed conformance receipt references with this computer's Fleet identity
+  verify --signed FILE --trusted-key PUBLIC_HEX
+                    verify a signed receipt batch against a Fleet public key you already trust
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1992,6 +1997,16 @@ pub enum Cmd {
     Woodshed(woodshed::WoodCmd),
     /// `retune ...`: Retune (weight edits), see docs/RETUNE.md.
     Retune(retune::RetuneCmd),
+    /// Export the current receipt references as a signed snapshot.
+    ReceiptsExport {
+        case_id: String,
+        output: PathBuf,
+    },
+    /// Verify a signed snapshot against an independently supplied key.
+    VerifySigned {
+        file: PathBuf,
+        trusted_key: String,
+    },
     Help,
     Version,
 }
@@ -2134,6 +2149,17 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "stage" => Cmd::Stage(stage::parse_args(&rest)?),
         "woodshed" => Cmd::Woodshed(woodshed::parse_args(&rest)?),
         "retune" => Cmd::Retune(retune::parse_args(&rest)?),
+        "receipts" => {
+            if rest.first().copied() != Some("export") {
+                return Err("receipts takes export --case ID --out NEW_FILE".into());
+            }
+            let (case_id, output) = receipt_batches::parse_export_args(&rest[1..])?;
+            Cmd::ReceiptsExport { case_id, output }
+        }
+        "verify" => {
+            let (file, trusted_key) = receipt_batches::parse_verify_args(&rest)?;
+            Cmd::VerifySigned { file, trusted_key }
+        }
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2205,6 +2231,12 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Stage(s) => Ok(stage::run(ctx, s)),
         Cmd::Woodshed(w) => Ok(woodshed::run(ctx, w)),
         Cmd::Retune(r) => Ok(retune::run(ctx, r)),
+        Cmd::ReceiptsExport { case_id, output } => {
+            Ok(receipt_batches::run_export(ctx, &case_id, &output))
+        }
+        Cmd::VerifySigned { file, trusted_key } => {
+            Ok(receipt_batches::run_verify(&file, &trusted_key))
+        }
         Cmd::Schedule {
             remove,
             print,
