@@ -1853,7 +1853,7 @@ pub fn run(ctx: &Ctx, cmd: FleetCmd) -> i32 {
 
 #[cfg(test)]
 mod autostart_tests {
-    use super::{autostart_executable, schedule};
+    use super::autostart_executable;
 
     #[test]
     fn test_build_does_not_select_an_autostart_executable() {
@@ -1878,7 +1878,7 @@ mod autostart_tests {
                 "PATH did not select fake crontab"
             );
             let ctx = crate::Ctx::from_env();
-            schedule(&ctx, &std::env::current_exe().unwrap(), true);
+            super::schedule(&ctx, &std::env::current_exe().unwrap(), true);
             return;
         }
 
