@@ -1998,9 +1998,15 @@ pub enum Cmd {
     /// `retune ...`: Retune (weight edits), see docs/RETUNE.md.
     Retune(retune::RetuneCmd),
     /// Export the current receipt references as a signed snapshot.
-    ReceiptsExport { case_id: String, output: PathBuf },
+    ReceiptsExport {
+        case_id: String,
+        output: PathBuf,
+    },
     /// Verify a signed snapshot against an independently supplied key.
-    VerifySigned { file: PathBuf, trusted_key: String },
+    VerifySigned {
+        file: PathBuf,
+        trusted_key: String,
+    },
     Help,
     Version,
 }
