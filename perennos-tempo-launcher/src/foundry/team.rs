@@ -150,7 +150,7 @@ fn parse_args(args: &[String]) -> Result<([&str; 3], &str), String> {
     }
     let expected = ["--research", "--code", "--content", "--task-file"];
     let mut values = Vec::new();
-    for (pair, flag) in args.chunks_exact(2).zip(expected) {
+    for (pair, flag) in args.as_chunks::<2>().0.iter().zip(expected) {
         if pair[0] != flag
             || pair[1].is_empty()
             || (flag != "--task-file" && !safe_id(&pair[1]))
