@@ -866,8 +866,7 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
         ("next_actions", J::Arr(vec![J::s("Complete missing fixed files and fields."), J::s("Have each human assertion checked independently."), J::s("Supply the trusted public key to verify or seal complete receipt records.")])),
     ]);
     let report = render_markdown(
-        &opts.case_id,
-        &opts.edition,
+        opts,
         &created_at,
         crate::VERSION,
         &sections,
@@ -978,8 +977,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn render_markdown(
-    case_id: &str,
-    edition: &str,
+    opts: &Opts,
     created: &str,
     version: &str,
     sections: &[Section],
@@ -987,6 +985,8 @@ fn render_markdown(
     signature: &J,
     model_details: ModelRenderDetails<'_>,
 ) -> String {
+    let case_id = opts.case_id.as_str();
+    let edition = opts.edition.as_str();
     let (model_hash, model_rows, missing) = model_details;
     let mut out = format!("# Perennos Tempo conformance report\n\nCase: {case_id}\nProduct version: {version}\nEdition: {}\nCreated at (Unix): {created}\nStatus: In progress\n\n", if edition == "cayman" { "Caymanian Integrated Systems" } else { "General" });
     out.push_str("This report organizes supplied records. It does not certify legal compliance. Human assertions need independent validation. Identity, role, and Cayman residence have not been validated.\n\n");
@@ -1068,8 +1068,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("tempo-conformance-{}-{n}", std::process::id()));
+        let temp_dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let path = temp_dir.join(format!("tempo-conformance-{}-{n}", std::process::id()));
         private_dir(&path);
         path
     }

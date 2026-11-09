@@ -641,10 +641,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&path)
-                .unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         }
         #[cfg(not(unix))]
         fs::create_dir(&path).unwrap();
