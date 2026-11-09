@@ -456,7 +456,7 @@ fn write_new(path: &Path, bytes: &[u8], _home: &Path) -> Result<(), String> {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let home = checked_path(_home, false, true)?;
         let home_metadata = fs::symlink_metadata(home)
-            .map_err(|_| "could not inspect the Tempo home".to_string())?;
+            .map_err(|_| "could not inspect the Perennos Tempo home".to_string())?;
         let sticky_shared = parent_metadata.permissions().mode() & 0o1000 != 0;
         if !sticky_shared && parent_metadata.uid() != home_metadata.uid() {
             return Err("output folder is not owned with the Tempo home".into());
