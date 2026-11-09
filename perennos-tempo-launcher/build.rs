@@ -1,8 +1,9 @@
 //! On Windows targets, give tempo-launch.exe its version details (the name Windows shows in Task
-//! Manager and in the file's properties) and, when TEMPO_LAUNCH_ICON names an .ico file, its icon.
+//! Manager and in the file's properties) and its icon: `assets/tempo-launch.ico` (the Perennos insignia), or
+//! the .ico file TEMPO_LAUNCH_ICON names.
 //! Without a resource compiler this is skipped with a note: the program works the same.
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -25,12 +26,19 @@ fn main() {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let default_icon = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join("assets/tempo-launch.ico");
     let icon = env::var("TEMPO_LAUNCH_ICON")
         .ok()
-        .filter(|p| Path::new(p).is_file())
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| Some(default_icon).filter(|p| p.is_file()))
         .map(|p| {
-            println!("cargo:rerun-if-changed={p}");
-            format!("1 ICON \"{}\"\n", p.replace('\\', "\\\\"))
+            println!("cargo:rerun-if-changed={}", p.display());
+            format!(
+                "1 ICON \"{}\"\n",
+                p.display().to_string().replace('\\', "\\\\")
+            )
         })
         .unwrap_or_default();
     let rc = format!(
@@ -51,7 +59,7 @@ BEGIN
       VALUE "FileDescription", "Perennos Tempo"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "tempo-launch"
-      VALUE "LegalCopyright", "Copyright (C) 2026 Perennos"
+      VALUE "LegalCopyright", "Copyright 2026 Perennos"
       VALUE "OriginalFilename", "tempo-launch.exe"
       VALUE "ProductName", "Perennos Tempo"
       VALUE "ProductVersion", "{version}"
