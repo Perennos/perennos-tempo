@@ -1725,6 +1725,14 @@ pub fn rotate_cmd(
 
 // ---- starting with Tempo
 
+fn autostart_executable(is_test: bool) -> Option<std::path::PathBuf> {
+    if is_test {
+        None
+    } else {
+        std::env::current_exe().ok()
+    }
+}
+
 /// `tempo-launch start`: when the fleet has more than one machine, start the messenger (it ends
 /// at once if one is already running).
 pub fn autostart(ctx: &Ctx) {
@@ -1732,7 +1740,7 @@ pub fn autostart(ctx: &Ctx) {
     if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
+    let Some(exe) = autostart_executable(cfg!(test)) else {
         return;
     };
     let log = crate::open_log(&ctx.log_path("fleet")).ok();
@@ -1750,8 +1758,108 @@ pub fn autostart(ctx: &Ctx) {
     }
 }
 
+#[cfg(test)]
+mod autostart_tests {
+    use super::{autostart_executable, schedule};
+
+    #[test]
+    fn test_build_does_not_select_an_autostart_executable() {
+        assert_eq!(autostart_executable(false), std::env::current_exe().ok());
+        assert!(autostart_executable(true).is_none());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn schedule_test_build_does_not_invoke_crontab() {
+        const CHILD: &str = "TEMPO_FLEET_SCHEDULE_GUARD_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let marker = std::path::PathBuf::from(std::env::var_os("CRON_MARKER").unwrap());
+            let probe_marker = marker.with_file_name("probe-marker");
+            let probe = std::process::Command::new("crontab")
+                .arg("-l")
+                .env("CRON_MARKER", &probe_marker)
+                .status()
+                .unwrap();
+            assert!(
+                probe.success() && probe_marker.is_file(),
+                "PATH did not select fake crontab"
+            );
+            let ctx = crate::Ctx::from_env();
+            schedule(&ctx, &std::env::current_exe().unwrap(), true);
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join(format!(
+            "tempo-fleet-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for path in [&dir, &bin] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let marker = dir.join("crontab-called");
+        let fake = bin.join("crontab");
+        std::fs::write(&fake, "#!/bin/sh\nprintf x >> \"$CRON_MARKER\"\ncase \"$1\" in -l) exit 0 ;; -) while IFS= read -r line; do :; done; exit 0 ;; esac\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let exe = std::env::current_exe().unwrap();
+        let test_name = std::thread::current().name().unwrap().to_string();
+        let mut child = Command::new(exe)
+            .args([
+                "--exact",
+                test_name.as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .env("HOME", &dir)
+            .env("TEMPO_HOME", &dir)
+            .env("TEMPO_LAUNCH_HOME", &dir)
+            .env("CRON_MARKER", &marker)
+            .env("PATH", &bin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("schedule guard child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains("running 1 test")
+                && stdout.contains(test_name.as_str()),
+            "child did not run its exact test: {stdout}"
+        );
+        assert!(!marker.exists(), "test build invoked the fake crontab");
+    }
+}
+
+fn scheduler_writes_enabled(is_test: bool) -> bool {
+    !is_test
+}
+
 /// `tempo-launch schedule`: keep the messenger running when there is a fleet.
 pub fn schedule(ctx: &Ctx, exe: &std::path::Path, remove: bool) {
+    if !scheduler_writes_enabled(cfg!(test)) {
+        return;
+    }
     let p = Paths::of(ctx);
     if !remove && (store::read_key(&p).is_none() || store::load(&p).count() < 2) {
         return;
