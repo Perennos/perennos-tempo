@@ -348,9 +348,9 @@
       "evidence_kind": "use-case",
       "human_required": true,
       "existing": "No native register, accountable-person verification or legal tier decision is established by the inspected baseline. The new exporter can retain a reference; it does not enforce the underlying process.",
-      "missing": "The responsible person must supply and independently review the use-specific record. No per-use legal tier, Cayman identity, entity scope or responsibility is established by generating this export.",
-      "evidence_path": "conformance/CASE/use-case.json#risk_assessment_reference",
-      "proof": "Check the exact control stated in this row against the referenced restricted record; retain the actual result, responsible reviewer and date, and hash the supporting bytes. Configuration/source presence and a populated reference are insufficient.",
+      "missing": "No baseline gate establishes that the full clock file existed at setup. Resolve every A1-I1 field and its restricted supporting evidence, including blanks and applicability decisions. A risk assessment is only one part of that file.",
+      "evidence_path": "conformance/CASE/use-case.json#case_id; conformance/CASE/use-case.json#approval_date; conformance/CASE/data-flow.json#records; conformance/CASE/models.json#records; conformance/CASE/signoffs.json#records; conformance/CASE/incidents-overrides.json#records; conformance/CASE/evaluation-canary.json#records; conformance/CASE/signed-receipts.json#records",
+      "proof": "Preserve the complete A1-I1 evidence snapshot with its initial hashes and independently checked setup/approval timestamp before the first real record; reconcile that timestamp with the first operational receipt. A later export timestamp or risk-assessment reference alone does not establish completion at setup.",
       "status": "In progress",
       "supporting_fields": [
         "risk_assessment_reference"
@@ -3201,9 +3201,9 @@
       "evidence_kind": "use-case",
       "human_required": true,
       "existing": "No native register, accountable-person verification or legal tier decision is established by the inspected baseline. The new exporter can retain a reference; it does not enforce the underlying process.",
-      "missing": "The responsible person must supply and independently review the use-specific record. No per-use legal tier, Cayman identity, entity scope or responsibility is established by generating this export.",
-      "evidence_path": "conformance/CASE/use-case.json#risk_assessment_reference",
-      "proof": "Check the exact control stated in this row against the referenced restricted record; retain the actual result, responsible reviewer and date, and hash the supporting bytes. Configuration/source presence and a populated reference are insufficient.",
+      "missing": "No baseline gate establishes that the full clock file existed at setup. Resolve every A1-I1 field and its restricted supporting evidence, including blanks and applicability decisions. A risk assessment is only one part of that file.",
+      "evidence_path": "conformance/CASE/use-case.json#case_id; conformance/CASE/use-case.json#approval_date; conformance/CASE/data-flow.json#records; conformance/CASE/models.json#records; conformance/CASE/signoffs.json#records; conformance/CASE/incidents-overrides.json#records; conformance/CASE/evaluation-canary.json#records; conformance/CASE/signed-receipts.json#records",
+      "proof": "Preserve the complete A1-I1 evidence snapshot with its initial hashes and independently checked setup/approval timestamp before the first real record; reconcile that timestamp with the first operational receipt. A later export timestamp or risk-assessment reference alone does not establish completion at setup.",
       "status": "In progress",
       "supporting_fields": [
         "risk_assessment_reference"

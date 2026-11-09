@@ -30,10 +30,21 @@ assert 'use-case.json#contract_reference' in by_id['S5.3-04']['evidence_path']
 assert 'use-case.json#outsourcing_reference' in by_id['S5.3-06']['evidence_path']
 assert 'use-case.json#lawful_basis_reference' in by_id['C2']['evidence_path']
 assert 'use-case.json#stop_test_reference' in by_id['H2']['evidence_path']
+assert 'use-case.json#contract_reference' in by_id['D2']['evidence_path']
+assert 'use-case.json#appeal_reference' in by_id['P3']['evidence_path']
+assert 'use-case.json#explanation_reference' in by_id['P3']['evidence_path']
+for rid in ['S5.3-08','CLK-GATE']:
+    assert len(by_id[rid]['evidence_path'].split('; '))==8
+    assert 'before the first real record' in by_id[rid]['proof']
+    assert 'A1-I1' in by_id[rid]['proof']
 assert by_id['S14-08']['evidence_kind']=='signoffs'
 assert by_id['S14-09']['evidence_kind']=='signoffs'
 assert by_id['P6']['evidence_kind']=='signed-receipts'
 assert 'No native register' in by_id['P1']['existing']
+matrix=(repo/'docs/CONFORMANCE-MATRIX.md').read_text(encoding='utf-8')
+published=[line for line in matrix.splitlines() if re.match(r'\| [A-Z0-9][^|]* / section',line)]
+expected=[f"| {r['id']} / section{r['section']}, text line{r['source_line']} | {r['requirement']} | {r['existing']} | {r['missing']} | `{r['evidence_path']}`. {r['proof']} |" for r in rows]
+assert published==expected, 'Markdown/JSON traceability mismatch'
 for anchor in anchors:
     name, line = anchor.rsplit(":",1)
     path=repo/name
