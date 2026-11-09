@@ -38,7 +38,7 @@ const MAX_SUMMARY: usize = 1200;
 
 const PLAN_SCHEMA: &str = r#"{"type":"object","required":["sections"],"properties":{"sections":{"type":"array","maxItems":4,"items":{"type":"object","required":["title","task","member"],"properties":{"title":{"type":"string"},"task":{"type":"string"},"member":{"type":"string"},"big":{"type":"boolean"}}}}}}"#;
 const JUDGE_SCHEMA: &str = r#"{"type":"object","required":["score"],"properties":{"score":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string"}}}"#;
-const PRODUCER_ROLE: &str = "You are the producer. You judge attempts at a task, fairly and without being swayed by how confident the writing sounds. You only answer with the JSON asked for.";
+pub(crate) const PRODUCER_ROLE: &str = "You are the producer. You judge attempts at a task, fairly and without being swayed by how confident the writing sounds. You only answer with the JSON asked for.";
 
 /// A child's tools: what its parent holds, narrowed to `wanted` when it asks for fewer (None:
 /// all the parent has). Never a tool the parent lacks, and none at all for a guest.

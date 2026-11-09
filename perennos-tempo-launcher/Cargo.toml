@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "tempo-launch"
 path = "src/main.rs"
 
+[[bin]]
+name = "tempo-foundry"
+path = "src/bin/tempo-foundry.rs"
+
 # std first. Two crates, both for the fleet messenger: SQLite (bundled, so nothing is installed
 # beside Tempo) holds the durable outbox and inbox; getrandom is the operating system's random
 # source for the fleet key.
