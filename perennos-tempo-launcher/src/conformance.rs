@@ -423,6 +423,9 @@ fn inspect_path(root: &Path, path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for part in root.components().chain(relative.components()) {
         current.push(part.as_os_str());
+        if matches!(part, std::path::Component::Prefix(_)) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(meta) if is_link(&meta) => return Err("source contains a symbolic link".into()),
             Ok(_) => {}
@@ -924,6 +927,9 @@ fn output_path(path: &Path) -> Result<PathBuf, String> {
     let parts = absolute.components().collect::<Vec<_>>();
     for (i, part) in parts.iter().enumerate() {
         current.push(part.as_os_str());
+        if matches!(part, std::path::Component::Prefix(_)) {
+            continue;
+        }
         if i + 1 < parts.len() {
             match std::fs::symlink_metadata(&current) {
                 Ok(meta) if is_link(&meta) => {
@@ -1284,6 +1290,45 @@ mod tests {
     }
 
     #[test]
+    fn signing_without_identity_keeps_conformance_open_and_emits_no_batch() {
+        let root = temp();
+        let context = ctx(&root);
+        let input_dir = context.home.join("conformance/case-1");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(
+            input_dir.join("signed-receipts.json"),
+            format!(
+                r#"{{"schema_version":1,"records":[{{"receipt_id":"r1","artifact_digest":"{}"}}]}}"#,
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        let mut options = opts(&root);
+        options.trusted_key = Some("a".repeat(64));
+        options.sign_receipts = true;
+
+        assert_eq!(export(&context, &options).unwrap().0, 2);
+        assert!(!context.home.join("fleet-identity").exists());
+        let evidence =
+            json::parse(&std::fs::read_to_string(root.join("fresh-output/evidence.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            evidence.get("status").and_then(json_is_string),
+            Some("In progress")
+        );
+        let signature = evidence.get("signature_verification").unwrap();
+        assert_eq!(
+            signature.get("status").and_then(json_is_string),
+            Some("In progress")
+        );
+        assert_eq!(
+            signature.get("reason").and_then(json_is_string),
+            Some("The local signing identity could not produce a receipt batch.")
+        );
+        assert!(matches!(signature.get("batch"), Some(J::Null)));
+    }
+
+    #[test]
     fn signing_and_verifying_batch_exports_sorted_proof_and_keeps_human_status_open() {
         let root = temp();
         let context = ctx(&root);
@@ -1524,5 +1569,16 @@ mod tests {
         .unwrap();
         assert_eq!(section.status, "In progress");
         assert!(section.reason.unwrap().contains("symbolic link"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_paths_skip_prefix_and_keep_create_only_check() {
+        let root = temp();
+        assert!(inspect_path(&root, &root).is_ok());
+        let output = root.join("fresh-output");
+        assert!(output_path(&output).is_ok());
+        std::fs::create_dir(&output).unwrap();
+        assert!(output_path(&output).is_err());
     }
 }
