@@ -402,7 +402,7 @@ fn is_link(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        return meta.file_attributes() & 0x400 != 0;
+        meta.file_attributes() & 0x400 != 0
     }
     #[cfg(not(windows))]
     {
@@ -789,7 +789,10 @@ fn output_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn create_private_dir(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
     let mut builder = std::fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
