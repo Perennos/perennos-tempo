@@ -25,10 +25,12 @@ pub fn request(
     timeout: Duration,
 ) -> Result<(u16, String), String> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut s = TcpStream::connect_timeout(&addr, timeout)
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| format!("request to 127.0.0.1:{port} has an invalid deadline"))?;
+    let connect_timeout = remaining(deadline, port)?;
+    let mut s = TcpStream::connect_timeout(&addr, connect_timeout)
         .map_err(|e| format!("could not reach 127.0.0.1:{port} ({e})"))?;
-    s.set_read_timeout(Some(timeout)).ok();
-    s.set_write_timeout(Some(timeout)).ok();
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nUser-Agent: tempo-launch/{VERSION}\r\nConnection: close\r\n"
     );
@@ -45,15 +47,28 @@ pub fn request(
     if let Some(b) = body {
         req.push_str(b);
     }
-    s.write_all(req.as_bytes())
-        .map_err(|e| format!("could not send to 127.0.0.1:{port} ({e})"))?;
+    write_until(&mut s, req.as_bytes(), deadline, port)?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
+        let read_timeout = remaining(deadline, port)?;
+        s.set_read_timeout(Some(read_timeout))
+            .map_err(|e| format!("could not set read deadline for 127.0.0.1:{port} ({e})"))?;
         match s.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                remaining(deadline, port)?;
+                buf.extend_from_slice(&chunk[..n]);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(deadline_error(port));
+            }
             Err(e) => {
                 if buf.is_empty() {
                     return Err(format!("no answer from 127.0.0.1:{port} ({e})"));
@@ -65,7 +80,55 @@ pub fn request(
             return Err("the answer was too big".into());
         }
     }
+    remaining(deadline, port)?;
     parse_response(&buf, true).ok_or_else(|| format!("127.0.0.1:{port} did not answer with HTTP"))
+}
+
+fn deadline_error(port: u16) -> String {
+    format!("request to 127.0.0.1:{port} exceeded its total deadline")
+}
+
+fn remaining(deadline: Instant, port: u16) -> Result<Duration, String> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        Err(deadline_error(port))
+    } else {
+        Ok(left)
+    }
+}
+
+fn write_until(
+    stream: &mut TcpStream,
+    bytes: &[u8],
+    deadline: Instant,
+    port: u16,
+) -> Result<(), String> {
+    let mut written = 0;
+    while written < bytes.len() {
+        let write_timeout = remaining(deadline, port)?;
+        stream
+            .set_write_timeout(Some(write_timeout))
+            .map_err(|e| format!("could not set write deadline for 127.0.0.1:{port} ({e})"))?;
+        match stream.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(format!(
+                    "could not send to 127.0.0.1:{port} (write returned zero)"
+                ))
+            }
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(deadline_error(port));
+            }
+            Err(e) => return Err(format!("could not send to 127.0.0.1:{port} ({e})")),
+        }
+    }
+    remaining(deadline, port).map(|_| ())
 }
 
 fn error_text(code: u16, body: &str) -> String {
@@ -495,4 +558,64 @@ pub fn register_band(link: &RoomLink, band: &Band) -> Result<RoomReport, String>
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod request_deadline_tests {
+    use super::request;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn dripped_response_cannot_reset_the_total_deadline() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_nodelay(true).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut part = [0; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = socket.read(&mut part).unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&part[..n]);
+            }
+
+            let body = [b'x'; 1024];
+            let mut response =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n".to_vec();
+            response.extend_from_slice(&body);
+            for (index, bytes) in response.chunks(64).enumerate() {
+                if index > 0 {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                if socket.write_all(bytes).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let result = request(port, "GET", "/slow", &[], None, Duration::from_millis(300));
+        let elapsed = started.elapsed();
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("total deadline")),
+            "dripped response was not bounded by one deadline: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "request returned after {elapsed:?}, beyond its bounded allowance"
+        );
+        server.join().unwrap();
+    }
 }
