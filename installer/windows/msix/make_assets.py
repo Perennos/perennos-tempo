@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Draws every picture the Perennos Tempo MSIX and its Store listing need, from the one brand mark.
+"""Makes every picture the Perennos Tempo MSIX and its Store listing need, from the one brand mark.
 
-The mark is the one in installer/windows/art/make_art.py (the P with the signal dot), so the
-package, the installer and the apps all show the same thing. Run it once and commit the PNGs:
+The mark is the official Perennos insignia (installer/windows/art/perennos-insignia.png) on its cream
+tile, as installer/windows/art/make_insignia_icon.py makes it, so the package, the installer and the
+apps all show the same thing. Run it once and commit the PNGs:
 
     python3 installer/windows/msix/make_assets.py            # Assets/, ../store/art/ and the app icons
     python3 installer/windows/msix/make_assets.py --check    # only say what is missing or the wrong size
@@ -15,10 +16,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(HERE, "..", "art"))
-import make_art as art  # noqa: E402  (the brand mark, standard library only)
+import make_art as art  # noqa: E402  (the brand colours)
 
 try:
     from PIL import Image, ImageDraw, ImageFont
+    import make_insignia_icon as insignia  # noqa: E402  (the insignia on its tile)
 except ImportError:
     sys.exit("make_assets.py needs Pillow: pip install pillow")
 
@@ -41,50 +43,15 @@ TILES = {
 }
 
 
-def to_image(rows):
-    h, w = len(rows), len(rows[0])
-    im = Image.new("RGBA", (w, h))
-    px = im.load()
-    for y, row in enumerate(rows):
-        for x, (r, g, b, a) in enumerate(row):
-            px[x, y] = (art.to8(r), art.to8(g), art.to8(b), art.to8(a * 255))
-    return im
-
-
-def glyph_rows(size, ink, accent):
-    """The P and the dot without the rounded tile behind them (for the unplated icons)."""
-    units = 64.0 / size
-    rows = []
-    for y in range(size):
-        row = []
-        for x in range(size):
-            u, v = (x + 0.5) * units, (y + 0.5) * units
-            p = art.clamp01(0.5 - (art.d_p(u, v) - 3.2) / units)
-            d = art.clamp01(0.5 - (art.math.hypot(u - 44, v - 44) - 5.6) / units)
-            a = max(p, d)
-            if a <= 0:
-                row.append((0, 0, 0, 0.0))
-                continue
-            w = d / (p + d) if (p + d) else 0
-            col = art.lerp3(ink, accent, w)
-            row.append((col[0], col[1], col[2], a))
-        rows.append(row)
-    return rows
-
-
 _cache = {}
 
 
 def master(kind):
-    """kind: 'tile' (the mark with its tile), 'dark' (P and dot for light backgrounds), 'light' (for dark ones)."""
-    if kind not in _cache:
-        if kind == "tile":
-            _cache[kind] = to_image(art.draw_mark(MASTER, art.ORANGE))
-        elif kind == "light":
-            _cache[kind] = to_image(glyph_rows(MASTER, art.INK, art.ORANGE))
-        else:
-            _cache[kind] = to_image(glyph_rows(MASTER, (0x1B, 0x1D, 0x22), art.ORANGE))
-    return _cache[kind]
+    """The insignia on its tile. The insignia is a dark stone P and is never recoloured, so the unplated
+    icons (`kind` 'light' and 'dark', for dark and light themes) keep the tile too: it is what makes the P readable."""
+    if "tile" not in _cache:
+        _cache["tile"] = insignia.tile(MASTER)
+    return _cache["tile"]
 
 
 def mark(kind, size):
@@ -102,7 +69,11 @@ def gradient(w, h):
 
 
 def font(size):
-    for p in ("/usr/share/fonts/opentype/inter/Inter-SemiBold.otf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+    for p in (
+        "/usr/share/fonts/opentype/inter/Inter-SemiBold.otf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf",
+    ):
         if os.path.isfile(p):
             return ImageFont.truetype(p, size)
     return ImageFont.load_default()
@@ -159,14 +130,7 @@ def make_all():
     tw = d.textlength(text, font=f)
     d.text(((720 - tw) / 2, 760), text, font=f, fill=art.INK)
     save(poster, os.path.join(STORE_ART, "poster-art-720x1080.png"), (720, 1080), report)
-    # the app icons the Room and Studio programs carry (build.rs compiles them in)
-    sizes = [16, 20, 24, 32, 40, 48, 64, 256]
-    for crate, accent, name in (("perennos-tempo-room", art.ACCENTS["tempo-room"], "tempo-room.ico"), ("perennos-tempo-studio", art.ORANGE, "tempo-studio.ico")):
-        out = os.path.join(ROOT, "crates", crate, "assets", name)
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with open(out, "wb") as fh:
-            fh.write(art.ico_bytes([(s, art.draw_mark(s, accent)) for s in sizes]))
-        report.append((out, None))
+    # the programs' own icons are art/perennos.ico (make_insignia_icon.py), copied into each crate's assets/
     return report
 
 
