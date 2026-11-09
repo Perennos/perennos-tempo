@@ -124,6 +124,7 @@ pub enum FleetCmd {
     },
     Serve {
         quiet: bool,
+        announce: bool,
     },
     Send {
         who: String,
@@ -216,11 +217,19 @@ pub fn parse_args(rest: &[&str]) -> Result<FleetCmd, String> {
             },
             _ => return Err("fleet setup takes a computer (and --yes)".into()),
         },
-        Some("serve") => match &rest[1..] {
-            [] => FleetCmd::Serve { quiet: false },
-            ["--quiet"] => FleetCmd::Serve { quiet: true },
-            _ => return Err("fleet serve takes only --quiet".into()),
-        },
+        Some("serve") => {
+            let flags = &rest[1..];
+            if flags
+                .iter()
+                .any(|f| !matches!(*f, "--quiet" | "--announce"))
+            {
+                return Err("fleet serve takes only --quiet and --announce".into());
+            }
+            FleetCmd::Serve {
+                quiet: flags.contains(&"--quiet"),
+                announce: flags.contains(&"--announce"),
+            }
+        }
         Some("send") => match rest {
             [_, who, text] => FleetCmd::Send {
                 who: who.to_string(),
@@ -1259,7 +1268,8 @@ pub fn invite_cmd(p: &Paths, wait: bool, out: &mut dyn Write) -> i32 {
         // the messenger has to be up to hear the new computer knock
         if let Ok(exe) = std::env::current_exe() {
             let mut c = std::process::Command::new(exe);
-            c.args(["fleet", "serve", "--quiet"])
+            // an invite is the moment to be found by name (mDNS), so the new computer finds this one at once
+            c.args(["fleet", "serve", "--quiet", "--announce"])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -1784,7 +1794,7 @@ pub fn run(ctx: &Ctx, cmd: FleetCmd) -> i32 {
         FleetCmd::Ssh { who, cmd } => ssh_cmd(&p, &who, &cmd, &mut out),
         FleetCmd::Check(w) => check_cmd(&p, &w, &mut out),
         FleetCmd::Setup { who, yes } => setup_cmd(&p, pinned, &who, yes, &mut ask, &mut out),
-        FleetCmd::Serve { quiet } => serve::run(&p, quiet),
+        FleetCmd::Serve { quiet, announce } => serve::run(&p, quiet, announce),
         FleetCmd::Send { who, text } => send_cmd(&p, &who, &text, &mut out),
         FleetCmd::Inbox => inbox_cmd(&p, &mut out),
         FleetCmd::Ping(w) => ping_cmd(&p, &w, &mut out),

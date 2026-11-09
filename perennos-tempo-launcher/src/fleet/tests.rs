@@ -310,10 +310,12 @@ fn the_command_line_parses() {
             text: "hello there".into()
         })
     );
-    assert_eq!(
-        a(&["serve", "--quiet"]),
-        Ok(FleetCmd::Serve { quiet: true })
-    );
+    let serve = |quiet, announce| Ok(FleetCmd::Serve { quiet, announce });
+    assert_eq!(a(&["serve"]), serve(false, false));
+    assert_eq!(a(&["serve", "--quiet"]), serve(true, false));
+    assert_eq!(a(&["serve", "--announce"]), serve(false, true));
+    assert_eq!(a(&["serve", "--announce", "--quiet"]), serve(true, true));
+    assert!(a(&["serve", "--all"]).is_err());
     assert!(a(&["nope"]).is_err());
     assert!(matches!(
         crate::parse(&["fleet".to_string(), "ping".into(), "x".into()]),

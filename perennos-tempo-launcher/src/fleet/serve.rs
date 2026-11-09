@@ -1,7 +1,7 @@
 //! `tempo-launch fleet serve`: the messenger's listener, its senders and its heartbeat.
 //!
 //! It listens only on this computer's private and tailnet addresses and on 127.0.0.1, never on
-//! 0.0.0.0. One port carries three things, told apart by the first bytes: signed frames, a plain
+//! 0.0.0.0. The one wildcard socket in the program, mDNS on UDP 5353, is off unless `--announce`. One port carries three things, told apart by the first bytes: signed frames, a plain
 //! HTTP (`/hello` to any private address; `/fleet.json` and `POST /call` to this computer only) and
 //! pairing, which starts with `PAIR`.
 
@@ -459,7 +459,7 @@ pub fn listen_on(port: u16) -> Vec<SocketAddr> {
 }
 
 /// `fleet serve`: listen until the program is ended.
-pub fn run(p: &Paths, quiet: bool) -> i32 {
+pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
     let Some(key) = store::read_key(p) else {
         eprintln!(
             "tempo-launch: fleet serve: there is no fleet key yet; run tempo-launch fleet init"
@@ -496,7 +496,8 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let own = super::scan::listen_addrs(&super::scan::local_addrs());
-    {
+    if announce {
+        // answering mDNS needs UDP 5353 on every interface, which is what makes a firewall ask: only when asked for
         let (name, port, stop) = (node.me.clone(), store::fleet_port(), stop.clone());
         std::thread::spawn(move || {
             if let Err(e) = super::mdns::announce(&stop, &name, port, &own, &["v=1".to_string()]) {
