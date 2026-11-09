@@ -30,9 +30,11 @@ tempo-launch conformance --case CASE --out NEW_DIRECTORY --edition cayman
 
 The command reads the fixed evidence files for that case and the known local
 model configuration. It makes no network request, asks no model, and changes no
-running service. It writes a new private output directory and refuses to replace
-an existing one. The human-readable entry point is `report.md`; structured
-evidence and a completion marker sit beside it.
+running service. It writes a new output directory and refuses to replace an
+existing one. Unix output uses private permissions. Windows output inherits its
+parent permissions; their suitability must be checked independently. The
+human-readable entry point is `report.md`; structured evidence and a completion
+marker sit beside it.
 
 The report answers six practical questions:
 
