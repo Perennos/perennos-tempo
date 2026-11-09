@@ -310,10 +310,12 @@ fn the_command_line_parses() {
             text: "hello there".into()
         })
     );
-    assert_eq!(
-        a(&["serve", "--quiet"]),
-        Ok(FleetCmd::Serve { quiet: true })
-    );
+    let serve = |quiet, announce| Ok(FleetCmd::Serve { quiet, announce });
+    assert_eq!(a(&["serve"]), serve(false, false));
+    assert_eq!(a(&["serve", "--quiet"]), serve(true, false));
+    assert_eq!(a(&["serve", "--announce"]), serve(false, true));
+    assert_eq!(a(&["serve", "--announce", "--quiet"]), serve(true, true));
+    assert!(a(&["serve", "--all"]).is_err());
     assert!(a(&["nope"]).is_err());
     assert!(matches!(
         crate::parse(&["fleet".to_string(), "ping".into(), "x".into()]),
@@ -971,8 +973,9 @@ fn the_http_side_serves_hello_and_a_loopback_only_fleet_json() {
     .unwrap();
     let (c, b) = http_get(a.port, "/hello", "whatever");
     assert_eq!(c, 200);
+    // a stranger on the network learns that Tempo is here, not whose computer it is
     assert!(
-        b.contains("\"app\":\"tempo-fleet\"") && b.contains("\"name\":\"web\""),
+        b.contains("\"app\":\"tempo-fleet\"") && !b.contains("name"),
         "{b}"
     );
     let host = format!("127.0.0.1:{}", a.port);
@@ -982,6 +985,31 @@ fn the_http_side_serves_hello_and_a_loopback_only_fleet_json() {
     // a name the page chooses (DNS rebinding) is refused
     assert_eq!(http_get(a.port, "/fleet.json", "evil.example:80").0, 403);
     assert_eq!(http_get(a.port, "/nothing", &host).0, 404);
+}
+
+#[test]
+fn hello_names_the_computer_only_to_its_own_fleet_or_a_joiner_with_an_invite() {
+    let a = rig("web2", KEY);
+    assert!(!http_get(a.port, "/hello", "x").1.contains("\"name\""));
+    // a computer in this fleet (here the test's own address) gets the name
+    store::update(&a.paths, |f| {
+        f.machines
+            .push(Machine::new("me-too", "127.0.0.1", "engine"))
+    })
+    .unwrap();
+    let (_, b) = http_get(a.port, "/hello", "x");
+    assert!(
+        b.contains("\"name\":\"web2\"") && b.contains("\"invite\":false"),
+        "{b}"
+    );
+    // and while an invite is open, a computer that is not in the fleet yet needs the name to join
+    let b2 = rig("web3", KEY);
+    pair::create_invite(&b2.paths, store::now_s()).unwrap();
+    let (_, b) = http_get(b2.port, "/hello", "x");
+    assert!(
+        b.contains("\"name\":\"web3\"") && b.contains("\"invite\":true"),
+        "{b}"
+    );
 }
 
 #[test]

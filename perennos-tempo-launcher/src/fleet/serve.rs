@@ -1,7 +1,7 @@
 //! `tempo-launch fleet serve`: the messenger's listener, its senders and its heartbeat.
 //!
 //! It listens only on this computer's private and tailnet addresses and on 127.0.0.1, never on
-//! 0.0.0.0. One port carries three things, told apart by the first bytes: signed frames, a plain
+//! 0.0.0.0. The one wildcard socket in the program, mDNS on UDP 5353, is off unless `--announce`. One port carries three things, told apart by the first bytes: signed frames, a plain
 //! HTTP (`/hello` to any private address; `/fleet.json` and `POST /call` to this computer only) and
 //! pairing, which starts with `PAIR`.
 
@@ -214,7 +214,7 @@ fn respond(s: &mut TcpStream, code: &str, body: &str) {
     );
 }
 
-/// A plain GET. `/hello` for a private address; `/fleet.json` for this computer only, and only
+/// A plain GET. `/hello` for a private address (the name only to this fleet or an inviting joiner); `/fleet.json` for this computer only, and only
 /// with a Host header that names it (a web page cannot reach it by a name it controls).
 fn header(head: &str, name: &str) -> Option<String> {
     head.lines().find_map(|l| {
@@ -275,16 +275,20 @@ fn http(node: &Arc<Node>, mut r: BufReader<TcpStream>, peer: SocketAddr, port: u
     }
     match path {
         "/hello" if crate::private_ip(peer.ip()) => {
-            let o = J::Obj(vec![
-                ("app".into(), J::s("tempo-fleet")),
-                ("name".into(), J::s(&node.me)),
-                ("v".into(), J::n(1.0)),
-                (
-                    "invite".into(),
-                    J::Bool(super::pair::invite_open(&node.paths)),
-                ),
-            ]);
-            respond(&mut s, "200 OK", &o.compact());
+            let invite = super::pair::invite_open(&node.paths);
+            // This computer's name is for its own fleet, and for a computer joining while an invite is open.
+            // Anyone else on the same network (a cafe's wifi, a shared tailnet) learns that Tempo is here, not who owns it.
+            let own = store::load(&node.paths)
+                .machines
+                .iter()
+                .any(|m| m.addr.parse::<IpAddr>().is_ok_and(|a| a == peer.ip()));
+            let mut o = vec![("app".to_string(), J::s("tempo-fleet"))];
+            if invite || own {
+                o.push(("name".into(), J::s(&node.me)));
+            }
+            o.push(("v".into(), J::n(1.0)));
+            o.push(("invite".into(), J::Bool(invite)));
+            respond(&mut s, "200 OK", &J::Obj(o).compact());
         }
         "/fleet.json" if local => {
             respond(&mut s, "200 OK", &view(&node.paths, Some(node)).compact())
@@ -459,7 +463,7 @@ pub fn listen_on(port: u16) -> Vec<SocketAddr> {
 }
 
 /// `fleet serve`: listen until the program is ended.
-pub fn run(p: &Paths, quiet: bool) -> i32 {
+pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
     let Some(key) = store::read_key(p) else {
         eprintln!(
             "tempo-launch: fleet serve: there is no fleet key yet; run tempo-launch fleet init"
@@ -496,7 +500,8 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let own = super::scan::listen_addrs(&super::scan::local_addrs());
-    {
+    if announce {
+        // answering mDNS needs UDP 5353 on every interface, which is what makes a firewall ask: only when asked for
         let (name, port, stop) = (node.me.clone(), store::fleet_port(), stop.clone());
         std::thread::spawn(move || {
             if let Err(e) = super::mdns::announce(&stop, &name, port, &own, &["v=1".to_string()]) {
