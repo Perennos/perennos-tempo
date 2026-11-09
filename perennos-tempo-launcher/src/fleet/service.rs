@@ -37,6 +37,12 @@ pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
         );
     }
     let e = entry(exe)?;
+    if cfg!(test) {
+        return Ok(format!(
+            "test run: would {} {e}",
+            if remove { "remove" } else { "install" }
+        ));
+    }
     if cfg!(windows) {
         let args: Vec<String> = if remove {
             vec!["/Delete".into(), "/F".into(), "/TN".into(), TASK.into()]
