@@ -10,7 +10,7 @@ This is a map of supporting source capabilities and evidence paths, not a confor
 
 ## Evidence boundary
 
-Signed receipts depend on the separate gap 12 verifier and trusted node identity. No signature is established by a file hash or a supplied flag. Real-model tuning, a successful private-route outage test, fairness and a working human challenge route require their own evidence. The exporter does not turn on a live use, notify a regulator, or infer legal permission.
+The rows below describe the pinned baseline and live adoption remains unverified. The proposed shared gap 12 signed-batch interface adds a narrower check: `evidence.json#signature_verification.batch` retains the canonical receipt references and Ed25519 seal, verified against an independently supplied public-key pin. This can prove who sealed that export; it cannot retroactively authenticate the unsigned baseline's original jobs or prove completeness or truth. No signature is established by a file hash or a supplied flag. Real-model tuning, a successful private-route outage test, fairness and a working human challenge route require their own evidence. The exporter does not turn on a live use, notify a regulator, or infer legal permission.
 
 | ID / source | Requirement | Supporting code already present | Missing / human-dependent | Evidence artifact and how to prove it |
 | --- | --- | --- | --- | --- |

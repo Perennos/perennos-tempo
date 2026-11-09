@@ -28,6 +28,12 @@ facts that only a responsible person can establish.
 tempo-launch conformance --case CASE --out NEW_DIRECTORY --edition cayman
 ```
 
+To seal the receipt references with an existing Fleet identity, add
+`--sign-receipts --trusted-key PUBLIC_HEX`. Obtain the public-key pin separately
+through your authenticated Fleet setup. The command never creates an identity
+or falls back to an unsigned seal. With a supplied signed batch, the trusted-key
+option verifies it without loading the private identity.
+
 The command reads the fixed evidence files for that case and the known local
 model configuration. It makes no network request, asks no model, and changes no
 running service. It writes a new output directory and refuses to replace an
@@ -66,10 +72,19 @@ A file hash binds bytes; it does not establish the author's identity or the
 truth of the record. A model alias does not establish a model artifact version.
 An intact receipt chain does not prove that every action was recorded.
 
-Signed receipts reuse the existing receipt system's signature work. Until that
-verifier is available and bound to a trusted node identity, the report must say
-that signed verification is `Untested`. A supplied `signed` or `verified` flag
-cannot change that result. This mode adds no second signing system.
+Signed reference batches use one shared interface for desk-addition gap 12 and
+Conformance mode. It reuses Fleet's existing Ed25519 identity and verifies the
+case, canonical receipt references and independently supplied public-key pin.
+Only that cryptographic check may say `Verified complete`; its signed envelope
+is retained in `evidence.json#signature_verification.batch`. A supplied `signed`
+or `verified` flag cannot change the result. Signing needs an existing identity;
+verification needs the trusted key. Missing or invalid proof stays visible
+alongside the other evidence gaps.
+
+The seal identifies the key that sealed this export. It cannot retroactively
+authenticate jobs recorded before signing, establish that every job was
+recorded, validate human authority or establish the truth of an artifact.
+Those limits remain explicit in the report and the baseline requirement map.
 
 ## What needs a person
 
