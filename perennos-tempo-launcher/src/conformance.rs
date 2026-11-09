@@ -19,6 +19,8 @@ pub struct Opts {
     pub case_id: String,
     pub out: PathBuf,
     pub edition: String,
+    pub trusted_key: Option<String>,
+    pub sign_receipts: bool,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Opts, String> {
@@ -26,21 +28,37 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut out = None;
     let mut edition = "cayman".to_string();
     let mut edition_set = false;
+    let mut trusted_key = None;
+    let mut sign_receipts = false;
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--sign-receipts" {
+            if sign_receipts {
+                return Err("conformance takes --sign-receipts at most once".into());
+            }
+            sign_receipts = true;
+            i += 1;
+            continue;
+        }
         let value = args
             .get(i + 1)
             .ok_or("conformance needs a value after each option")?;
         match args[i].as_str() {
             "--case" if case_id.is_none() => case_id = Some(value.clone()),
             "--out" if out.is_none() => out = Some(PathBuf::from(value)),
+            "--trusted-key" if trusted_key.is_none() => {
+                if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("trusted key must be 64 hexadecimal characters".into());
+                }
+                trusted_key = Some(value.to_ascii_lowercase());
+            }
             "--edition" if !edition_set => {
                 edition = value.clone();
                 edition_set = true;
             }
             _ => {
                 return Err(
-                    "conformance takes --case ID --out NEW_DIRECTORY [--edition cayman|general]"
+                    "conformance takes --case ID --out NEW_DIRECTORY [--edition cayman|general] [--trusted-key HEX] [--sign-receipts]"
                         .into(),
                 )
             }
@@ -57,10 +75,15 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     if !matches!(edition.as_str(), "cayman" | "general") {
         return Err("edition must be cayman or general".into());
     }
+    if sign_receipts && trusted_key.is_none() {
+        return Err("--sign-receipts needs --trusted-key".into());
+    }
     Ok(Opts {
         case_id,
         out,
         edition,
+        trusted_key,
+        sign_receipts,
     })
 }
 
@@ -144,6 +167,7 @@ struct Section {
     hash: Option<String>,
     count: usize,
     rows: Vec<J>,
+    signed_batch: Option<J>,
     reason: Option<String>,
     missing: Vec<String>,
 }
@@ -275,10 +299,10 @@ fn safe_text(value: &str) -> Result<String, String> {
         || value.contains("..")
         || value.contains("<")
         || value.contains(">")
-        || value.chars().any(|c| c.is_control())
+        || value.chars().any(char::is_whitespace)
         || !value
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || " _-:,()".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "_-:,()".contains(c))
     {
         return Err("field contains a value this report cannot export".into());
     }
@@ -291,6 +315,7 @@ fn safe_model_text(value: &str) -> Result<String, String> {
     }
     let lower = value.to_ascii_lowercase();
     if looks_secret_shaped(value)
+        || looks_endpoint_shaped(value)
         || [".com", ".net", ".org", ".local", ".internal", "localhost"]
             .iter()
             .any(|needle| lower.contains(needle))
@@ -298,17 +323,30 @@ fn safe_model_text(value: &str) -> Result<String, String> {
         || value.contains('\\')
         || value.contains('@')
         || value.contains("..")
-        || value.chars().any(|c| c.is_control())
+        || value.chars().any(char::is_whitespace)
         || (value.contains('.')
             && !value.contains(':')
             && !value.chars().all(|c| c.is_ascii_digit() || c == '.'))
         || !value
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || " ._-:,()".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "._-:,()".contains(c))
     {
         return Err("model metadata contains a value this report cannot export".into());
     }
     Ok(value.to_string())
+}
+
+fn looks_endpoint_shaped(value: &str) -> bool {
+    let dotted_numeric_host = value.split('.').count() == 4
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    dotted_numeric_host
+        || value.parse::<std::net::IpAddr>().is_ok()
+        || value.parse::<std::net::SocketAddr>().is_ok()
+        || value
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
 fn normalized_row(
     value: &J,
@@ -440,6 +478,7 @@ fn section_input(
                 hash: None,
                 count: 0,
                 rows: Vec::new(),
+                signed_batch: None,
                 reason: Some("No source file was found.".into()),
                 missing: vec![filename.into()],
             })
@@ -452,6 +491,7 @@ fn section_input(
                 hash: None,
                 count: 0,
                 rows: Vec::new(),
+                signed_batch: None,
                 reason: Some(reason),
                 missing: Vec::new(),
             })
@@ -473,6 +513,7 @@ fn section_input(
         hash: Some(hash),
         count: 0,
         rows: Vec::new(),
+        signed_batch: None,
         reason: None,
         missing: Vec::new(),
     };
@@ -490,6 +531,11 @@ fn section_input(
     if !matches!(value.get("schema_version"), Some(J::Num(n)) if n == "1") {
         section.reason = Some("schema_version must be 1.".into());
         return Ok(section);
+    }
+    if filename == "signed-receipts.json"
+        && (value.get("node_public_key").is_some() || value.get("signature").is_some())
+    {
+        section.signed_batch = Some(value.clone());
     }
     if use_case {
         match normalized_row(&value, fields, Some(case_id)) {
@@ -612,6 +658,102 @@ fn config_models(ctx: &Ctx, external_selected: bool) -> Result<ModelConfigSnapsh
     Ok(("In progress".into(), Some(hash), rows, Vec::new()))
 }
 
+fn complete_receipts(section: &Section) -> bool {
+    section.hash.is_some()
+        && section.count > 0
+        && section.rows.len() == section.count
+        && section.missing.is_empty()
+}
+
+fn canonical_receipt_records(rows: &[J]) -> Vec<J> {
+    let mut sorted = rows.to_vec();
+    sorted.sort_by(|a, b| {
+        a.get("receipt_id")
+            .and_then(json_is_string)
+            .cmp(&b.get("receipt_id").and_then(json_is_string))
+    });
+    sorted
+}
+
+fn signature_verification(ctx: &Ctx, opts: &Opts, section: &Section) -> J {
+    let no_batch = |status: &str, reason: &str| {
+        object(vec![
+            ("status", J::s(status)),
+            ("reason", J::s(reason)),
+            ("batch", J::Null),
+        ])
+    };
+    let Some(trusted_key) = opts.trusted_key.as_deref() else {
+        return no_batch(
+            "Untested",
+            "No trusted public key was supplied, so signing and verification were not attempted.",
+        );
+    };
+    if section.hash.is_none() {
+        return no_batch(
+            if opts.sign_receipts { "In progress" } else { "Untested" },
+            "The fixed signed-receipts input is not available.",
+        );
+    }
+
+    let verify = |batch: &J| match crate::receipt_batches::verify_batch(
+        batch,
+        trusted_key,
+        &opts.case_id,
+    ) {
+        Ok(canonical) if complete_receipts(section) => {
+            let expected_records = J::Arr(canonical_receipt_records(&section.rows));
+            if canonical.get("records") == Some(&expected_records) {
+                object(vec![
+                    ("status", J::s("Verified complete")),
+                    (
+                        "reason",
+                        J::s("The pinned key verifies this batch seal only; identity, history, truth, completeness and human approval remain unverified."),
+                    ),
+                    ("batch", canonical),
+                ])
+            } else {
+                no_batch(
+                    "In progress",
+                    "The signed batch does not match the complete, normalized receipt records.",
+                )
+            }
+        }
+        Ok(_) => no_batch(
+            "In progress",
+            "The receipt records are incomplete or contain values this report cannot export.",
+        ),
+        Err(_) => no_batch(
+            "In progress",
+            "The signed batch did not verify for this case and trusted public key.",
+        ),
+    };
+
+    if let Some(batch) = section.signed_batch.as_ref() {
+        return verify(batch);
+    }
+    if !opts.sign_receipts {
+        return no_batch(
+            "In progress",
+            "No signed envelope was supplied; use --sign-receipts to seal complete normalized receipt records.",
+        );
+    }
+    if !complete_receipts(section) {
+        return no_batch(
+            "In progress",
+            "The receipt input is missing, incomplete, or contains values this report cannot export.",
+        );
+    }
+    let records = J::Arr(section.rows.clone());
+    match crate::receipt_batches::sign_batch(ctx, &opts.case_id, &records) {
+        Ok(batch) => verify(&batch),
+        Err(_) => no_batch(
+            "In progress",
+            "The local signing identity could not produce a receipt batch.",
+        ),
+    }
+}
+
 fn section_json(section: &Section) -> J {
     object(vec![
         ("name", J::s(section.name)),
@@ -628,6 +770,9 @@ fn section_json(section: &Section) -> J {
 fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
     if !valid_id(&opts.case_id) {
         return Err("case id is invalid".into());
+    }
+    if opts.sign_receipts && opts.trusted_key.is_none() {
+        return Err("--sign-receipts needs --trusted-key".into());
     }
     inspect_path(&ctx.home, &ctx.home)?;
     let home = std::fs::canonicalize(&ctx.home).map_err(|e| format!("home is unavailable: {e}"))?;
@@ -652,13 +797,10 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
     ];
     let mut sections = Vec::new();
     for (i, file) in INPUTS.iter().enumerate() {
-        let mut section = section_input(&root, &opts.case_id, file, names[i], fields[i], i == 0)?;
-        if i == 6 {
-            section.status = "Untested";
-            section.reason = Some("Upstream signed verification is not available; source hash does not prove signer or truth.".into());
-        }
+        let section = section_input(&root, &opts.case_id, file, names[i], fields[i], i == 0)?;
         sections.push(section);
     }
+    let signature = signature_verification(ctx, opts, &sections[6]);
     let (model_status, model_hash, model_rows, model_missing) =
         match config_models(ctx, std::env::var_os("TEMPO_AGENT_CONFIG").is_some()) {
             Ok(v) => v,
@@ -705,7 +847,7 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
         ("case_id", J::s(&opts.case_id)), ("edition", J::s(if opts.edition == "cayman" { "Caymanian Integrated Systems" } else { "General" })),
         ("created_at_unix", J::s(&created_at)), ("status", J::s("In progress")),
         ("sections", J::Arr(section_values.clone())), ("model_register", adapter),
-        ("signature_verification", object(vec![("status", J::s("Untested")), ("reason", J::s("The upstream signed verifier is not available."))])),
+        ("signature_verification", signature.clone()),
         (
             "boundaries",
             J::Arr(vec![
@@ -717,7 +859,7 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
             ]),
         ),
         ("missing_evidence", J::Arr(missing.clone())),
-        ("next_actions", J::Arr(vec![J::s("Complete missing fixed files and fields."), J::s("Have each human assertion checked independently."), J::s("Use the upstream signed verifier when its export interface is available.")])),
+        ("next_actions", J::Arr(vec![J::s("Complete missing fixed files and fields."), J::s("Have each human assertion checked independently."), J::s("Supply the trusted public key to verify or seal complete receipt records.")])),
     ]);
     let report = render_markdown(
         &opts.case_id,
@@ -726,6 +868,7 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
         crate::VERSION,
         &sections,
         &model_status,
+        &signature,
         (model_hash.as_deref(), &model_rows, &missing),
     );
     let out = output_path(&opts.out)?;
@@ -747,7 +890,17 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
     ])
     .pretty();
     write_new(&out.join("manifest.json"), manifest.as_bytes())?;
-    Ok((2, format!("Perennos Tempo wrote the report to {}. Evidence remains In progress; signed verification is Untested.", out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "new folder".into()))))
+    let signature_status = signature
+        .get("status")
+        .and_then(json_is_string)
+        .unwrap_or("In progress");
+    Ok((
+        2,
+        format!(
+            "Perennos Tempo wrote the report to {}. Evidence remains In progress; signature verification is {signature_status}.",
+            out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "new folder".into())
+        ),
+    ))
 }
 
 fn output_path(path: &Path) -> Result<PathBuf, String> {
@@ -827,6 +980,7 @@ fn render_markdown(
     version: &str,
     sections: &[Section],
     model_status: &str,
+    signature: &J,
     model_details: ModelRenderDetails<'_>,
 ) -> String {
     let (model_hash, model_rows, missing) = model_details;
@@ -857,15 +1011,30 @@ fn render_markdown(
         out.push_str(&format!("{}\n", row.pretty().trim()));
     }
     out.push('\n');
-    out.push_str("## Signature verification\n\nStatus: Untested\nThe upstream signed verifier is not available. A file hash does not prove who signed it or whether its contents are true.\n\n");
+    let signature_status = signature
+        .get("status")
+        .and_then(json_is_string)
+        .unwrap_or("In progress");
+    out.push_str(&format!("## Signature verification\n\nStatus: {signature_status}\n"));
+    if let Some(reason) = signature.get("reason").and_then(json_is_string) {
+        out.push_str(&format!("{reason}\n"));
+    }
+    if let Some(batch) = signature.get("batch") {
+        if !matches!(batch, J::Null) {
+            out.push_str("\nCanonical signed batch:\n\n```json\n");
+            out.push_str(&batch.pretty());
+            out.push_str("\n```\n");
+        }
+    }
+    out.push('\n');
     out.push_str("## Missing evidence and next actions\n\n");
     if missing.is_empty() {
-        out.push_str("No fixed-file input was missing. Human validation and signed verification remain open.\n");
+        out.push_str("No fixed-file input was missing. Human validation remains open; signature status appears above.\n");
     }
     for item in missing {
         out.push_str(&format!("- {}\n", item.compact()));
     }
-    out.push_str("- Complete missing fixed files and fields.\n- Have each human assertion checked independently.\n- Use the upstream signed verifier when its export interface is available.\n");
+    out.push_str("- Complete missing fixed files and fields.\n- Have each human assertion checked independently.\n- Supply the trusted public key to verify or seal complete receipt records.\n");
     out.push_str("\nThis export selects allowlisted metadata fields. Review it for sensitive content; human validation remains open. No legal deadline or notification advice is calculated.\n");
     out
 }
@@ -898,11 +1067,36 @@ mod tests {
         }
     }
 
+    fn install_identity(context: &Ctx) -> String {
+        use std::io::Write;
+
+        std::fs::create_dir_all(&context.home).unwrap();
+        let seed: [u8; 32] = crate::fleet::crypto::random(32)
+            .try_into()
+            .unwrap();
+        let public_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+        let trusted_key = crate::fleet::crypto::hex(public_key.as_bytes());
+        let path = context.home.join("fleet-identity");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).unwrap();
+        file.write_all(&seed).unwrap();
+        file.sync_all().unwrap();
+        trusted_key
+    }
+
     fn opts(root: &Path) -> Opts {
         Opts {
             case_id: "case-1".into(),
             out: root.join("fresh-output"),
             edition: "cayman".into(),
+            trusted_key: None,
+            sign_receipts: false,
         }
     }
 
@@ -935,6 +1129,36 @@ mod tests {
             .edition,
             "cayman"
         );
+        let key = "a".repeat(64);
+        let signed = parse_args(&[
+            "--case".into(),
+            "ok".into(),
+            "--out".into(),
+            "fresh".into(),
+            "--trusted-key".into(),
+            key.clone(),
+            "--sign-receipts".into(),
+        ])
+        .unwrap();
+        assert_eq!(signed.trusted_key.as_deref(), Some(key.as_str()));
+        assert!(signed.sign_receipts);
+        assert!(parse_args(&[
+            "--case".into(),
+            "ok".into(),
+            "--out".into(),
+            "fresh".into(),
+            "--sign-receipts".into(),
+        ])
+        .is_err());
+        assert!(parse_args(&[
+            "--case".into(),
+            "ok".into(),
+            "--out".into(),
+            "fresh".into(),
+            "--trusted-key".into(),
+            "not-a-key".into(),
+        ])
+        .is_err());
     }
 
     #[test]
@@ -955,6 +1179,26 @@ mod tests {
             json::parse(r#"{"case_id":"case-1","purpose":"C:\\private\\notes"}"#).unwrap();
         assert!(normalized_row(&unsafe_row, USE_CASE, Some("case-1")).is_err());
         assert!(safe_text("multi\nline").is_err());
+    }
+
+    #[test]
+    fn exported_labels_must_be_compact_and_model_endpoints_are_rejected() {
+        for value in ["Person Name", "Street address", "owner role"] {
+            assert!(safe_text(value).is_err());
+        }
+        assert!(safe_text("owner_role").is_ok());
+        for value in ["Person Name", "Street address"] {
+            let row = object(vec![
+                ("case_id", J::s("case-1")),
+                ("owner_role", J::s(value)),
+            ]);
+            assert!(normalized_row(&row, USE_CASE, Some("case-1")).is_err());
+        }
+        let local_host = ["127", "0", "0", "1"].join(".");
+        assert!(safe_model_text(&format!("{local_host}:11434")).is_err());
+        let dotted_number = ["192", "168", "0", "193"].join(".");
+        assert!(safe_model_text(&dotted_number).is_err());
+        assert!(safe_model_text("qwen3.6:35b").is_ok());
     }
 
     #[test]
@@ -1015,10 +1259,156 @@ mod tests {
         assert!(evidence.contains("\"signature_verification\": {\n    \"status\": \"Untested\""));
         assert!(evidence.contains("Identity, role, and Cayman residence have not been validated."));
         assert!(report.contains("Product version:") && report.contains("SHA-256:"));
+        assert!(evidence.contains("\"batch\": null"));
+        assert!(!context.home.join("fleet-identity").exists());
         let existing = out.join("keep.txt");
         std::fs::write(&existing, "keep").unwrap();
         assert!(export(&context, &opts(&root)).is_err());
         assert_eq!(std::fs::read_to_string(existing).unwrap(), "keep");
+    }
+
+    #[test]
+    fn signing_and_verifying_batch_exports_sorted_proof_and_keeps_human_status_open() {
+        let root = temp();
+        let context = ctx(&root);
+        let trusted_key = install_identity(&context);
+        let input_dir = context.home.join("conformance/case-1");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(
+            input_dir.join("signed-receipts.json"),
+            format!(
+                r#"{{"schema_version":1,"records":[{{"receipt_id":"zeta","artifact_digest":"{}","signed":true,"verified":true,"private_notes":"RAW-RECEIPT-SENTINEL"}},{{"receipt_id":"alpha","artifact_digest":"{}"}}]}}"#,
+                "b".repeat(64),
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        let mut options = opts(&root);
+        options.trusted_key = Some(trusted_key.clone());
+        options.sign_receipts = true;
+
+        assert_eq!(export(&context, &options).unwrap().0, 2);
+        let out = root.join("fresh-output");
+        let evidence = json::parse(&std::fs::read_to_string(out.join("evidence.json")).unwrap()).unwrap();
+        let signature = evidence.get("signature_verification").unwrap();
+        assert_eq!(signature.get("status").and_then(json_is_string), Some("Verified complete"));
+        assert_eq!(evidence.get("status").and_then(json_is_string), Some("In progress"));
+        let batch = signature.get("batch").unwrap();
+        let J::Arr(records) = batch.get("records").unwrap() else {
+            panic!("canonical batch records are missing");
+        };
+        let ids = records
+            .iter()
+            .map(|row| row.get("receipt_id").and_then(json_is_string).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["alpha", "zeta"]);
+        assert_eq!(
+            &crate::receipt_batches::verify_batch(batch, &trusted_key, "case-1").unwrap(),
+            batch
+        );
+        let J::Arr(sections) = evidence.get("sections").unwrap() else {
+            panic!("report sections are missing");
+        };
+        let receipts = sections
+            .iter()
+            .find(|section| section.get("name").and_then(json_is_string) == Some("signed receipts"))
+            .unwrap();
+        assert_eq!(receipts.get("status").and_then(json_is_string), Some("In progress"));
+        let report = std::fs::read_to_string(out.join("report.md")).unwrap();
+        assert!(report.contains("Status: Verified complete"));
+        assert!(report.contains(&batch.pretty()));
+        assert!(!report.contains("RAW-RECEIPT-SENTINEL"));
+        assert!(!report.contains("\"signed\":true") && !report.contains("\"verified\":true"));
+
+        let supplied_root = temp();
+        let supplied = ctx(&supplied_root);
+        let supplied_dir = supplied.home.join("conformance/case-1");
+        std::fs::create_dir_all(&supplied_dir).unwrap();
+        std::fs::write(
+            supplied_dir.join("signed-receipts.json"),
+            batch.pretty(),
+        )
+        .unwrap();
+        let mut supplied_options = opts(&supplied_root);
+        supplied_options.trusted_key = Some(trusted_key.clone());
+        assert_eq!(export(&supplied, &supplied_options).unwrap().0, 2);
+        let supplied_evidence = json::parse(
+            &std::fs::read_to_string(supplied_root.join("fresh-output/evidence.json")).unwrap(),
+        )
+        .unwrap();
+        let supplied_signature = supplied_evidence.get("signature_verification").unwrap();
+        assert_eq!(
+            supplied_signature.get("status").and_then(json_is_string),
+            Some("Verified complete")
+        );
+        assert_eq!(supplied_signature.get("batch"), Some(batch));
+        assert!(!supplied.home.join("fleet-identity").exists());
+    }
+
+    #[test]
+    fn bad_pins_and_redacted_receipts_never_emit_verified_batch_proof() {
+        let root = temp();
+        let context = ctx(&root);
+        let trusted_key = install_identity(&context);
+        let records = J::Arr(vec![object(vec![
+            ("receipt_id", J::s("receipt-1")),
+            ("artifact_digest", J::s(&"a".repeat(64))),
+        ])]);
+        let batch = crate::receipt_batches::sign_batch(&context, "case-1", &records).unwrap();
+        let tampered_text = batch.pretty().replace(
+            &format!("\"{}\"", "a".repeat(64)),
+            &format!("\"{}\"", "b".repeat(64)),
+        );
+        assert_ne!(tampered_text, batch.pretty());
+        let tampered = json::parse(&tampered_text).unwrap();
+        assert!(crate::receipt_batches::verify_batch(&tampered, &trusted_key, "case-1").is_err());
+        let wrong_key = format!(
+            "{}{}",
+            if trusted_key.starts_with('0') { '1' } else { '0' },
+            &trusted_key[1..]
+        );
+        assert!(crate::receipt_batches::verify_batch(&batch, &wrong_key, "case-1").is_err());
+        assert!(crate::receipt_batches::verify_batch(&batch, &trusted_key, "other-case").is_err());
+
+        let input_dir = context.home.join("conformance/case-1");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(input_dir.join("signed-receipts.json"), batch.pretty()).unwrap();
+        let mut options = opts(&root);
+        options.trusted_key = Some(wrong_key);
+        assert_eq!(export(&context, &options).unwrap().0, 2);
+        let failed = json::parse(
+            &std::fs::read_to_string(root.join("fresh-output/evidence.json")).unwrap(),
+        )
+        .unwrap();
+        let signature = failed.get("signature_verification").unwrap();
+        assert_eq!(signature.get("status").and_then(json_is_string), Some("In progress"));
+        assert!(matches!(signature.get("batch"), Some(J::Null)));
+        assert!(!std::fs::read_to_string(root.join("fresh-output/report.md"))
+            .unwrap()
+            .contains("Canonical signed batch"));
+
+        let bad_root = temp();
+        let bad_context = ctx(&bad_root);
+        let bad_key = install_identity(&bad_context);
+        let bad_dir = bad_context.home.join("conformance/case-1");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(
+            bad_dir.join("signed-receipts.json"),
+            format!(
+                r#"{{"schema_version":1,"records":[{{"receipt_id":"ok","artifact_digest":"{}"}},{{"receipt_id":"private value","artifact_digest":"{}"}}]}}"#,
+                "c".repeat(64),
+                "d".repeat(64)
+            ),
+        )
+        .unwrap();
+        let mut bad_options = opts(&bad_root);
+        bad_options.trusted_key = Some(bad_key);
+        bad_options.sign_receipts = true;
+        assert_eq!(export(&bad_context, &bad_options).unwrap().0, 2);
+        let bad_evidence = std::fs::read_to_string(bad_root.join("fresh-output/evidence.json")).unwrap();
+        assert!(bad_evidence.contains("\"status\": \"In progress\""));
+        assert!(bad_evidence.contains("\"batch\": null"));
+        assert!(!bad_evidence.contains("private value"));
     }
 
     #[test]
