@@ -248,7 +248,7 @@ All keys are optional. See `config.example.json` for placeholders.
 | `command_allow`, `command_deny` | Command prefixes that run without asking, and ones that never run |
 | `permission` | The mode new conversations start in: `default`, `accept-edits` or `plan` |
 | `hooks`, `hook_timeout_s` | Your commands before and after tools and after turns (see Hooks); a hook that cannot be understood stops the agent from starting rather than be skipped |
-| `offline_probe` | `host:port` for the quick offline check (env `TEMPO_OFFLINE` forces offline) |
+| `offline_probe` | `host:port` the agent connects to for a quick online check. Empty by default: it contacts nobody to find out, and a fetch that could not reach the network says offline for 20 seconds. (env `TEMPO_OFFLINE` forces offline) |
 | `hosts` | Name to `{"urls": [...], "models": [...], "trust_reads": false}` for `delegate`; an implicit `local` host is the main Ollama. A remote host's model asks before each file it reads here, unless `trust_reads` marks the machine as your own |
 | `fetch_allow_hosts` | Hosts `fetch_url` reads without asking (`example.com`, `*.example.com`); others ask once per conversation |
 | `fetch_cache_max` | Pages kept for later reads (default 500; 0 keeps none) |

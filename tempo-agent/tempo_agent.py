@@ -1,7 +1,7 @@
 """Perennos Tempo local superagent v1: the harness. Ollama is only the engine.
 Chat web UI + agent loop + MCP host + RAG + delegate + workflow memory + safety.
 Stdlib only. Everything local; the network is used only by fetch_url when it is up."""
-import http.client, json, os, re, sys, time, threading, subprocess, socket, urllib.request, urllib.error, uuid, math, glob, html
+import http.client, json, os, re, sys, time, threading, subprocess, urllib.request, urllib.error, uuid, math, glob, html
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,18 +79,9 @@ def http_json(url, body=None, timeout=600):
         return json.loads(r.read())
 
 
-def net_up(_c={"t": 0, "v": False}):
-    if os.environ.get("TEMPO_OFFLINE"):  # simulate unplugged network for tests
-        return False
-    if time.time() - _c["t"] < 20:
-        return _c["v"]
-    try:
-        socket.create_connection(("1.1.1.1", 443), 1.5).close()
-        v = True
-    except OSError:
-        v = False
-    _c.update(t=time.time(), v=v)
-    return v
+def net_up():
+    """Offline only when told so (TEMPO_OFFLINE). Nothing is contacted to find out: a fetch that cannot get through says so itself."""
+    return not os.environ.get("TEMPO_OFFLINE")
 
 
 # ---------------------------------------------------------------- RAG (local, embeddinggemma)
@@ -581,7 +572,10 @@ def t_fetch_url(conv, url):
     if not net_up():
         return "offline: no internet right now. Use local memory (search_memory) or tell the user."
     req = urllib.request.Request(url, headers={"User-Agent": "PerennosTempo/1"})
-    raw = urllib.request.urlopen(req, timeout=20).read(400000).decode("utf-8", "replace")
+    try:
+        raw = urllib.request.urlopen(req, timeout=20).read(400000).decode("utf-8", "replace")
+    except OSError:  # no name found, no answer in time, no route: the internet is not there right now
+        return "offline: no internet right now. Use local memory (search_memory) or tell the user."
     raw = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", raw))).strip()
 
