@@ -538,10 +538,10 @@ fn section_input(
     Ok(section)
 }
 
-fn config_models(
-    ctx: &Ctx,
-    external_selected: bool,
-) -> Result<(String, Option<String>, Vec<J>, Vec<String>), String> {
+type ModelConfigSnapshot = (String, Option<String>, Vec<J>, Vec<String>);
+type ModelRenderDetails<'a> = (Option<&'a str>, &'a [J], &'a [J]);
+
+fn config_models(ctx: &Ctx, external_selected: bool) -> Result<ModelConfigSnapshot, String> {
     let selected = if external_selected {
         None
     } else {
@@ -726,9 +726,7 @@ fn export(ctx: &Ctx, opts: &Opts) -> Result<(i32, String), String> {
         crate::VERSION,
         &sections,
         &model_status,
-        model_hash.as_deref(),
-        &model_rows,
-        &missing,
+        (model_hash.as_deref(), &model_rows, &missing),
     );
     let out = output_path(&opts.out)?;
     create_private_dir(&out)?;
@@ -826,10 +824,9 @@ fn render_markdown(
     version: &str,
     sections: &[Section],
     model_status: &str,
-    model_hash: Option<&str>,
-    model_rows: &[J],
-    missing: &[J],
+    model_details: ModelRenderDetails<'_>,
 ) -> String {
+    let (model_hash, model_rows, missing) = model_details;
     let mut out = format!("# Perennos Tempo conformance report\n\nCase: {case_id}\nProduct version: {version}\nEdition: {}\nCreated at (Unix): {created}\nStatus: In progress\n\n", if edition == "cayman" { "Caymanian Integrated Systems" } else { "General" });
     out.push_str("This report organizes supplied records. It does not certify legal compliance. Human assertions need independent validation. Identity, role, and Cayman residence have not been validated.\n\n");
     for section in sections {
@@ -856,7 +853,7 @@ fn render_markdown(
     for row in model_rows {
         out.push_str(&format!("{}\n", row.pretty().trim()));
     }
-    out.push_str("\n");
+    out.push('\n');
     out.push_str("## Signature verification\n\nStatus: Untested\nThe upstream signed verifier is not available. A file hash does not prove who signed it or whether its contents are true.\n\n");
     out.push_str("## Missing evidence and next actions\n\n");
     if missing.is_empty() {
