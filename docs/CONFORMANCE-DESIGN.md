@@ -93,12 +93,20 @@ has real authority, that a processing condition applies, that a supplier is
 bound by a contract, or that a reviewer understood a decision. It can retain
 references to the records supporting those facts and show what is missing.
 
-The standard distinguishes law, regulator rules, regulator guidance, government
-statements and Perennos recommendations. The matrix preserves those boundaries.
+The public Answerable AI standard is a proposal, not a legal certification. Its
+source labels distinguish law, regulator rules, regulator guidance, government
+statements and Perennos recommendations; the matrix preserves those categories.
 Its incident clocks have different triggers, recipients and scopes. Generating
 a report neither sends a notification nor extends a deadline. A responsible
 person must resolve applicability and preserve evidence without waiting for the
 export to be complete.
+
+The matrix pins baseline source revision `b1f408a107d86509be9e915f6087c7d42cab732c`.
+The signed-batch candidate is [sign_batch](https://github.com/Perennos/perennos-tempo/blob/2fb60ce70322830ebdcb4c3884f86cdae6955bce/perennos-tempo-launcher/src/receipt_batches.rs#L186)
+and [verify_batch](https://github.com/Perennos/perennos-tempo/blob/2fb60ce70322830ebdcb4c3884f86cdae6955bce/perennos-tempo-launcher/src/receipt_batches.rs#L202).
+The exporter continuation is pinned in [conformance.rs](https://github.com/Perennos/perennos-tempo/blob/0800ddbea6057fadb72db44ee5a9c6d7884ad986/perennos-tempo-launcher/src/conformance.rs).
+These candidates are separate from the baseline, and source references do not
+establish operational adoption.
 
 ## Small, inspectable boundary
 
