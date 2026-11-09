@@ -20,11 +20,11 @@ impl Drop for Scratch {
 
 // Rust 1.99's Windows GNU backend can report this lint on the generated initializer
 // even when the source initializer is already const. Remove the expectation when unneeded.
-#[cfg_attr(
-    all(windows, target_env = "gnu"),
-    expect(clippy::missing_const_for_thread_local)
-)]
 thread_local! {
+    #[cfg_attr(
+        all(windows, target_env = "gnu"),
+        expect(clippy::missing_const_for_thread_local)
+    )]
     static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
