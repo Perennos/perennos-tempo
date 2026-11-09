@@ -113,6 +113,14 @@ def summary(all_rows=None):
             row[rated[ref]] += 1
         else:
             row["unrated"] += 1
+    counted = {r.get("id") for r in all_rows if r.get("kind") == "use"} | done
+    for r in all_rows:      # a rating for a receipt id or any ref we hold no use row for still counts, under its own line
+        if r.get("kind") == "outcome" and r["ref"] not in counted and rated.get(r["ref"]) == r["outcome"]:
+            counted.add(r["ref"])
+            row = table.setdefault("(receipts and other refs)", {"calls": 0, "helped": 0, "partly": 0, "no": 0, "unrated": 0, "seconds": []})
+            row["calls"] += 1
+            row[r["outcome"]] += 1
+            row["seconds"].append(r.get("seconds") or 0)
     for row in table.values():
         n = row["helped"] + row["partly"] + row["no"]
         row["helped_pct"] = round(100 * row["helped"] / n) if n else None

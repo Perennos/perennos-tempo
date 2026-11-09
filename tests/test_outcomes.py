@@ -56,6 +56,12 @@ class OutcomeLog(unittest.TestCase):
         self.assertEqual(len(O.rows(self.path)), 1)
         self.assertEqual(len(O.rows(self.path)[0]["note"]), O.NOTE_MAX)
 
+    def test_a_rating_for_a_receipt_id_counts_under_its_own_line(self):
+        O.record_outcome("receipt-abc", "helped", seconds=12, path=self.path)
+        O.record_outcome("receipt-def", "no", path=self.path)
+        t = O.summary(O.rows(self.path))["tools"]["(receipts and other refs)"]
+        self.assertEqual((t["calls"], t["helped"], t["no"], t["total_seconds"]), (2, 1, 1, 12.0))
+
     def test_text_view_lists_each_tool(self):
         self.use("tempo_admit")
         self.assertIn("tempo_admit", O.text(O.summary(O.rows(self.path))))
