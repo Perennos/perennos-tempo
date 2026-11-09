@@ -321,6 +321,8 @@ pub fn conn(node: &Arc<Node>, s: TcpStream) {
 
 pub struct Handle {
     pub addrs: Vec<SocketAddr>,
+    /// Addresses that could not be listened on, with why. Never skipped without a word.
+    pub failed: Vec<(SocketAddr, String)>,
     stop: Arc<AtomicBool>,
 }
 
@@ -343,28 +345,35 @@ impl Drop for Handle {
 pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
     let _ = super::tools::local_token(&node.paths);
     let stop = Arc::new(AtomicBool::new(false));
-    let mut bound = Vec::new();
+    let (mut bound, mut failed) = (Vec::new(), Vec::new());
     for a in addrs {
-        if let Ok(l) = TcpListener::bind(a) {
-            bound.push(l.local_addr().map_err(|e| e.to_string())?);
-            let (node, stop) = (node.clone(), stop.clone());
-            std::thread::spawn(move || {
-                for c in l.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        return;
+        match TcpListener::bind(a) {
+            Ok(l) => {
+                bound.push(l.local_addr().map_err(|e| e.to_string())?);
+                let (node, stop) = (node.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    for c in l.incoming() {
+                        if stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if let Ok(c) = c {
+                            let node = node.clone();
+                            std::thread::spawn(move || conn(&node, c));
+                        }
                     }
-                    if let Ok(c) = c {
-                        let node = node.clone();
-                        std::thread::spawn(move || conn(&node, c));
-                    }
-                }
-            });
+                });
+            }
+            Err(e) => failed.push((*a, e.to_string())),
         }
     }
     if bound.is_empty() {
         return Err("no address could be listened on (is it already running?)".into());
     }
-    Ok(Handle { addrs: bound, stop })
+    Ok(Handle {
+        addrs: bound,
+        failed,
+        stop,
+    })
 }
 
 /// Listen, send what waits in the outbox, send heartbeats. Returns when listening.
@@ -462,6 +471,36 @@ pub fn listen_on(port: u16) -> Vec<SocketAddr> {
     v.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()
 }
 
+/// Where the messenger listens for this fleet: 127.0.0.1 always, and only the private or tailnet
+/// addresses of this computer that the fleet needs. A home or office address is opened only when a
+/// computer in the fleet is on one; a tailnet address only when one is on the tailnet. A fleet made
+/// of tailnet computers leaves the Wi-Fi and the virtual networks alone. With nobody in the fleet
+/// yet (an invite is open), or a computer whose address cannot be placed (a name), both are kept.
+pub fn listen_for(f: &Fleet, own: &[Ipv4Addr], port: u16) -> Vec<SocketAddr> {
+    let peers: Vec<&store::Machine> = f.machines.iter().filter(|m| m.enabled).collect();
+    let (mut lan, mut tail) = (peers.is_empty(), peers.is_empty());
+    for m in peers {
+        match m.addr.parse::<Ipv4Addr>() {
+            Ok(a) if super::scan::is_tailnet(a) => tail = true,
+            Ok(a) if super::scan::is_lan(a) => lan = true,
+            _ => (lan, tail) = (true, true),
+        }
+    }
+    let mut v: Vec<IpAddr> = super::scan::listen_addrs(own)
+        .into_iter()
+        .filter(|ip| {
+            if super::scan::is_tailnet(*ip) {
+                tail
+            } else {
+                lan
+            }
+        })
+        .map(IpAddr::V4)
+        .collect();
+    v.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    v.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()
+}
+
 /// `fleet serve`: listen until the program is ended.
 pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
     let Some(key) = store::read_key(p) else {
@@ -489,7 +528,11 @@ pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
         p.clone(),
         Arc::new(crate::stage::remote::RealRunner),
     )));
-    let addrs = listen_on(store::fleet_port());
+    let addrs = listen_for(
+        &store::load(p),
+        &super::scan::local_addrs(),
+        store::fleet_port(),
+    );
     let h = match start(&node, &addrs) {
         Ok(h) => h,
         Err(_) if quiet => return 0, // the messenger is already running
@@ -498,6 +541,16 @@ pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
             return 1;
         }
     };
+    for (a, why) in &h.failed {
+        eprintln!(
+            "fleet: could not listen on {a}: {why}{}",
+            if a.ip().is_loopback() {
+                " (the agent reaches the messenger through this address, so its fleet tools will not work until it is free)"
+            } else {
+                ""
+            }
+        );
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let own = super::scan::listen_addrs(&super::scan::local_addrs());
     if announce {
