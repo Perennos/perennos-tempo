@@ -27,7 +27,7 @@ one AppId, so installing the full edition over the source-available one adds the
 | Destination | the folder (first install only; updates go where it already is) |
 | Components | Everything, the agent and Tempo Vault, or a choice |
 | Your vault | the notes folder: a new one, or an Obsidian vault you already have (left as it is) |
-| Additional tasks | desktop shortcut, "Open as Tempo Vault" in File Explorer, PATH, hourly learning, downloading models now (off unless ticked: several gigabytes, needs Ollama), start at sign-in |
+| Additional tasks | desktop shortcut, "Open as Tempo Vault" in File Explorer, PATH, hourly learning, downloading models now (off unless ticked: several gigabytes, needs Ollama, looks up model names in Ollama's registry), start at sign-in |
 | Ready | a summary that includes the vault and where Tempo keeps its memory |
 | Finished | "Perennos Tempo is installed", where the vault is, whether Ollama was found (if not, https://ollama.com/download), and "Open Perennos Tempo" |
 
