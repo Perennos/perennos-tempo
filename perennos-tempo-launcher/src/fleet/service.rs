@@ -100,6 +100,33 @@ pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_build_never_installs_or_removes_a_real_schedule() {
+        const CHILD: &str = "TEMPO_SCHEDULE_GUARD_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let exe = Path::new("tempo-launch");
+            assert!(install(exe, false)
+                .unwrap()
+                .starts_with("test run: would install "));
+            assert!(install(exe, true)
+                .unwrap()
+                .starts_with("test run: would remove "));
+            return;
+        }
+        // If the guard regresses, the child cannot find crontab and cannot edit a schedule.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fleet::service::tests::test_build_never_installs_or_removes_a_real_schedule",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+    }
+
     #[test]
     fn the_entry_runs_serve_quietly_and_refuses_odd_paths() {
         let e = entry(Path::new("/opt/tempo/tempo-launch")).unwrap();
