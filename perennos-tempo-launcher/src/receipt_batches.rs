@@ -637,7 +637,8 @@ mod tests {
 
     fn temp_home() -> PathBuf {
         let suffix = hex(&random(12));
-        let path = std::env::temp_dir().join(format!("tempo-receipt-test-{suffix}"));
+        let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let path = temp.join(format!("tempo-receipt-test-{suffix}"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

@@ -29,3 +29,13 @@ A valid signature means the Fleet key sealed this export. It does not prove who 
 original work, when the references were created, that the batch is complete, human authority,
 or legal conformance. This does not change the existing Python SHA-256 chain; that chain and
 this signed export answer different questions.
+
+The standalone verifier prints the signed case; check that it is the case you expected.
+Conformance mode separately binds the seal to its requested case. Unknown fields are
+rejected by standalone export; Conformance mode seals only its normalized reference
+subset. Known credential prefixes are reserved and can also reject legitimate IDs.
+If a write fails, preserve the partial file and use a new filename; a truncated file
+fails verification. Windows output inherits parent permissions, and a private ACL is
+not established or independently verified. These commands require a stable,
+owner-controlled filesystem; static ancestor checks do not prevent concurrent path
+replacement. They do not provide a process-memory erasure guarantee.
