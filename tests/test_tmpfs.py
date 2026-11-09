@@ -68,6 +68,45 @@ class Tmpfs(unittest.TestCase):
         self.assertEqual(out["moved"], [])
         self.assertIn("free on the trash disk", out["kept"][0]["reason"])
 
+    def test_a_folder_a_process_still_holds_stays_put_and_can_be_released_later(self):
+        self.reg()
+        with mock.patch.object(T, "open_handles", return_value=(2, 0)):
+            out = T.release("job-a", self.registry, self.trash, keep_free=0)
+        self.assertTrue(self.job_dir.exists())
+        self.assertEqual(out["moved"], [])
+        self.assertIn("2 process(es) still hold it open", out["kept"][0]["reason"])
+        self.assertEqual(T._load(self.registry)[0]["state"], "open")          # still registered
+        with mock.patch.object(T, "open_handles", return_value=(0, 0)):
+            self.assertEqual(len(T.release("job-a", self.registry, self.trash, keep_free=0)["moved"]), 1)
+
+    def test_a_move_that_fails_half_way_keeps_earlier_moves_and_records_the_failure(self):
+        second = self.ram / "job-a-second"
+        second.mkdir()
+        (second / "f").write_bytes(b"2")
+        self.reg(); self.reg(path=second)
+        real, calls = T.shutil.move, []
+
+        def flaky(src, dst):
+            calls.append(src)
+            if len(calls) == 2:
+                raise OSError("cross-device copy died")
+            return real(src, dst)
+        with mock.patch.object(T.shutil, "move", side_effect=flaky):
+            out = T.release("job-a", self.registry, self.trash, keep_free=0)
+        rows = {pathlib.Path(r["path"]).name: r for r in T._load(self.registry)}
+        self.assertEqual((len(out["moved"]), len(out["kept"])), (1, 1))
+        self.assertEqual(rows["job-a-cache"]["state"], "trashed")             # the earlier move is on record
+        self.assertEqual(rows["job-a-second"]["state"], "open")
+        self.assertIn("cross-device copy died", rows["job-a-second"]["error"])
+        self.assertTrue(second.exists())                                       # the original is untouched
+
+    def test_the_registry_is_saved_even_if_something_unexpected_is_raised(self):
+        self.reg()
+        with mock.patch.object(T, "open_handles", side_effect=RuntimeError("proc vanished")):
+            with self.assertRaises(RuntimeError):
+                T.release("job-a", self.registry, self.trash, keep_free=0)
+        self.assertEqual(len(T._load(self.registry)), 1)
+
     def test_release_ignores_other_jobs_and_unregistered_folders(self):
         other = self.ram / "someone-else"
         other.mkdir()

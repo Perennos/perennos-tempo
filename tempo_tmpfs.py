@@ -60,31 +60,45 @@ def register(job, path, registry=None, mounts="/proc/mounts"):
     return {"ok": True, "job": job, "path": path}
 
 
-def release(job, registry=None, trash=None, keep_free=KEEP_FREE, now=None):
-    """Move this job's registered folders to the trash disk. A folder that would not fit with `keep_free` to spare stays
-    where it is and is reported, so a full disk is never made fuller."""
+def release(job, registry=None, trash=None, keep_free=KEEP_FREE, now=None, proc="/proc"):
+    """Move this job's registered folders to the trash disk. A folder stays where it is, and is reported in `kept` with the
+    reason, when a process still holds it open, when it would not fit with `keep_free` to spare (a full disk is never made
+    fuller), or when the move fails part way. The registry is saved whatever happens, so earlier moves are never forgotten."""
     registry, trash = registry or HOME / "registry.json", Path(trash or HOME / "trash")
     now, rows, moved, kept = time.time() if now is None else now, _load(registry), [], []
-    for r in rows:
-        if r["job"] != job or r["state"] != "open":
-            continue
-        if not os.path.exists(r["path"]):
-            r["state"] = "gone"
-            continue
-        size, _, _ = P._walk(r["path"], time.monotonic() + 60)
-        trash.mkdir(parents=True, exist_ok=True)
-        if shutil.disk_usage(trash).free - size < keep_free:
-            r["state"] = "kept"
-            kept.append({"path": r["path"], "bytes": size, "reason": "moving it would leave under %.0f GiB free on the trash disk" % (keep_free / P.GIB)})
-            continue
-        dest = trash / time.strftime("%Y%m%d", time.gmtime(now)) / ("%s-%s" % (job, Path(r["path"]).name))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            dest = dest.with_name(dest.name + "-%d" % now)
-        shutil.move(r["path"], dest)
-        r.update(state="trashed", trashed_to=str(dest), released_at=now)
-        moved.append({"path": r["path"], "bytes": size, "trashed_to": str(dest)})
-    _save(registry, rows)
+    try:
+        for r in rows:
+            if r["job"] != job or r["state"] != "open":
+                continue
+            if not os.path.exists(r["path"]):
+                r["state"] = "gone"
+                continue
+            held, _ = open_handles(r["path"], proc)
+            if held:     # still in use: it stays registered, so a later release can try again
+                kept.append({"path": r["path"], "reason": "%d process(es) still hold it open" % held})
+                continue
+            size, _, _ = P._walk(r["path"], time.monotonic() + 60)
+            trash.mkdir(parents=True, exist_ok=True)
+            if shutil.disk_usage(trash).free - size < keep_free:
+                r["state"] = "kept"
+                kept.append({"path": r["path"], "bytes": size, "reason": "moving it would leave under %.0f GiB free on the trash disk" % (keep_free / P.GIB)})
+                continue
+            dest = trash / time.strftime("%Y%m%d", time.gmtime(now)) / ("%s-%s" % (job, Path(r["path"]).name))
+            if dest.exists():
+                dest = dest.with_name(dest.name + "-%d" % now)
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(r["path"], dest)
+            except Exception as exc:    # a copy that dies across disks leaves the original in place; say so, keep going
+                r["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                if dest.exists():
+                    r["partial_copy"] = str(dest)
+                kept.append({"path": r["path"], "bytes": size, "reason": "the move failed (%s)" % r["error"]})
+                continue
+            r.update(state="trashed", trashed_to=str(dest), released_at=now)
+            moved.append({"path": r["path"], "bytes": size, "trashed_to": str(dest)})
+    finally:
+        _save(registry, rows)
     return {"job": job, "moved": moved, "kept": kept}
 
 
