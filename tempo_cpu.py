@@ -1,4 +1,4 @@
-"""Explicit, time-bounded CPU-only execution under an Orchestra booking."""
+"""Explicit, time-bounded CPU-only execution under a booked window."""
 import time
 import ipaddress
 from contextlib import contextmanager
