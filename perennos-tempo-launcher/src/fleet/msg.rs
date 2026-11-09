@@ -516,7 +516,17 @@ impl Node {
                 s.get_mut().write_all(&wire).map_err(|e| e.to_string())?;
                 while got.len() < frames.len() {
                     match read_frame(s, &self.key(), &|n| self.pin(n)) {
-                        Ok(f) if f.kind == want => got.push(f),
+                        Ok(f)
+                            if f.kind == want
+                                && f.from == m.name
+                                && f.to == self.me
+                                && f.id == frames[got.len()].id =>
+                        {
+                            lock(&self.guard)
+                                .check(f.ts, &f.nonce, now_ms())
+                                .map_err(|e| format!("refused: {e}"))?;
+                            got.push(f);
+                        }
                         Ok(_) => return Err("unexpected answer".into()),
                         Err(Bad::Closed) => return Err("the connection closed".into()),
                         Err(Bad::Refused(w)) => return Err(format!("refused: {w}")),
