@@ -1728,25 +1728,32 @@ pub fn rotate_cmd(
 /// `tempo-launch start`: when the fleet has more than one machine, start the messenger (it ends
 /// at once if one is already running).
 pub fn autostart(ctx: &Ctx) {
-    let p = Paths::of(ctx);
-    if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
-        return;
+    #[cfg(test)]
+    {
+        let _ = ctx;
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let log = crate::open_log(&ctx.log_path("fleet")).ok();
-    let mut c = std::process::Command::new(exe);
-    c.args(["fleet", "serve", "--quiet"])
-        .stdin(std::process::Stdio::null());
-    match log.and_then(|l| l.try_clone().ok().map(|l2| (l, l2))) {
-        Some((a, b)) => c.stdout(a).stderr(b),
-        None => c
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    };
-    if let Err(e) = crate::spawn_hidden(&mut c) {
-        ctx.note(&format!("fleet: could not start the messenger: {e}"));
+    #[cfg(not(test))]
+    {
+        let p = Paths::of(ctx);
+        if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let log = crate::open_log(&ctx.log_path("fleet")).ok();
+        let mut c = std::process::Command::new(exe);
+        c.args(["fleet", "serve", "--quiet"])
+            .stdin(std::process::Stdio::null());
+        match log.and_then(|l| l.try_clone().ok().map(|l2| (l, l2))) {
+            Some((a, b)) => c.stdout(a).stderr(b),
+            None => c
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        };
+        if let Err(e) = crate::spawn_hidden(&mut c) {
+            ctx.note(&format!("fleet: could not start the messenger: {e}"));
+        }
     }
 }
 

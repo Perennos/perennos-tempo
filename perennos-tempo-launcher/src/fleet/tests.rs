@@ -752,6 +752,76 @@ fn answered(port: u16, wire: &[u8], who: &Rig) -> bool {
     read_frame(&mut s, &KEY, &|_| Some(vk)).is_ok()
 }
 
+fn fake_peer(owner: &Rig, name: &str, sk: &SigningKey) -> (Machine, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let id = crypto::hex(sk.verifying_key().as_bytes());
+    (know(owner, name, port, &id), listener)
+}
+
+fn fake_replies(
+    listener: TcpListener,
+    requester: ed25519_dalek::VerifyingKey,
+    signer: SigningKey,
+    count: usize,
+    reply: impl Fn(Frame, usize) -> Frame + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for i in 0..count {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let request = read_frame(&mut stream, &KEY, &|_| Some(requester)).unwrap();
+            stream
+                .write_all(&encode(&KEY, &signer, &reply(request, i)))
+                .unwrap();
+        }
+    })
+}
+
+fn fake_ping(tag: &str, reply: impl Fn(Frame) -> Frame + Send + 'static) -> Result<u64, String> {
+    let owner = rig(tag, KEY);
+    let signer = SigningKey::from_bytes(&[71; 32]);
+    let (peer, listener) = fake_peer(&owner, "remote", &signer);
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        signer,
+        1,
+        move |request, _| reply(request),
+    );
+    let result = owner.node.ping(&peer);
+    replies.join().unwrap();
+    result
+}
+
+fn fake_pings_with_replayed_nonce(tag: &str) -> (Result<u64, String>, Result<u64, String>) {
+    let owner = rig(tag, KEY);
+    let recipient = tag.to_string();
+    let signer = SigningKey::from_bytes(&[72; 32]);
+    let (peer, listener) = fake_peer(&owner, "remote", &signer);
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        signer,
+        2,
+        move |request, _| Frame {
+            kind: 'o',
+            id: request.id,
+            from: "remote".into(),
+            to: recipient.clone(),
+            ts: store::now_ms(),
+            nonce: "reused-pong-nonce".into(),
+            ..Frame::default()
+        },
+    );
+    let first = owner.node.ping(&peer);
+    let second = owner.node.ping(&peer);
+    replies.join().unwrap();
+    (first, second)
+}
+
 #[test]
 fn only_a_good_new_frame_for_this_node_is_answered() {
     let b = rig("recv", KEY);
@@ -901,6 +971,292 @@ fn lock_first_outbox(a: &Rig) -> String {
     let db = rusqlite::Connection::open(a.paths.file("fleet.db")).unwrap();
     db.query_row("SELECT id FROM outbox LIMIT 1", [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn a_signed_ack_from_another_pinned_member_is_refused() {
+    let owner = rig("ack-sender", KEY);
+    let peer_sk = SigningKey::from_bytes(&[73; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    let other_sk = SigningKey::from_bytes(&[74; 32]);
+    know(
+        &owner,
+        "other",
+        peer.port,
+        &crypto::hex(other_sk.verifying_key().as_bytes()),
+    );
+    owner.node.enqueue("peer", "note", b"pending").unwrap();
+    let to = owner.node.me.clone();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        other_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "other".into(),
+            to: to.clone(),
+            ts: store::now_ms(),
+            nonce: "wrong-sender".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn a_signed_ack_for_another_recipient_is_refused() {
+    let owner = rig("ack-recipient", KEY);
+    let peer_sk = SigningKey::from_bytes(&[75; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    owner.node.enqueue("peer", "note", b"pending").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        peer_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "someone-else".into(),
+            ts: store::now_ms(),
+            nonce: "wrong-recipient".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn an_ack_for_another_queued_row_is_refused_without_marking_either_row() {
+    let owner = rig("ack-row", KEY);
+    let peer_sk = SigningKey::from_bytes(&[76; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    owner.node.enqueue("peer", "note", b"first").unwrap();
+    let other_id = owner.node.enqueue("peer", "note", b"second").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        peer_sk,
+        1,
+        move |_, _| Frame {
+            kind: 'a',
+            id: other_id.clone(),
+            from: "peer".into(),
+            to: "ack-row".into(),
+            ts: store::now_ms(),
+            nonce: "wrong-row".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 2);
+}
+
+#[test]
+fn stale_and_replayed_signed_acks_are_refused() {
+    let stale_owner = rig("ack-stale", KEY);
+    let stale_sk = SigningKey::from_bytes(&[77; 32]);
+    let (stale_peer, listener) = fake_peer(&stale_owner, "peer", &stale_sk);
+    stale_owner
+        .node
+        .enqueue("peer", "note", b"pending")
+        .unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&stale_owner.node.identity_hex()),
+        stale_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "ack-stale".into(),
+            ts: store::now_ms() - 10 * 60_000,
+            nonce: "stale-ack".into(),
+            ..Frame::default()
+        },
+    );
+    let stale = stale_owner.node.deliver(&stale_peer);
+    replies.join().unwrap();
+    assert!(matches!(stale, Err(e) if e.contains("clock")));
+    assert_eq!(stale_owner.node.queued(Some("peer")), 1);
+
+    let replay_owner = rig("ack-replay", KEY);
+    let replay_sk = SigningKey::from_bytes(&[78; 32]);
+    let (replay_peer, listener) = fake_peer(&replay_owner, "peer", &replay_sk);
+    replay_owner.node.enqueue("peer", "note", b"first").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&replay_owner.node.identity_hex()),
+        replay_sk,
+        2,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "ack-replay".into(),
+            ts: store::now_ms(),
+            nonce: "replayed-ack".into(),
+            ..Frame::default()
+        },
+    );
+    let first = replay_owner.node.deliver(&replay_peer);
+    replay_owner
+        .node
+        .enqueue("peer", "note", b"second")
+        .unwrap();
+    let replayed = replay_owner.node.deliver(&replay_peer);
+    replies.join().unwrap();
+    assert_eq!(first, Ok(1));
+    assert!(matches!(replayed, Err(e) if e.contains("replay")));
+    assert_eq!(replay_owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn signed_pongs_must_match_the_ping_and_pass_the_guard() {
+    let wrong = fake_ping("pong-wrong", |_request| Frame {
+        kind: 'o',
+        id: "not-the-ping".into(),
+        from: "remote".into(),
+        to: "pong-wrong".into(),
+        ts: store::now_ms(),
+        nonce: "wrong-pong".into(),
+        ..Frame::default()
+    });
+    assert!(matches!(wrong, Err(e) if e == "unexpected answer"));
+
+    let stale = fake_ping("pong-stale", |request| Frame {
+        kind: 'o',
+        id: request.id,
+        from: "remote".into(),
+        to: "pong-stale".into(),
+        ts: store::now_ms() - 10 * 60_000,
+        nonce: "stale-pong".into(),
+        ..Frame::default()
+    });
+    assert!(matches!(stale, Err(e) if e.contains("clock")));
+
+    let valid = fake_ping("pong-valid", |request| Frame {
+        kind: 'o',
+        id: request.id,
+        from: "remote".into(),
+        to: "pong-valid".into(),
+        ts: store::now_ms(),
+        nonce: "valid-pong".into(),
+        ..Frame::default()
+    });
+    assert!(valid.is_ok());
+
+    let (first, replayed) = fake_pings_with_replayed_nonce("pong-replay");
+    assert!(first.is_ok());
+    assert!(matches!(replayed, Err(e) if e.contains("replay")));
+}
+
+#[test]
+fn signed_acks_without_a_nonce_or_with_a_future_clock_leave_the_message_pending() {
+    for (tag, nonce, offset, error) in [
+        ("ack-empty", "", 0, "no nonce"),
+        ("ack-future", "future-ack", 10 * 60_000, "clock"),
+    ] {
+        let owner = rig(tag, KEY);
+        let signer = SigningKey::from_bytes(&[79; 32]);
+        let (peer, listener) = fake_peer(&owner, "peer", &signer);
+        owner.node.enqueue("peer", "note", b"pending").unwrap();
+        let replies = fake_replies(
+            listener,
+            vk_of(&owner.node.identity_hex()),
+            signer,
+            1,
+            move |request, _| Frame {
+                kind: 'a',
+                id: request.id,
+                from: "peer".into(),
+                to: tag.into(),
+                ts: store::now_ms() + offset,
+                nonce: nonce.into(),
+                ..Frame::default()
+            },
+        );
+        let result = owner.node.deliver(&peer);
+        replies.join().unwrap();
+        assert_eq!(result, Err(format!("refused: {error}")));
+        assert_eq!(owner.node.queued(Some("peer")), 1);
+    }
+}
+
+#[test]
+fn losing_a_real_ack_retries_the_same_message_and_stores_it_once() {
+    let owner = rig("lost-ack-sender", KEY);
+    let receiver = rig("lost-ack-peer", KEY);
+    know(
+        &receiver,
+        &owner.node.me,
+        owner.port,
+        &owner.node.identity_hex(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = know(
+        &owner,
+        &receiver.node.me,
+        listener.local_addr().unwrap().port(),
+        &receiver.node.identity_hex(),
+    );
+    let id = owner
+        .node
+        .enqueue(&peer.name, "note", b"keep once")
+        .unwrap();
+    let recipient = receiver.node.clone();
+    let requester = vk_of(&owner.node.identity_hex());
+    let expected_id = id.clone();
+    let replies = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = read_frame(&mut stream, &KEY, &|_| Some(requester)).unwrap();
+        assert_eq!(request.id, expected_id);
+        assert!(recipient.store(
+            &request.from,
+            &request.id,
+            &request.topic,
+            request.created,
+            &request.body
+        ));
+        // The message reached the receiver, but the connection ends before its ACK.
+        drop(stream);
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        recipient.frames(std::io::BufReader::new(stream));
+    });
+    assert!(owner.node.deliver(&peer).is_err());
+    assert_eq!(owner.node.queued(Some(&peer.name)), 1);
+    assert_eq!(owner.node.tries(&id), 1);
+    owner.node.retry_now();
+    assert_eq!(owner.node.deliver(&peer), Ok(1));
+    assert_eq!(owner.node.queued(Some(&peer.name)), 0);
+    let got = receiver.node.inbox(Some("note"), 10);
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        (got[0].id.as_str(), got[0].body.as_slice()),
+        (id.as_str(), &b"keep once"[..])
+    );
+    replies.join().unwrap();
 }
 
 #[test]
