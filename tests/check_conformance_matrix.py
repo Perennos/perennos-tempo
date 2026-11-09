@@ -1,0 +1,33 @@
+"""Check the published traceability contract, not legal compliance."""
+from pathlib import Path
+from collections import Counter
+import json
+import re
+import sys
+
+repo = Path(sys.argv[1])
+data = json.loads((repo / "docs/CONFORMANCE-REQUIREMENTS.json").read_text(encoding="utf-8"))
+rows = data["requirements"]
+ids = [r["id"] for r in rows]
+assert len(ids) == len(set(ids))
+clock = {letter+str(n) for letter, count in zip("ABCDEFGHI", [4,4,4,5,3,3,4,5,1]) for n in range(1,count+1)}
+assert clock <= set(ids)
+assert len([r for r in rows if r["id"].startswith("RED")]) == 5
+assert len([r for r in rows if re.fullmatch(r"P[1-7]",r["id"])]) == 7
+assert len([r for r in rows if r["section"].startswith("8.")]) == 63
+assert len([r for r in rows if r["section"] == "14"]) == 10
+assert len([r for r in rows if r["section"] == "15"]) == 4
+assert len([r for r in rows if r["section"] == "Part Two"]) == 7
+anchors = set()
+for row in rows:
+    assert all(row[k] for k in ["requirement","existing","missing","evidence_path","proof"])
+    assert row["status"] == "In progress"
+    anchors.update(re.findall(chr(96)+r"([^`]+:\d+)"+chr(96),row["existing"]))
+for anchor in anchors:
+    name, line = anchor.rsplit(":",1)
+    path=repo/name
+    assert path.is_file(), anchor
+    assert 0<int(line)<=len(path.read_text(encoding="utf-8-sig").splitlines()), anchor
+for p in (repo/"docs").glob("CONFORMANCE*.md"):
+    assert not re.search(r"\b(?:ledger|claim)\b",p.read_text(encoding="utf-8"),re.I), p.name
+print(json.dumps({"rows":len(rows),"clock_fields":len(clock),"code_anchors":len(anchors),"missing_evidence_paths":0,"duplicate_ids":0,"checks":"passed"},sort_keys=True))

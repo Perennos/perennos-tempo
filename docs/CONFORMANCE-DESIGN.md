@@ -95,3 +95,7 @@ Conformance mode does not turn on hosted processing, change model routing,
 grant tool authority, notify a regulator, or approve a live use. The matrix is
 the route from a requirement to its evidence; independent review is the route
 from that evidence to a conclusion.
+
+## Check the matrix
+
+Run `python tests/check_conformance_matrix.py .` from the repository root. This checks record coverage and source anchors; it does not establish legal compliance.
