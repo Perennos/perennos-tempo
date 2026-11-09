@@ -37,6 +37,12 @@ pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
         );
     }
     let e = entry(exe)?;
+    if cfg!(test) {
+        return Ok(format!(
+            "test run: would {} {e}",
+            if remove { "remove" } else { "install" }
+        ));
+    }
     if cfg!(windows) {
         let args: Vec<String> = if remove {
             vec!["/Delete".into(), "/F".into(), "/TN".into(), TASK.into()]
@@ -101,6 +107,22 @@ mod tests {
         if !cfg!(windows) {
             assert!(e.starts_with("*/5 * * * * ") && e.ends_with(MARK));
             assert!(entry(Path::new("/opt/te'mpo/x")).is_err());
+        }
+    }
+
+    #[test]
+    fn install_reports_a_simulated_change_without_touching_the_host() {
+        if !cfg!(target_os = "macos") {
+            let exe = Path::new("/opt/tempo/tempo-launch");
+            let entry = entry(exe).unwrap();
+            assert_eq!(
+                install(exe, false).unwrap(),
+                format!("test run: would install {entry}")
+            );
+            assert_eq!(
+                install(exe, true).unwrap(),
+                format!("test run: would remove {entry}")
+            );
         }
     }
 }

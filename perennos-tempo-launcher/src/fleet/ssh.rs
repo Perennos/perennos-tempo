@@ -4,8 +4,10 @@
 //! changed one refused). Tempo never asks for, types, reads or stores a password or a key.
 
 use std::io::Write;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// The arguments before the host: the three options, and nothing the remote side can change.
@@ -43,6 +45,93 @@ pub fn args_for(target: &str, command: &[String]) -> Result<Vec<String>, String>
     Ok(a)
 }
 
+/// Arguments for setup after a read-only `ssh -G` resolved the target to a private IP.
+/// Unknown and changed host keys stay errors; setup never accepts a key on the fly.
+pub fn strict_args_for(
+    target: &str,
+    destination: &str,
+    port: u16,
+    command: &[String],
+) -> Result<Vec<String>, String> {
+    if !target_ok(target)
+        || destination.parse::<std::net::IpAddr>().is_err()
+        || !crate::allowed_remote_host(destination)
+        || port == 0
+    {
+        return Err("the SSH target, private destination or port is invalid".into());
+    }
+    let mut args = vec![
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=5".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=yes".into(),
+        "-o".into(),
+        "ForwardAgent=no".into(),
+        "-o".into(),
+        "PermitLocalCommand=no".into(),
+        "-o".into(),
+        "ProxyCommand=none".into(),
+        "-o".into(),
+        "ProxyJump=none".into(),
+        "-o".into(),
+        format!("HostName={destination}"),
+        "-p".into(),
+        port.to_string(),
+        target.into(),
+    ];
+    args.extend(command.iter().cloned());
+    Ok(args)
+}
+
+/// Resolve an SSH alias without connecting, then require every DNS answer to be private.
+pub fn private_target(target: &str) -> Result<(String, u16), String> {
+    if !target_ok(target) {
+        return Err("That is not a valid SSH host name or private address.".into());
+    }
+    let cfg = run(&["-G".into(), target.into()], None, Duration::from_secs(5))
+        .map_err(|e| format!("Could not read the SSH destination: {e}"))?;
+    if !cfg.ok {
+        return Err(format!(
+            "Could not read the SSH destination: {}",
+            cfg.err.lines().next().unwrap_or("no details")
+        ));
+    }
+    let (mut host, mut port) = (None, None);
+    for line in cfg.out.lines() {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("hostname"), Some(value)) => host = Some(value.to_string()),
+            (Some("port"), Some(value)) => port = value.parse::<u16>().ok(),
+            (Some("proxycommand" | "proxyjump"), Some(value)) if value != "none" => {
+                return Err(
+                    "This SSH alias uses a proxy. Bootstrap needs a direct private connection."
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let host = host.ok_or("SSH did not return a destination host.")?;
+    let port = port
+        .filter(|value| *value != 0)
+        .ok_or("SSH did not return a valid port.")?;
+    let ips: Vec<_> = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("Could not resolve the SSH destination: {e}"))?
+        .map(|addr| addr.ip())
+        .collect();
+    if ips.is_empty()
+        || ips
+            .iter()
+            .any(|ip| !crate::allowed_remote_host(&ip.to_string()))
+    {
+        return Err("The SSH destination does not resolve only to private addresses.".into());
+    }
+    Ok((ips[0].to_string(), port))
+}
+
 pub struct Said {
     pub ok: bool,
     pub out: String,
@@ -51,7 +140,27 @@ pub struct Said {
 
 /// Run `ssh` with `args`, feeding `stdin` to it, and wait up to `limit`.
 pub fn run(args: &[String], stdin: Option<&str>, limit: Duration) -> Result<Said, String> {
-    let mut cmd = Command::new("ssh");
+    run_program("ssh", args, stdin.map(|s| s.as_bytes().to_vec()), limit)
+}
+
+/// The binary form used only to carry verified controls files over the authenticated SSH pipe.
+pub fn run_bytes(args: &[String], stdin: &[u8], limit: Duration) -> Result<Said, String> {
+    run_program("ssh", args, Some(stdin.to_vec()), limit)
+}
+
+fn run_program(
+    program: &str,
+    args: &[String],
+    stdin: Option<Vec<u8>>,
+    limit: Duration,
+) -> Result<Said, String> {
+    const OUTPUT_CAP: u64 = 1 << 20;
+    const INPUT_CAP: usize = 64 << 20;
+    if stdin.as_ref().is_some_and(|b| b.len() > INPUT_CAP) {
+        return Err("SSH input exceeded the 64 MiB transfer limit".into());
+    }
+    let deadline = Instant::now() + limit;
+    let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -65,43 +174,297 @@ pub fn run(args: &[String], stdin: Option<&str>, limit: Duration) -> Result<Said
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("cannot run ssh ({e}); install OpenSSH and try again"))?;
-    if let (Some(text), Some(mut si)) = (stdin, child.stdin.take()) {
-        let _ = si.write_all(text.as_bytes());
-    }
+        .map_err(|e| format!("cannot run {program} ({e}); install OpenSSH and try again"))?;
+    #[cfg(unix)]
+    let mut owner = Some(ProcessGroup(child.id()));
+    #[cfg(windows)]
+    let mut owner = Some(match Job::attach(&child) {
+        Ok(job) => job,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    });
+    let mut writer = if let (Some(bytes), Some(mut si)) = (stdin, child.stdin.take()) {
+        // A peer that never reads must not hold the caller past the same absolute deadline.
+        Some(std::thread::spawn(move || {
+            let _ = si.write_all(&bytes);
+        }))
+    } else {
+        None
+    };
     let (so, se) = (child.stdout.take(), child.stderr.take());
-    fn read(r: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<String> {
-        std::thread::spawn(move || {
-            let mut b = Vec::new();
+    fn read(
+        r: Option<impl std::io::Read + Send + 'static>,
+    ) -> (mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+        let (tx, rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut b = Vec::with_capacity(8192);
             if let Some(r) = r {
-                let _ = std::io::Read::read_to_end(&mut std::io::Read::take(r, 1 << 20), &mut b);
+                let _ = std::io::Read::read_to_end(&mut std::io::Read::take(r, OUTPUT_CAP), &mut b);
             }
-            String::from_utf8_lossy(&b).into_owned()
-        })
+            let _ = tx.send(String::from_utf8_lossy(&b).into_owned());
+        });
+        (rx, thread)
     }
-    let (ho, he) = (read(so), read(se));
-    let start = Instant::now();
+    let (ho, h_out) = read(so);
+    let (he, h_err) = read(se);
+    let mut h_out = Some(h_out);
+    let mut h_err = Some(h_err);
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             _ => {
+                drop(owner.take());
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(w) = writer.take() {
+                    let _ = w.join();
+                }
+                if let Some(h) = h_out.take() {
+                    let _ = h.join();
+                }
+                if let Some(h) = h_err.take() {
+                    let _ = h.join();
+                }
                 break None;
             }
         }
     };
-    let (out, err) = (ho.join().unwrap_or_default(), he.join().unwrap_or_default());
     match status {
-        Some(s) => Ok(Said {
-            ok: s.success(),
-            out,
-            err,
-        }),
-        None => Err(format!("ssh did not finish in {} seconds", limit.as_secs())),
+        Some(s) => {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            let out = match ho.recv_timeout(rem) {
+                Ok(out) => out,
+                Err(_) => {
+                    drop(owner.take());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(w) = writer.take() {
+                        let _ = w.join();
+                    }
+                    if let Some(h) = h_out.take() {
+                        let _ = h.join();
+                    }
+                    if let Some(h) = h_err.take() {
+                        let _ = h.join();
+                    }
+                    return Err(format!(
+                        "{program} output did not close before its deadline"
+                    ));
+                }
+            };
+            let err = match he.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(err) => err,
+                Err(_) => {
+                    drop(owner.take());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(w) = writer.take() {
+                        let _ = w.join();
+                    }
+                    if let Some(h) = h_out.take() {
+                        let _ = h.join();
+                    }
+                    if let Some(h) = h_err.take() {
+                        let _ = h.join();
+                    }
+                    return Err(format!(
+                        "{program} output did not close before its deadline"
+                    ));
+                }
+            };
+            if writer.as_ref().is_some_and(|w| !w.is_finished()) {
+                drop(owner.take());
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(w) = writer.take() {
+                    let _ = w.join();
+                }
+                if let Some(h) = h_out.take() {
+                    let _ = h.join();
+                }
+                if let Some(h) = h_err.take() {
+                    let _ = h.join();
+                }
+                return Err(format!("{program} input did not close before its deadline"));
+            }
+            drop(owner.take());
+            if let Some(w) = writer.take() {
+                let _ = w.join();
+            }
+            if let Some(h) = h_out.take() {
+                let _ = h.join();
+            }
+            if let Some(h) = h_err.take() {
+                let _ = h.join();
+            }
+            Ok(Said {
+                ok: s.success(),
+                out,
+                err,
+            })
+        }
+        None => Err(format!(
+            "{program} did not finish in {} seconds",
+            limit.as_secs()
+        )),
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroup(u32);
+
+#[cfg(unix)]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        unsafe {
+            let _ = kill(-(self.0 as i32), 9);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct Job(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Job {
+    fn attach(child: &std::process::Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        #[repr(C)]
+        struct Basic {
+            per_process: i64,
+            per_job: i64,
+            flags: u32,
+            min_ws: usize,
+            max_ws: usize,
+            active: u32,
+            affinity: usize,
+            priority: u32,
+            schedule: u32,
+        }
+        #[repr(C)]
+        struct Io {
+            read_ops: u64,
+            write_ops: u64,
+            other_ops: u64,
+            read_bytes: u64,
+            write_bytes: u64,
+            other_bytes: u64,
+        }
+        #[repr(C)]
+        struct Extended {
+            basic: Basic,
+            io: Io,
+            process_mem: usize,
+            job_mem: usize,
+            peak_process_mem: usize,
+            peak_job_mem: usize,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CreateJobObjectW(
+                attrs: *mut std::ffi::c_void,
+                name: *const u16,
+            ) -> *mut std::ffi::c_void;
+            fn SetInformationJobObject(
+                job: *mut std::ffi::c_void,
+                class: i32,
+                info: *const std::ffi::c_void,
+                len: u32,
+            ) -> i32;
+            fn AssignProcessToJobObject(
+                job: *mut std::ffi::c_void,
+                process: *mut std::ffi::c_void,
+            ) -> i32;
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+        let handle = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err("Could not create a bounded SSH process job.".into());
+        }
+        let mut limits: Extended = unsafe { std::mem::zeroed() };
+        limits.basic.flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        let set = unsafe {
+            SetInformationJobObject(
+                handle,
+                9,
+                (&limits as *const Extended).cast(),
+                std::mem::size_of::<Extended>() as u32,
+            )
+        };
+        let assigned = set != 0
+            && unsafe { AssignProcessToJobObject(handle, child.as_raw_handle().cast()) } != 0;
+        if !assigned {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err("Could not contain the SSH child in its cleanup job.".into());
+        }
+        Ok(Self(handle))
+    }
+}
+
+#[cfg(windows)]
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_does_not_read_stdin_is_bounded() {
+        let args = ["-c".into(), "sleep 2".into()];
+        let bytes = vec![b'x'; 8 << 20];
+        let start = Instant::now();
+        let result = run_program("sh", &args, Some(bytes), Duration::from_millis(120));
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_output_open_is_bounded() {
+        let args = ["-c".into(), "sleep 2 & exit 0".into()];
+        let start = Instant::now();
+        let result = run_program("sh", &args, None, Duration::from_millis(120));
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn strict_setup_disables_local_commands_and_proxy_overrides() {
+        let args = strict_args_for("node", "10.0.0.9", 22, &[]).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-o", "PermitLocalCommand=no"]));
+        assert!(args.windows(2).any(|w| w == ["-o", "ProxyCommand=none"]));
+        assert!(args.contains(&"StrictHostKeyChecking=yes".into()));
+        assert!(!args.contains(&"StrictHostKeyChecking=accept-new".into()));
     }
 }
 
@@ -221,39 +584,18 @@ pub struct Step {
     pub script: String,
 }
 
-pub fn setup_steps(addr: &str, with_launch: bool) -> Vec<Step> {
-    let unit = format!(
-        r#"if ! command -v ollama >/dev/null 2>&1; then echo "Ollama is not installed here: install it from https://ollama.com/download, then run this step again"; exit 0; fi
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-  mkdir -p "$HOME/.config/systemd/user"
-  printf '[Unit]\nDescription=Ollama for Tempo (private address only)\n\n[Service]\nEnvironment=OLLAMA_HOST={addr}:11434\nExecStart=%s serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n' "$(command -v ollama)" > "$HOME/.config/systemd/user/tempo-ollama.service"
-  systemctl --user daemon-reload && systemctl --user enable --now tempo-ollama.service && echo "Ollama now listens on {addr}:11434 (user service tempo-ollama)"
-else
-  echo "No user service manager here. Start Ollama yourself, listening on the private address:"
-  echo "  OLLAMA_HOST={addr}:11434 ollama serve"
-fi
-"#
-    );
-    let mut v = vec![Step {
-        why: "Ollama listens on this computer's private address only (a user service where there is one)",
-        shown: unit.clone(),
-        script: unit,
-    }];
-    let setup = if with_launch {
-        "tempo-launch setup --apply --yes".to_string()
+pub fn setup_steps(_addr: &str, with_launch: bool) -> Vec<Step> {
+    let script = if with_launch {
+        "PATH=\"$PATH:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin\"\nnohup tempo-launch fleet serve --quiet >/dev/null 2>&1 </dev/null &\n".to_string()
     } else {
-        "echo \"tempo-launch is not installed there: install Perennos Tempo, then run: tempo-launch setup --apply --yes\"".to_string()
+        "echo 'Bootstrap pending: install Perennos Tempo on this computer, then prepare the fleet link again.'\n".to_string()
     };
-    v.push(Step {
-        why: "Tempo sets itself up there (fetches what is missing, asks nothing)",
-        shown: setup.clone(),
-        script: format!(
-            "PATH=\"$PATH:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin\"\n{setup}\n"
-        ),
-    });
-    v
+    vec![Step {
+        why: "start only the fleet messenger; models and engine settings stay as they are",
+        shown: script.clone(),
+        script,
+    }]
 }
-
 pub fn exists(p: &Path) -> bool {
     p.is_file()
 }
@@ -285,6 +627,16 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_arguments_keep_host_key_checking_strict() {
+        let a = strict_args_for("nas", "10.0.0.9", 22, &["sh".into(), "-s".into()]).unwrap();
+        assert!(a.iter().any(|x| x == "StrictHostKeyChecking=yes"));
+        assert!(a.iter().any(|x| x == "HostName=10.0.0.9"));
+        assert!(!a.iter().any(|x| x.contains("accept-new")));
+        assert!(strict_args_for("nas", "8.8.8.8", 22, &[]).is_err());
+        assert!(strict_args_for("nas", "bad host", 22, &[]).is_err());
+    }
+
+    #[test]
     fn config_hosts_skip_patterns() {
         let t = "Host *\n  User x\nhost tower nas\n  HostName 10.0.0.2\nHost *.corp !bad\nHost laptop\n\tPort 22\nHost tower\n";
         assert_eq!(config_hosts(t), ["tower", "nas", "laptop"]);
@@ -304,13 +656,13 @@ mod tests {
     }
 
     #[test]
-    fn the_setup_steps_name_the_private_address_and_never_listen_on_all() {
+    fn setup_steps_start_only_the_fleet_messenger() {
         let s = setup_steps("10.0.0.9", true);
-        assert!(s[0].shown.contains("OLLAMA_HOST=10.0.0.9:11434"));
-        assert!(!s[0].shown.contains("0.0.0.0"));
-        assert!(s[1].shown.contains("setup --apply --yes"));
-        assert!(setup_steps("10.0.0.9", false)[1]
+        assert_eq!(s.len(), 1);
+        assert!(s[0].shown.contains("fleet serve --quiet"));
+        assert!(!s[0].shown.contains("OLLAMA_HOST") && !s[0].shown.contains("setup --apply"));
+        assert!(setup_steps("10.0.0.9", false)[0]
             .shown
-            .contains("not installed"));
+            .contains("Bootstrap pending"));
     }
 }

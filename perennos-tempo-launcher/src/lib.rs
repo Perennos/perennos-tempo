@@ -22,6 +22,7 @@ pub mod retune;
 pub mod setup;
 pub mod stage;
 pub mod tempo_home;
+pub mod updates;
 pub mod woodshed;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -77,6 +78,8 @@ usage: tempo-launch [command]
                     after a y/N that shows the sizes. Speech stays on this computer.
   welcome           the first-run page: what the scan found, one computer or several, and how to
                     let your AI help (opened by itself the first time, then `tempo-launch welcome`)
+  updates [--check | --enable | --disable | --open]
+                    check the official stable release; checks are off until you turn them on
   link URL          add another computer's Ollama (a tailnet or home-network address) to the
                     agent's ollama_fallbacks; nothing is contacted
   mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
@@ -355,11 +358,14 @@ impl Ctx {
             && !Path::new(target)
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir));
+        let loopback = loopback_url(target);
+        let official_release = updates::is_official_release_url(target);
         // or exactly the address of an entry in remote.json that passed its checks
         let remote = !own_file
-            && !loopback_url(target)
+            && !loopback
+            && !official_release
             && load_remote(&self.home).0.iter().any(|r| r.url == target);
-        if !(loopback_url(target) || own_file || remote) {
+        if !(loopback || own_file || remote || official_release) {
             return Err("refused: tempo-launch only opens its own pages".into());
         }
         self.opened.borrow_mut().push(target.to_string());
@@ -1974,6 +1980,8 @@ pub enum Cmd {
     Setup(setup::apply::Opts),
     /// `welcome`: write and open the first-run page.
     Welcome,
+    /// Cached update status and an explicit, bounded check of the official release.
+    Updates(updates::Action),
     /// `link URL`: add another computer's Ollama to the agent's `ollama_fallbacks`.
     Link(String),
     /// `mcp`: the setup helper as an MCP server on stdio; `--scan` prints the scan facts.
@@ -2118,6 +2126,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             only(&[])?;
             Cmd::Welcome
         }
+        "updates" => Cmd::Updates(updates::parse_args(&rest)?),
         "link" => match rest.as_slice() {
             [u] if !u.starts_with("--") => Cmd::Link(u.to_string()),
             _ => return Err("link takes one address, like http://192.168.0.20:11434".into()),
@@ -2155,7 +2164,24 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    run_cmd(&Ctx::from_env(), cmd)
+    let ctx = Ctx::from_env();
+    #[cfg(not(test))]
+    if matches!(
+        &cmd,
+        Cmd::Home
+            | Cmd::Field
+            | Cmd::Vault(_)
+            | Cmd::Room
+            | Cmd::Agent
+            | Cmd::Studio
+            | Cmd::Start
+            | Cmd::Welcome
+            | Cmd::Fleet(fleet::FleetCmd::Page)
+            | Cmd::Fleet(fleet::FleetCmd::Serve { .. })
+    ) {
+        updates::schedule_auto_check(&ctx);
+    }
+    run_cmd(&ctx, cmd)
 }
 
 pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
@@ -2187,6 +2213,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
                 .map(|_| 0)
                 .map_err(|e| Problem::other("The welcome page could not be opened", e))
         }
+        Cmd::Updates(action) => Ok(updates::run(ctx, action)),
         Cmd::Link(url) => Ok(setup::propose::link(
             ctx,
             setup::propose::real_pinned(),

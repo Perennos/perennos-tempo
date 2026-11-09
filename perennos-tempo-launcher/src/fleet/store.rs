@@ -340,6 +340,28 @@ pub fn config_set(
     present: bool,
     now: u64,
 ) -> Result<String, String> {
+    config_set_inner(p, pinned, m, present, None, now)
+}
+
+/// Drop the old engine fallback only when no other active peer still owns it.
+pub fn config_set_after_address_change(
+    p: &Paths,
+    pinned: Option<PathBuf>,
+    m: &Machine,
+    previous: &Machine,
+    now: u64,
+) -> Result<String, String> {
+    config_set_inner(p, pinned, m, true, Some(previous), now)
+}
+
+fn config_set_inner(
+    p: &Paths,
+    pinned: Option<PathBuf>,
+    m: &Machine,
+    present: bool,
+    previous: Option<&Machine>,
+    now: u64,
+) -> Result<String, String> {
     if !m.engine() && present {
         return Ok(String::new());
     }
@@ -350,6 +372,25 @@ pub fn config_set(
     let ctx = p.ctx();
     let (cfg, old) = propose::load_settings(&path)?;
     let mut list = cfg.strs("ollama_fallbacks");
+    let previous_url = previous
+        .filter(|old| old.engine() && old.addr != m.addr)
+        .map(|old| engine_url(&old.engine_url()))
+        .transpose()?;
+    let previous_shared = previous
+        .filter(|old| old.engine() && old.addr != m.addr)
+        .is_some_and(|old| {
+            load(p).machines.iter().any(|peer| {
+                peer.name != old.name
+                    && peer.enabled
+                    && peer.engine()
+                    && peer.engine_url() == old.engine_url()
+            })
+        });
+    if let Some(previous_url) = previous_url.as_ref() {
+        if !previous_shared {
+            list.retain(|u| u != previous_url);
+        }
+    }
     list.retain(|u| *u != url);
     let old_hosts = match cfg.get("hosts") {
         Some(J::Obj(h)) => h.clone(),

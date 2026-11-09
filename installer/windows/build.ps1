@@ -137,6 +137,15 @@ Run-Py (Join-Path $Here "notices.py") $notices $Target @script:Built
 $notice = Join-Path $Legal "PolyForm-Shield-notice.txt"
 Copy-Item $shield (Join-Path $Stage "legal\LICENSE-PolyForm-Shield-1.0.0.txt")
 Copy-Item $notice (Join-Path $Stage "legal\NOTICE.txt")
+Run-Py (Join-Path $Root "installer\control_bundle.py") `
+  --version $Version `
+  --target $Target `
+  --launcher (Join-Path $Stage "tempo-launch.exe") `
+  --agent (Join-Path $Stage "tempo-local-agent.exe") `
+  --license (Join-Path $Stage "legal\LICENSE-PolyForm-Shield-1.0.0.txt") `
+  --notice (Join-Path $Stage "legal\NOTICE.txt") `
+  --third-party-notices $notices `
+  --out-dir $Out
 # the license page: what is under PolyForm Shield, what is proprietary, then the third-party notices
 $openNames = "Tempo Agent"
 foreach ($a in @(@("vault", "Tempo Vault"), @("studio", "Tempo Studio"), @("room", "Tempo Room"))) {

@@ -761,6 +761,8 @@ fn join_runs_what_a_new_computer_needs_in_order() {
     })
     .unwrap();
     crypto::write_private(&p.file("fleet.key"), &KEY).unwrap();
+    let before = store::load(&p);
+    let key_before = store::read_key(&p);
     let mut did: Vec<String> = vec![];
     let mut out = Vec::new();
     configure_self(&ctx, "client", &mut out, &mut |why, argv, _| {
@@ -771,11 +773,21 @@ fn join_runs_what_a_new_computer_needs_in_order() {
         true
     });
     let said = String::from_utf8(out).unwrap();
-    // a client does not serve models, but it sets Tempo up and keeps the messenger going
-    assert_eq!(did.len(), 1, "{did:?}");
     assert!(
-        did[0].starts_with("setup:") && did[0].ends_with("--yes"),
-        "{did:?}"
+        did.is_empty(),
+        "join must not run model/setup commands: {did:?}"
     );
-    assert!(said.contains("messenger is running"), "{said}");
+    assert_eq!(
+        store::load(&p),
+        before,
+        "the existing fleet link was preserved"
+    );
+    assert_eq!(
+        store::read_key(&p),
+        key_before,
+        "the fleet key was preserved"
+    );
+    assert!(said.contains("Ollama, models and sign-in settings were left as they are"));
+    assert!(said.contains("The fleet messenger start was requested"));
+    assert!(said.contains("Check received health on your main computer"));
 }

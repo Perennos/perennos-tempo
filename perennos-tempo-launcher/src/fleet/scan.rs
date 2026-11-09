@@ -11,7 +11,7 @@ use super::store::{fleet_port, Fleet};
 use crate::conductor::engines::{models_in, Engine, Model};
 use crate::setup::json::{parse, J};
 use crate::setup::probe::run_with_timeout;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -25,6 +25,7 @@ pub struct Ports {
     pub ollama: u16,
     pub agent: u16,
     pub fleet: u16,
+    pub ssh: u16,
 }
 
 pub fn real_ports() -> Ports {
@@ -32,6 +33,7 @@ pub fn real_ports() -> Ports {
         ollama: crate::setup::apply::ollama_port(),
         agent: crate::AGENT.port,
         fleet: fleet_port(),
+        ssh: 22,
     }
 }
 
@@ -102,6 +104,26 @@ pub fn listen_addrs(own: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
         .copied()
         .filter(|ip| is_lan(*ip) || is_tailnet(*ip))
         .collect()
+}
+
+/// The private address this computer would use to reach a specific peer; UDP connect sends no packet.
+pub fn route_address(destination: &str) -> Result<String, String> {
+    let ip = destination
+        .parse::<IpAddr>()
+        .map_err(|_| "the peer address is not an IP")?;
+    let bind = if ip.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let socket = UdpSocket::bind(bind).map_err(|e| format!("could not inspect the route: {e}"))?;
+    socket
+        .connect(SocketAddr::new(ip, 9))
+        .map_err(|e| format!("could not inspect the route: {e}"))?;
+    let local = socket
+        .local_addr()
+        .map_err(|e| format!("could not read the route: {e}"))?
+        .ip();
+    if !crate::allowed_remote_host(&local.to_string()) {
+        return Err("the selected callback address is not private".into());
+    }
+    Ok(local.to_string())
 }
 
 /// Every other host of the /24 around each home-network address of this computer.
@@ -194,6 +216,8 @@ pub struct Found {
     pub agent: Option<String>,
     /// The name a Tempo fleet messenger there gave itself.
     pub fleet: Option<String>,
+    /// SSH answered, so the computer can be prepared after the person approves a plan.
+    pub ssh: bool,
     pub in_fleet: bool,
 }
 
@@ -229,6 +253,9 @@ impl Found {
         if self.fleet.is_some() {
             what.push("fleet messenger".into());
         }
+        if self.ssh && self.models.is_none() && self.agent.is_none() && self.fleet.is_none() {
+            what.push("SSH reachable".into());
+        }
         format!(
             "{:<15} {:<18} {}{}",
             self.addr,
@@ -261,6 +288,7 @@ pub fn inspect(ip: Ipv4Addr, open: &[u16], ports: Ports) -> Found {
     };
     let mut f = Found {
         addr: ip.to_string(),
+        ssh: open.contains(&ports.ssh),
         ..Found::default()
     };
     if open.contains(&ports.ollama) {
@@ -328,7 +356,7 @@ pub fn probe_all(
     ports: Ports,
     fleet: &Fleet,
 ) -> Vec<Found> {
-    let mut list = vec![ports.ollama, ports.agent, ports.fleet];
+    let mut list = vec![ports.ollama, ports.agent, ports.fleet, ports.ssh];
     list.dedup();
     let open = open_ports(targets, &list, CONNECT, AT_ONCE);
     let mut ips: Vec<Ipv4Addr> = open.iter().map(|x| x.0).collect();
@@ -495,6 +523,7 @@ mod tests {
             ollama,
             agent,
             fleet,
+            ssh: 22,
         };
         let t = [ip(127, 0, 0, 1)];
         let open = open_ports(&t, &[ollama, agent, fleet, dead], CONNECT, 64);
@@ -524,9 +553,28 @@ mod tests {
             ollama: liar,
             agent: liar,
             fleet: liar,
+            ssh: 0,
         };
         let f = inspect(ip(127, 0, 0, 1), &[liar], ports);
         assert!(f.models.is_none() && f.agent.is_none() && f.fleet.is_none());
+    }
+
+    #[test]
+    fn ssh_only_is_an_agent_candidate_without_adding_it_to_the_fleet() {
+        let f = inspect(
+            ip(10, 0, 0, 9),
+            &[22],
+            Ports {
+                ollama: 11434,
+                agent: 8765,
+                fleet: 8770,
+                ssh: 22,
+            },
+        );
+        assert!(f.ssh);
+        assert_eq!(f.role(), "agent");
+        assert!(f.line().contains("SSH reachable"));
+        assert!(!f.in_fleet);
     }
 
     #[test]

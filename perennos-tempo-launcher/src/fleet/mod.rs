@@ -6,6 +6,8 @@
 //! messenger between them: signed, durable, fast. See docs/TEMPO-SETUP.md ("Tempo Fleet").
 
 pub mod blob;
+pub mod bootstrap;
+pub mod controls;
 pub mod crypto;
 pub mod jobs;
 pub mod mdns;
@@ -407,6 +409,7 @@ pub fn add(
     name: Option<&str>,
     out: &mut dyn Write,
 ) -> i32 {
+    let explicit_name = name.is_some();
     let who = who.trim().to_ascii_lowercase();
     let who = who
         .strip_prefix("http://")
@@ -447,9 +450,16 @@ pub fn add(
         return 2;
     }
     let mut m = Machine::new(&name, &who, &role);
+    let mut previous = None;
     let r = store::update(p, |f| {
         if let Some(i) = f.find(&who).or_else(|| f.find(&name)) {
             let was = f.machines[i].enabled;
+            let address_supplied = who.parse::<std::net::IpAddr>().is_ok()
+                || (explicit_name && who != f.machines[i].name);
+            if address_supplied && who != f.machines[i].addr {
+                previous = Some(f.machines[i].clone());
+                f.machines[i].addr = who.clone();
+            }
             f.machines[i].enabled = true;
             f.machines[i].role = role.clone();
             m = f.machines[i].clone();
@@ -467,7 +477,14 @@ pub fn add(
             return 1;
         }
     };
-    let note = match store::config_set(p, pinned, &m, true, store::now_s()) {
+    let now = store::now_s();
+    let config = match previous.as_ref() {
+        Some(old) if old.engine() && m.engine() => {
+            store::config_set_after_address_change(p, pinned, &m, old, now)
+        }
+        _ => store::config_set(p, pinned, &m, true, now),
+    };
+    let note = match config {
         Ok(n) => n,
         Err(e) => {
             eprintln!("tempo-launch: fleet add: {e}");
@@ -718,8 +735,8 @@ pub fn check_cmd(p: &Paths, who: &str, out: &mut dyn Write) -> i32 {
     }
 }
 
-/// The script that puts the key and the fleet's names on the other computer. The key travels on
-/// ssh's input, never on a command line.
+/// Send a fleet key to the native `install-key` command over SSH stdin.
+/// Used by key rotation; the key is never included in an argv string.
 fn install_script(key: &[u8; 32], name: &str, peers: &[(String, String)]) -> String {
     let peers: String = peers
         .iter()
@@ -733,163 +750,53 @@ fn install_script(key: &[u8; 32], name: &str, peers: &[(String, String)]) -> Str
 
 pub fn setup_cmd(
     p: &Paths,
-    pinned: Option<PathBuf>,
+    _pinned: Option<PathBuf>,
     who: &str,
     yes: bool,
     ask: &mut dyn FnMut(&str) -> bool,
     out: &mut dyn Write,
 ) -> i32 {
-    let (target, m) = match ssh_target(p, who) {
-        Ok(t) => t,
+    let plan = match bootstrap::prepare(who) {
+        Ok(plan) => plan,
         Err(e) => {
             eprintln!("tempo-launch: fleet setup: {e}");
-            return 2;
+            return 1;
         }
     };
-    let Some(m) = m else {
-        eprintln!("tempo-launch: fleet setup: add {who} to the fleet first: tempo-launch fleet add <its address> --name {who}");
-        return 2;
-    };
-    if m.addr.parse::<std::net::IpAddr>().is_err() {
-        eprintln!("tempo-launch: fleet setup: give {} as an address (Ollama is told to listen on it): tempo-launch fleet add <address> --name {}", m.name, m.name);
-        return 2;
-    }
-    let with_launch = {
-        let a = ssh::args_for(&target, &["sh".into(), "-s".into()]);
-        match a.and_then(|a| ssh::run(&a, Some(ssh::CHECK_SCRIPT), Duration::from_secs(30))) {
-            Ok(s) if s.ok => {
-                let c = ssh::parse_check(&s.out);
-                for l in c.lines() {
-                    let _ = writeln!(out, "  {l}");
-                }
-                record_ssh(p, &m.name, true, "ok", Some(c.to_j()));
-                !c.launch.is_empty()
-            }
-            Ok(s) => {
-                eprintln!(
-                    "tempo-launch: fleet setup: ssh to {who} failed: {}",
-                    first_line(&s.err)
-                );
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("tempo-launch: fleet setup: {e}");
-                return 1;
-            }
-        }
-    };
-    let _ = store::init_key(p);
-    let Some(key) = store::read_key(p) else {
-        eprintln!("tempo-launch: fleet setup: the fleet key could not be made");
-        return 1;
-    };
-    let me_addr = scan::listen_addrs(&scan::local_addrs())
-        .first()
-        .map(|a| a.to_string());
-    let me = store::load(p).me;
-    let mut steps = ssh::setup_steps(&m.addr, with_launch);
-    let mut peers = vec![];
-    let my_id = pair::identity(p)
-        .map(|sk| crypto::hex(sk.verifying_key().as_bytes()))
-        .unwrap_or_default();
-    if let Some(a) = me_addr {
-        peers.push((me.clone(), format!("{a}#{my_id}")));
-    }
-    steps.insert(
-        0,
-        ssh::Step {
-            why: "the fleet key goes to the other computer, over ssh (it is not shown), with this computer's name and address",
-            shown: format!(
-                "tempo-launch fleet install-key --name {} {}   (the key is sent on ssh's input)",
-                m.name,
-                peers.iter().map(|(n, a)| format!("--peer {n}={a}")).collect::<Vec<_>>().join(" ")
-            ),
-            script: install_script(&key, &m.name, &peers),
-        },
-    );
-    if with_launch {
-        steps.push(ssh::Step {
-            why: "the fleet messenger starts there",
-            shown: "nohup tempo-launch fleet serve --quiet >/dev/null 2>&1 &".into(),
-            script: "PATH=\"$PATH:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin\"\nnohup tempo-launch fleet serve --quiet >/dev/null 2>&1 &\n".into(),
-        });
-    }
     let _ = writeln!(
         out,
-        "\nOn {} ({target}) Tempo will run, over your own ssh:\n",
-        m.name
+        "{} ({}) at {}:{}; Tempo {} is already installed in {}.",
+        plan.name,
+        plan.target,
+        plan.private_addr,
+        plan.port,
+        plan.installed_version.tag(),
+        plan.home
     );
-    for (i, s) in steps.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "{}. {}\n{}\n",
-            i + 1,
-            s.why,
-            s.shown
-                .trim_end()
-                .lines()
-                .map(|l| format!("     {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
-    if !yes && !ask("Run these now? [y/N] ") {
-        let _ = writeln!(out, "Nothing was run.");
+    let _ = writeln!(
+        out,
+        "This sends the fleet key on SSH input and starts the messenger. Ollama, models and sign-in settings stay as they are."
+    );
+    if !yes && !ask("Link this computer now? [y/N] ") {
+        let _ = writeln!(out, "Nothing was changed.");
         return 0;
     }
-    let mut remote_id = String::new();
-    for (i, s) in steps.iter().enumerate() {
-        let r = ssh::args_for(&target, &["sh".into(), "-s".into()])
-            .and_then(|a| ssh::run(&a, Some(&s.script), Duration::from_secs(900)));
-        match r {
-            Ok(said) => {
-                // the other computer's identity, to pin: its line is kept, not shown
-                for l in said.out.lines() {
-                    match l.strip_prefix("identity=") {
-                        Some(id) if id.len() == 64 && crypto::unhex(id).is_some() => {
-                            remote_id = id.to_string()
-                        }
-                        _ => {
-                            let _ = writeln!(out, "{l}");
-                        }
-                    }
-                }
-                if !said.ok {
-                    eprintln!(
-                        "tempo-launch: fleet setup: step {} failed: {}",
-                        i + 1,
-                        first_line(&said.err)
-                    );
-                    return 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("tempo-launch: fleet setup: step {} failed: {e}", i + 1);
-                return 1;
-            }
+    let approval = plan.approval();
+    match bootstrap::apply(p, &plan, Some(&approval)) {
+        Ok(()) => {
+            let _ = writeln!(
+                out,
+                "{} is linked. Ollama, models and sign-in settings were left as they are.",
+                plan.name
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("tempo-launch: fleet setup: {e}");
+            1
         }
     }
-    let role = if m.engine() {
-        m.role.clone()
-    } else {
-        "both".into()
-    };
-    let code = add(p, pinned, &m.addr, Some(&role), Some(&m.name), out);
-    if code == 0 && !remote_id.is_empty() {
-        let _ = store::update(p, |f| {
-            if let Some(x) = f.machines.iter_mut().find(|x| x.name == m.name) {
-                x.id = remote_id.clone();
-            }
-        });
-    } else if code == 0 {
-        let _ = writeln!(out, "Its identity was not reported (an older Tempo there?), so its messages will not be trusted yet. Update Tempo there and run `fleet setup {}` again, or add it with `fleet invite` and `fleet join`.", m.name);
-    }
-    if code == 0 {
-        let _ = writeln!(out, "{} is set up and linked here.", m.name);
-    }
-    code
 }
-
 /// `fleet install-key`: what the other end of `fleet setup` runs. The key comes on standard
 /// input as hex; an existing different key is kept aside, never overwritten.
 pub fn install_key(
@@ -923,12 +830,20 @@ pub fn install_key(
             if let Some((n, rest)) = pe.split_once('=') {
                 let (a, id) = rest.split_once('#').unwrap_or((rest, ""));
                 let n = store::clean_name(n);
-                if allowed_remote_host(a) && !n.is_empty() && f.find(&n).is_none() {
-                    f.machines.push(Machine::new(&n, a, "both"));
-                }
-                if let (Some(i), true) = (f.find(&n), id.len() == 64 && crypto::unhex(id).is_some())
-                {
-                    f.machines[i].id = id.to_string();
+                if allowed_remote_host(a) && !n.is_empty() {
+                    let i = match f.find(&n) {
+                        Some(i) => {
+                            f.machines[i].addr = a.to_string();
+                            i
+                        }
+                        None => {
+                            f.machines.push(Machine::new(&n, a, "both"));
+                            f.machines.len() - 1
+                        }
+                    };
+                    if id.len() == 64 && crypto::unhex(id).is_some() {
+                        f.machines[i].id = id.to_string();
+                    }
                 }
             }
         }
@@ -1236,6 +1151,7 @@ pub fn apply_proposal(
 
 // ---- adding a computer: invite and join
 
+#[cfg(not(test))]
 fn hello_answers(port: u16) -> bool {
     let a = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     crate::http_get_at(
@@ -1255,26 +1171,9 @@ pub fn invite_cmd(p: &Paths, wait: bool, out: &mut dyn Write) -> i32 {
         return 1;
     }
     let port = store::fleet_port();
-    if !hello_answers(port) {
-        // the messenger has to be up to hear the new computer knock
-        if let Ok(exe) = std::env::current_exe() {
-            let mut c = std::process::Command::new(exe);
-            c.args(["fleet", "serve", "--quiet"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let _ = crate::spawn_hidden(&mut c);
-        }
-        for _ in 0..50 {
-            if hello_answers(port) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if !hello_answers(port) {
-            eprintln!("tempo-launch: fleet invite: the messenger did not start. Run `tempo-launch fleet serve` in another window and try again.");
-            return 1;
-        }
+    if !ensure_invite_messenger(port) {
+        eprintln!("tempo-launch: fleet invite: the messenger did not start. Run `tempo-launch fleet serve` in another window and try again.");
+        return 1;
     }
     let inv = match pair::create_invite(p, store::now_s()) {
         Ok(i) => i,
@@ -1288,7 +1187,7 @@ pub fn invite_cmd(p: &Paths, wait: bool, out: &mut dyn Write) -> i32 {
         "Add a computer to the band.\n\nInstall Tempo on the new computer, then run this there:\n\n    tempo-launch fleet join\n\nWhen it asks, give it this code:\n\n        {}\n\nIt works once, for 10 minutes, and only on your own network. Waiting here for it.",
         inv.code
     );
-    if !wait {
+    if !wait || cfg!(test) {
         return 0;
     }
     let before: Vec<String> = store::load(p)
@@ -1321,6 +1220,37 @@ pub fn invite_cmd(p: &Paths, wait: bool, out: &mut dyn Write) -> i32 {
         None => {
             let _ = writeln!(out, "\nThat code was used up by wrong tries. Run `tempo-launch fleet invite` for a fresh one.");
             1
+        }
+    }
+}
+
+fn ensure_invite_messenger(port: u16) -> bool {
+    #[cfg(test)]
+    {
+        let _ = port;
+        true
+    }
+    #[cfg(not(test))]
+    {
+        if !hello_answers(port) {
+            // A test harness is not the fleet messenger, so only a real launch may start it.
+            if let Ok(exe) = std::env::current_exe() {
+                let mut c = std::process::Command::new(exe);
+                c.args(["fleet", "serve", "--quiet"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                let _ = crate::spawn_hidden(&mut c);
+            }
+            for _ in 0..50 {
+                if hello_answers(port) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            hello_answers(port)
+        } else {
+            true
         }
     }
 }
@@ -1412,50 +1342,22 @@ pub fn real_exec(_why: &str, argv: &[String], stdin: Option<&str>) -> bool {
     }
 }
 
-/// After joining: this computer gets ready to play. Ollama listens on the private address (the
-/// engine only), Tempo sets itself up, and the messenger starts and is kept running.
-pub fn configure_self(ctx: &Ctx, role: &str, out: &mut dyn Write, exec: Exec) {
-    let own = scan::listen_addrs(&scan::local_addrs());
-    if role == "engine" {
-        match (own.first(), cfg!(unix)) {
-            (Some(a), true) => {
-                let _ = writeln!(out, "Starting Ollama on {a}, for your own network only...");
-                let step = &ssh::setup_steps(&a.to_string(), true)[0];
-                if !exec("ollama", &["sh".into(), "-s".into()], Some(&step.script)) {
-                    let _ = writeln!(
-                        out,
-                        "That did not work. By hand: OLLAMA_HOST={a}:11434 ollama serve"
-                    );
-                }
-            }
-            (Some(a), false) => {
-                let _ = writeln!(out, "To let the band use this computer's models, set OLLAMA_HOST to {a}:11434 (Windows: `setx OLLAMA_HOST {a}:11434`), then restart Ollama.");
-            }
-            _ => {}
-        }
-    }
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tempo-launch"));
+/// A join does not configure Ollama, download models, or change learning/sign-in settings.
+pub fn configure_self(ctx: &Ctx, _role: &str, out: &mut dyn Write, _exec: Exec) {
+    autostart(ctx);
     let _ = writeln!(
         out,
-        "Getting Tempo ready here (it fetches what is missing and asks nothing)..."
+        "The fleet link is in place. Ollama, models and sign-in settings were left as they are."
     );
-    let argv = [
-        exe.to_string_lossy().into_owned(),
-        "setup".into(),
-        "--apply".into(),
-        "--yes".into(),
-    ];
-    if !exec("setup", &argv, None) {
-        let _ = writeln!(
-            out,
-            "Setup did not finish. Run `tempo-launch setup --apply` when you are ready."
-        );
-    }
-    schedule(ctx, &exe, false);
-    autostart(ctx);
-    let _ = writeln!(out, "The messenger is running here and starts with this computer. See the band on `tempo-launch fleet page`.");
+    let _ = writeln!(
+        out,
+        "The fleet messenger start was requested. Check received health on your main computer."
+    );
+    let _ = writeln!(
+        out,
+        "When you want to choose models, run `tempo-launch setup --apply` yourself."
+    );
 }
-
 /// `fleet join`: find the main computer, say who it is, ask for the code, and play along.
 pub fn join_cmd(
     ctx: &Ctx,
@@ -1718,25 +1620,32 @@ pub fn rotate_cmd(
 /// `tempo-launch start`: when the fleet has more than one machine, start the messenger (it ends
 /// at once if one is already running).
 pub fn autostart(ctx: &Ctx) {
-    let p = Paths::of(ctx);
-    if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
-        return;
+    #[cfg(test)]
+    {
+        let _ = ctx;
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let log = crate::open_log(&ctx.log_path("fleet")).ok();
-    let mut c = std::process::Command::new(exe);
-    c.args(["fleet", "serve", "--quiet"])
-        .stdin(std::process::Stdio::null());
-    match log.and_then(|l| l.try_clone().ok().map(|l2| (l, l2))) {
-        Some((a, b)) => c.stdout(a).stderr(b),
-        None => c
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    };
-    if let Err(e) = crate::spawn_hidden(&mut c) {
-        ctx.note(&format!("fleet: could not start the messenger: {e}"));
+    #[cfg(not(test))]
+    {
+        let p = Paths::of(ctx);
+        if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let log = crate::open_log(&ctx.log_path("fleet")).ok();
+        let mut c = std::process::Command::new(exe);
+        c.args(["fleet", "serve", "--quiet"])
+            .stdin(std::process::Stdio::null());
+        match log.and_then(|l| l.try_clone().ok().map(|l2| (l, l2))) {
+            Some((a, b)) => c.stdout(a).stderr(b),
+            None => c
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        };
+        if let Err(e) = crate::spawn_hidden(&mut c) {
+            ctx.note(&format!("fleet: could not start the messenger: {e}"));
+        }
     }
 }
 

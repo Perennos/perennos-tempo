@@ -224,6 +224,7 @@ fn add_remove_and_toggle_write_the_settings_and_keep_a_backup() {
         said.contains("Switched on") && store::load(&p).machines.len() == 1,
         "{said}"
     );
+    assert_eq!(store::load(&p).machines[0].addr, "192.168.0.20");
     assert_eq!(settings(&p).strs("ollama_fallbacks").len(), 2);
 
     let (c, _) = out_of(|o| remove(&p, None, "tower", o));
@@ -234,6 +235,56 @@ fn add_remove_and_toggle_write_the_settings_and_keep_a_backup() {
         ["http://10.0.0.99:11434"]
     );
     assert_eq!(out_of(|o| remove(&p, None, "tower", o)).0, 1);
+}
+
+#[test]
+fn explicit_engine_address_update_migrates_only_unshared_fallbacks() {
+    let p = paths("address-migration");
+    std::fs::create_dir_all(&p.agent_data).unwrap();
+    std::fs::write(
+        p.agent_data.join("config.json"),
+        "{\"ollama_fallbacks\":[\"http://10.0.0.99:11434\"]}",
+    )
+    .unwrap();
+    let tower = Machine::new("tower", "192.168.0.20", "engine");
+    store::update(&p, |f| f.machines.push(tower.clone())).unwrap();
+    store::config_set(&p, None, &tower, true, store::now_s()).unwrap();
+    let other = Machine::new("other", "192.168.0.20", "engine");
+    store::update(&p, |f| f.machines.push(other.clone())).unwrap();
+    store::config_set(&p, None, &other, true, store::now_s()).unwrap();
+
+    let (code, said) = out_of(|o| add(&p, None, "192.168.0.21", Some("engine"), Some("tower"), o));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        settings(&p).strs("ollama_fallbacks"),
+        [
+            "http://10.0.0.99:11434",
+            "http://192.168.0.20:11434",
+            "http://192.168.0.21:11434"
+        ]
+    );
+    assert_eq!(
+        settings(&p)
+            .get("hosts")
+            .unwrap()
+            .get("other")
+            .unwrap()
+            .strs("urls"),
+        ["http://192.168.0.20:11434"]
+    );
+
+    assert_eq!(out_of(|o| remove(&p, None, "other", o)).0, 0);
+    assert_eq!(
+        settings(&p).strs("ollama_fallbacks"),
+        ["http://10.0.0.99:11434", "http://192.168.0.21:11434"]
+    );
+
+    let (code, said) = out_of(|o| add(&p, None, "192.168.0.22", Some("engine"), Some("tower"), o));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        settings(&p).strs("ollama_fallbacks"),
+        ["http://10.0.0.99:11434", "http://192.168.0.22:11434"]
+    );
 }
 
 #[test]
@@ -362,10 +413,14 @@ d="$(dirname "$0")"
 echo "$@" >> "$d/log"
 case "$*" in *10.0.0.33*) echo "Permission denied (publickey)." >&2; exit 255;; esac
 case "$*" in
+  *"-G "*) printf 'hostname 10.0.0.9\nport 22\nproxycommand none\nproxyjump none\n';;
   *"sh -s"*)
     input=$(cat)
     printf '%s\n--END--\n' "$input" >> "$d/stdin"
     case "$input" in *install-key*) printf 'The fleet key is in place.\nidentity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';; esac
+    case "$input" in *__TEMPO_BOOTSTRAP_BEGIN__*) printf '__TEMPO_BOOTSTRAP_BEGIN__\nos=Linux\narch=x86_64\nname=system-host\nlauncher=/home/setupbox/.local/bin/tempo-launch\nversion=tempo-launch 2.1.0\nhome_json={"home":"/home/setupbox/.local/state/perennos-tempo"}\nfleet_port=8770\n__TEMPO_BOOTSTRAP_END__\n';; esac
+    case "$input" in *fleet.json*) printf 'me=setupbox\n';; esac
+    case "$input" in *"command -v curl"*) printf 'messenger=ready\n';; esac
     case "$input" in *nproc*) printf 'os=Linux x86_64\ncpus=8\nram_kb=16777216\ngpu=NVIDIA Test GPU, 8192 MiB\ndisk_kb=104857600\nlaunch=tempo-launch 2.0.1\nollama=ollama version is 0.5.1\n';; esac;;
   *) echo "ran: $*";;
 esac
@@ -481,17 +536,14 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
         )
     });
     assert_eq!((c, asked), (0, 1));
-    assert!(
-        said.contains("OLLAMA_HOST=127.0.0.1:11434") && said.contains("setup --apply --yes"),
-        "{said}"
-    );
-    assert!(said.contains("Nothing was run"));
+    assert!(said.contains("Tempo v2.1.0 is already installed"), "{said}");
+    assert!(said.contains("Nothing was changed"));
     // a yes
     let (c, said) = out_of(|o| setup_cmd(&p, None, "setupbox", true, &mut |_| true, o));
     assert_eq!(c, 0, "{said}");
     let key = crypto::hex(&store::read_key(&p).unwrap());
     let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
-    assert!(stdin.contains("install-key --name setupbox"));
+    assert!(stdin.contains("install-key --name 'setupbox'"));
     assert!(stdin.contains(&key), "the key goes in ssh's input");
     assert!(
         !std::fs::read_to_string(dir.join("log"))
@@ -499,7 +551,7 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
             .contains(&key),
         "never on a command line"
     );
-    assert!(said.contains("is set up and linked here"));
+    assert!(said.contains("is linked."));
     assert_eq!(
         store::load(&p).machines[0].id,
         "a".repeat(64),
@@ -507,6 +559,8 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
     );
     assert!(!said.contains("identity="));
     assert!(store::load(&p).machines[0].enabled);
+    assert_eq!(store::load(&p).machines[0].role, "engine");
+    assert_eq!(store::load(&p).machines[0].addr, "10.0.0.9");
     let mode_ok = {
         #[cfg(unix)]
         {
@@ -750,6 +804,76 @@ fn answered(port: u16, wire: &[u8], who: &Rig) -> bool {
     read_frame(&mut s, &KEY, &|_| Some(vk)).is_ok()
 }
 
+fn fake_peer(owner: &Rig, name: &str, sk: &SigningKey) -> (Machine, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let id = crypto::hex(sk.verifying_key().as_bytes());
+    (know(owner, name, port, &id), listener)
+}
+
+fn fake_replies(
+    listener: TcpListener,
+    requester: ed25519_dalek::VerifyingKey,
+    signer: SigningKey,
+    count: usize,
+    reply: impl Fn(Frame, usize) -> Frame + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for i in 0..count {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let request = read_frame(&mut stream, &KEY, &|_| Some(requester)).unwrap();
+            stream
+                .write_all(&encode(&KEY, &signer, &reply(request, i)))
+                .unwrap();
+        }
+    })
+}
+
+fn fake_ping(tag: &str, reply: impl Fn(Frame) -> Frame + Send + 'static) -> Result<u64, String> {
+    let owner = rig(tag, KEY);
+    let signer = SigningKey::from_bytes(&[71; 32]);
+    let (peer, listener) = fake_peer(&owner, "remote", &signer);
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        signer,
+        1,
+        move |request, _| reply(request),
+    );
+    let result = owner.node.ping(&peer);
+    replies.join().unwrap();
+    result
+}
+
+fn fake_pings_with_replayed_nonce(tag: &str) -> (Result<u64, String>, Result<u64, String>) {
+    let owner = rig(tag, KEY);
+    let recipient = tag.to_string();
+    let signer = SigningKey::from_bytes(&[72; 32]);
+    let (peer, listener) = fake_peer(&owner, "remote", &signer);
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        signer,
+        2,
+        move |request, _| Frame {
+            kind: 'o',
+            id: request.id,
+            from: "remote".into(),
+            to: recipient.clone(),
+            ts: store::now_ms(),
+            nonce: "reused-pong-nonce".into(),
+            ..Frame::default()
+        },
+    );
+    let first = owner.node.ping(&peer);
+    let second = owner.node.ping(&peer);
+    replies.join().unwrap();
+    (first, second)
+}
+
 #[test]
 fn only_a_good_new_frame_for_this_node_is_answered() {
     let b = rig("recv", KEY);
@@ -899,6 +1023,199 @@ fn lock_first_outbox(a: &Rig) -> String {
     let db = rusqlite::Connection::open(a.paths.file("fleet.db")).unwrap();
     db.query_row("SELECT id FROM outbox LIMIT 1", [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn a_signed_ack_from_another_pinned_member_is_refused() {
+    let owner = rig("ack-sender", KEY);
+    let peer_sk = SigningKey::from_bytes(&[73; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    let other_sk = SigningKey::from_bytes(&[74; 32]);
+    know(
+        &owner,
+        "other",
+        peer.port,
+        &crypto::hex(other_sk.verifying_key().as_bytes()),
+    );
+    owner.node.enqueue("peer", "note", b"pending").unwrap();
+    let to = owner.node.me.clone();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        other_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "other".into(),
+            to: to.clone(),
+            ts: store::now_ms(),
+            nonce: "wrong-sender".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn a_signed_ack_for_another_recipient_is_refused() {
+    let owner = rig("ack-recipient", KEY);
+    let peer_sk = SigningKey::from_bytes(&[75; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    owner.node.enqueue("peer", "note", b"pending").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        peer_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "someone-else".into(),
+            ts: store::now_ms(),
+            nonce: "wrong-recipient".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn an_ack_for_another_queued_row_is_refused_without_marking_either_row() {
+    let owner = rig("ack-row", KEY);
+    let peer_sk = SigningKey::from_bytes(&[76; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    owner.node.enqueue("peer", "note", b"first").unwrap();
+    let other_id = owner.node.enqueue("peer", "note", b"second").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        peer_sk,
+        1,
+        move |_, _| Frame {
+            kind: 'a',
+            id: other_id.clone(),
+            from: "peer".into(),
+            to: "ack-row".into(),
+            ts: store::now_ms(),
+            nonce: "wrong-row".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 2);
+}
+
+#[test]
+fn stale_and_replayed_signed_acks_are_refused() {
+    let stale_owner = rig("ack-stale", KEY);
+    let stale_sk = SigningKey::from_bytes(&[77; 32]);
+    let (stale_peer, listener) = fake_peer(&stale_owner, "peer", &stale_sk);
+    stale_owner
+        .node
+        .enqueue("peer", "note", b"pending")
+        .unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&stale_owner.node.identity_hex()),
+        stale_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "ack-stale".into(),
+            ts: store::now_ms() - 10 * 60_000,
+            nonce: "stale-ack".into(),
+            ..Frame::default()
+        },
+    );
+    let stale = stale_owner.node.deliver(&stale_peer);
+    replies.join().unwrap();
+    assert!(matches!(stale, Err(e) if e.contains("clock")));
+    assert_eq!(stale_owner.node.queued(Some("peer")), 1);
+
+    let replay_owner = rig("ack-replay", KEY);
+    let replay_sk = SigningKey::from_bytes(&[78; 32]);
+    let (replay_peer, listener) = fake_peer(&replay_owner, "peer", &replay_sk);
+    replay_owner.node.enqueue("peer", "note", b"first").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&replay_owner.node.identity_hex()),
+        replay_sk,
+        2,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "ack-replay".into(),
+            ts: store::now_ms(),
+            nonce: "replayed-ack".into(),
+            ..Frame::default()
+        },
+    );
+    let first = replay_owner.node.deliver(&replay_peer);
+    replay_owner
+        .node
+        .enqueue("peer", "note", b"second")
+        .unwrap();
+    let replayed = replay_owner.node.deliver(&replay_peer);
+    replies.join().unwrap();
+    assert_eq!(first, Ok(1));
+    assert!(matches!(replayed, Err(e) if e.contains("replay")));
+    assert_eq!(replay_owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn signed_pongs_must_match_the_ping_and_pass_the_guard() {
+    let wrong = fake_ping("pong-wrong", |_request| Frame {
+        kind: 'o',
+        id: "not-the-ping".into(),
+        from: "remote".into(),
+        to: "pong-wrong".into(),
+        ts: store::now_ms(),
+        nonce: "wrong-pong".into(),
+        ..Frame::default()
+    });
+    assert!(matches!(wrong, Err(e) if e == "unexpected answer"));
+
+    let stale = fake_ping("pong-stale", |request| Frame {
+        kind: 'o',
+        id: request.id,
+        from: "remote".into(),
+        to: "pong-stale".into(),
+        ts: store::now_ms() - 10 * 60_000,
+        nonce: "stale-pong".into(),
+        ..Frame::default()
+    });
+    assert!(matches!(stale, Err(e) if e.contains("clock")));
+
+    let valid = fake_ping("pong-valid", |request| Frame {
+        kind: 'o',
+        id: request.id,
+        from: "remote".into(),
+        to: "pong-valid".into(),
+        ts: store::now_ms(),
+        nonce: "valid-pong".into(),
+        ..Frame::default()
+    });
+    assert!(valid.is_ok());
+
+    let (first, replayed) = fake_pings_with_replayed_nonce("pong-replay");
+    assert!(first.is_ok());
+    assert!(matches!(replayed, Err(e) if e.contains("replay")));
 }
 
 #[test]

@@ -9,6 +9,16 @@ concurrency:
   group: products-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  controls:
+    name: Controls archive tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build, extract and verify controls archives
+        run: python3 -m unittest discover -s tests -p test_control_bundle.py -v
+
   crates:
     name: ${{ matrix.crate }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
