@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub mod bank;
 pub mod brand;
 pub mod conductor;
+pub mod conformance;
 pub mod fleet;
 pub mod home;
 pub mod retune;
@@ -175,6 +176,8 @@ usage: tempo-launch [command]
                     list a session's edits, or apply them to a copy, make a GGUF and run the Rehearsal against the same weights unedited (--band: the band plays it once it passes)
   retune undo MODEL | SESSION --edit | versions [MODEL]
                     step back to the version before (or take the last edit off a session), and every version kept
+  conformance --case ID --out NEW_DIRECTORY [--edition cayman|general]
+                    write the fixed-file evidence report; incomplete evidence returns 2
   version
 
 A perennos-tempo: web link (the Store app registers it) is accepted in place of a command:
@@ -1992,6 +1995,8 @@ pub enum Cmd {
     Woodshed(woodshed::WoodCmd),
     /// `retune ...`: Retune (weight edits), see docs/RETUNE.md.
     Retune(retune::RetuneCmd),
+    /// `conformance`: export fixed-file evidence without certifying legal compliance.
+    Conformance(conformance::Opts),
     Help,
     Version,
 }
@@ -2134,6 +2139,9 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "stage" => Cmd::Stage(stage::parse_args(&rest)?),
         "woodshed" => Cmd::Woodshed(woodshed::parse_args(&rest)?),
         "retune" => Cmd::Retune(retune::parse_args(&rest)?),
+        "conformance" => Cmd::Conformance(conformance::parse_args(
+            &rest.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+        )?),
         "help" | "--help" | "-h" | "/?" => Cmd::Help,
         "version" | "--version" | "-V" => Cmd::Version,
         other => return Err(format!("unknown command: {other}")),
@@ -2205,6 +2213,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
         Cmd::Stage(s) => Ok(stage::run(ctx, s)),
         Cmd::Woodshed(w) => Ok(woodshed::run(ctx, w)),
         Cmd::Retune(r) => Ok(retune::run(ctx, r)),
+        Cmd::Conformance(o) => Ok(conformance::run(ctx, &o)),
         Cmd::Schedule {
             remove,
             print,
