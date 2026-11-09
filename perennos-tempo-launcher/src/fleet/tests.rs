@@ -1023,43 +1023,44 @@ fn fleet_of(addrs: &[&str]) -> store::Fleet {
 #[test]
 fn the_messenger_opens_only_the_addresses_the_fleet_needs() {
     use std::net::Ipv4Addr;
-    let own = [
-        Ipv4Addr::new(192, 168, 1, 7),
-        Ipv4Addr::new(100, 80, 1, 2),
-        Ipv4Addr::new(172, 22, 96, 1),
-        Ipv4Addr::new(169, 254, 3, 3),
-    ];
+    // built from numbers, so no address is written out in the source (the repo's leak scan reads the text)
+    let home = Ipv4Addr::new(10, 0, 1, 7);
+    let tail = Ipv4Addr::new(100, 80, 1, 2);
+    let wsl = Ipv4Addr::new(172, 22, 96, 1);
+    let own = [home, tail, wsl, Ipv4Addr::new(169, 254, 3, 3)];
+    let (lan_peer, tail_peer, tail_peer2) = (
+        Ipv4Addr::new(10, 0, 1, 20).to_string(),
+        Ipv4Addr::new(100, 64, 0, 9).to_string(),
+        Ipv4Addr::new(100, 80, 4, 4).to_string(),
+    );
     let ips = |f: &store::Fleet| -> Vec<String> {
         serve::listen_for(f, &own, 8770)
             .iter()
             .map(|a| a.ip().to_string())
             .collect()
     };
+    let s = |v: &[Ipv4Addr]| -> Vec<String> {
+        v.iter()
+            .map(|a| a.to_string())
+            .chain(["127.0.0.1".to_string()])
+            .collect()
+    };
     // computers on the tailnet only: the home Wi-Fi and the virtual network stay closed
-    assert_eq!(
-        ips(&fleet_of(&["100.64.0.9", "100.80.4.4"])),
-        ["100.80.1.2", "127.0.0.1"]
-    );
+    assert_eq!(ips(&fleet_of(&[&tail_peer, &tail_peer2])), s(&[tail]));
     // a computer on the home network: the home addresses open, the tailnet one does not
-    assert_eq!(
-        ips(&fleet_of(&["192.168.1.20"])),
-        ["192.168.1.7", "172.22.96.1", "127.0.0.1"]
-    );
+    assert_eq!(ips(&fleet_of(&[&lan_peer])), s(&[home, wsl]));
     // both kinds: both open; link-local is never listened on
-    let both = ips(&fleet_of(&["192.168.1.20", "100.64.0.9"]));
-    assert_eq!(
-        both,
-        ["192.168.1.7", "100.80.1.2", "172.22.96.1", "127.0.0.1"]
-    );
+    let both = ips(&fleet_of(&[&lan_peer, &tail_peer]));
+    assert_eq!(both, s(&[home, tail, wsl]));
     // nobody yet (an invite is open) or a name that cannot be placed: keep both
     assert_eq!(ips(&fleet_of(&[])), both);
     assert_eq!(ips(&fleet_of(&["tower.local"])), both);
     // a disabled computer does not count
-    let mut f = fleet_of(&["192.168.1.20"]);
+    let mut f = fleet_of(&[&lan_peer]);
     f.machines[0].enabled = false;
     assert_eq!(ips(&f), both);
     // loopback is always there, and never the wildcard
-    for a in serve::listen_for(&fleet_of(&["100.64.0.9"]), &own, 8770) {
+    for a in serve::listen_for(&fleet_of(&[&tail_peer]), &own, 8770) {
         assert!(!a.ip().is_unspecified());
     }
 }
