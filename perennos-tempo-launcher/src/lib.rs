@@ -953,8 +953,25 @@ pub fn signed(body: &str, signs: &[&str]) -> bool {
     signs.iter().any(|s| flat.contains(s))
 }
 
+// Test-local override: only the owning test thread can suppress and count health probes.
+#[cfg(test)]
+thread_local! {
+    static STATUS_FAKE_PROBES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// The app's health answer on `port`, if the app is what answers there.
 pub fn answers(app: &App, port: u16) -> Option<String> {
+    #[cfg(test)]
+    if STATUS_FAKE_PROBES.with(|state| {
+        if let Some(count) = state.get() {
+            state.set(Some(count + 1));
+            true
+        } else {
+            false
+        }
+    }) {
+        return None;
+    }
     // the agent checks its model hosts before it answers
     let t = Duration::from_secs(if app.id == "agent" { 15 } else { 3 });
     match http_get(port, app.health, t) {
@@ -4046,6 +4063,13 @@ mod tests {
 
     #[test]
     fn a_missing_or_broken_remote_file_is_no_apps_and_never_a_crash() {
+        struct ProbeGuard(Option<usize>);
+        impl Drop for ProbeGuard {
+            fn drop(&mut self) {
+                STATUS_FAKE_PROBES.with(|state| state.set(self.0));
+            }
+        }
+        let _guard = ProbeGuard(STATUS_FAKE_PROBES.with(|state| state.replace(Some(0))));
         let root = tmp("remote-file");
         let ctx = ctx_in(&root);
         assert_eq!(load_remote(&ctx.home), (vec![], vec![]), "missing file");
@@ -4083,6 +4107,10 @@ mod tests {
         assert_eq!(apps[0].sign, "\"app\":\"tempo-vault\"");
         assert_eq!(warns.len(), 2, "{warns:?}");
         assert!(warns[0].contains("evil") && warns[0].contains("not a tailnet or private"));
+        assert_eq!(
+            STATUS_FAKE_PROBES.with(|state| state.get()),
+            Some(13 * (APPS.len() + 1))
+        );
         let _ = fs::remove_dir_all(root);
     }
 
