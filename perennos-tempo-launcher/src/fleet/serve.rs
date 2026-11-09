@@ -214,7 +214,7 @@ fn respond(s: &mut TcpStream, code: &str, body: &str) {
     );
 }
 
-/// A plain GET. `/hello` for a private address; `/fleet.json` for this computer only, and only
+/// A plain GET. `/hello` for a private address (the name only to this fleet or an inviting joiner); `/fleet.json` for this computer only, and only
 /// with a Host header that names it (a web page cannot reach it by a name it controls).
 fn header(head: &str, name: &str) -> Option<String> {
     head.lines().find_map(|l| {
@@ -275,16 +275,20 @@ fn http(node: &Arc<Node>, mut r: BufReader<TcpStream>, peer: SocketAddr, port: u
     }
     match path {
         "/hello" if crate::private_ip(peer.ip()) => {
-            let o = J::Obj(vec![
-                ("app".into(), J::s("tempo-fleet")),
-                ("name".into(), J::s(&node.me)),
-                ("v".into(), J::n(1.0)),
-                (
-                    "invite".into(),
-                    J::Bool(super::pair::invite_open(&node.paths)),
-                ),
-            ]);
-            respond(&mut s, "200 OK", &o.compact());
+            let invite = super::pair::invite_open(&node.paths);
+            // This computer's name is for its own fleet, and for a computer joining while an invite is open.
+            // Anyone else on the same network (a cafe's wifi, a shared tailnet) learns that Tempo is here, not who owns it.
+            let own = store::load(&node.paths)
+                .machines
+                .iter()
+                .any(|m| m.addr.parse::<IpAddr>().is_ok_and(|a| a == peer.ip()));
+            let mut o = vec![("app".to_string(), J::s("tempo-fleet"))];
+            if invite || own {
+                o.push(("name".into(), J::s(&node.me)));
+            }
+            o.push(("v".into(), J::n(1.0)));
+            o.push(("invite".into(), J::Bool(invite)));
+            respond(&mut s, "200 OK", &J::Obj(o).compact());
         }
         "/fleet.json" if local => {
             respond(&mut s, "200 OK", &view(&node.paths, Some(node)).compact())

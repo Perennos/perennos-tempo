@@ -561,7 +561,7 @@ pub fn enable(p: &Paths, pinned: Option<PathBuf>, who: &str, on: bool, out: &mut
 
 // ---- scan
 
-pub const SCAN_WORDS: &str = "What a scan does: it looks at the addresses on this computer's own home or office networks (the /24 around each of its addresses), the computers your tailnet lists, and mDNS. At each address it tries to connect, for a third of a second, to the ports of Ollama (11434), the Tempo agent (8765) and the Tempo fleet messenger (8770), at most 64 at a time; where something answers it reads one public page (the model list, or the health answer). It sends no password and no file, never looks at a public address, and changes nothing. Adding a computer to the fleet is a separate step, and yours.";
+pub const SCAN_WORDS: &str = "What a scan does: it looks at the addresses on this computer's own home or office networks (the /24 around each of its addresses), the computers your tailnet lists, and mDNS. At each address it tries to connect, for a third of a second, to the ports of Ollama (11434), the Tempo agent (8765) and the Tempo fleet messenger (8770), at most 64 at a time; where something answers it reads one open page, one that needs no password (the model list, or the health answer), from that same private address. It sends no password and no file, never looks at a public address, and changes nothing. Adding a computer to the fleet is a separate step, and yours.";
 
 pub fn scan_cmd(
     p: &Paths,
