@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Draw the PNG icons (and tempo.icns) for the Linux and macOS installers from the Perennos mark in
-installer/windows/art/make_art.py. Standard library only; run once, commit the output.
+"""Make the PNG icons (and tempo.icns) for the Linux and macOS installers from the official Perennos
+insignia (installer/windows/art/perennos-insignia.png) on its cream tile, the same icon as the Windows
+programs. Needs Pillow; run once, commit the output.
 
 usage: python3 make_icons.py OUT_DIR      (default: this folder)
 Files: <name>-<size>.png for sizes 16..256 (512 for tempo), and tempo.icns.
 """
+import io
 import os
 import struct
 import sys
@@ -13,19 +15,25 @@ sys.dont_write_bytecode = True
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "..", "windows", "art"))
 import make_art as art  # noqa: E402
+import make_insignia_icon as insignia  # noqa: E402
 
-ACCENTS = dict(art.ACCENTS)
-ACCENTS["tempo-field"] = (0x4F, 0xC3, 0xA1)
+NAMES = list(art.ACCENTS) + ["tempo-field"]   # the file names the installers use; every one is the same icon
 SIZES = [16, 32, 48, 64, 128, 256]
+
+
+def png(size):
+    buf = io.BytesIO()
+    insignia.tile(size).save(buf, "PNG", optimize=True)
+    return buf.getvalue()
 
 
 def main(out):
     os.makedirs(out, exist_ok=True)
-    for name, accent in ACCENTS.items():
+    for name in NAMES:
         sizes = SIZES + ([512] if name == "tempo" else [])
         pngs = {}
         for s in sizes:
-            data = art.png_bytes(s, s, art.draw_mark(s, accent))
+            data = png(s)
             pngs[s] = data
             with open(os.path.join(out, f"{name}-{s}.png"), "wb") as f:
                 f.write(data)

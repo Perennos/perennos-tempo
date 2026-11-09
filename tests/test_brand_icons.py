@@ -73,6 +73,39 @@ class Insignia(unittest.TestCase):
                 self.assertEqual(struct.unpack_from("<ii", bmp, 18), (size, size), pct)
 
 
+class EveryPlatform(unittest.TestCase):
+    """The Store logos and the Linux and macOS icons are the same icon: the insignia on the brand's cream."""
+    CREAM = (0xEC, 0xE6, 0xD8)
+
+    def cream_at(self, path, x, y):
+        w, h, rows = make_art.png_rows(str(path))
+        self.assertEqual((w, h), (w, w))
+        return tuple(rows[y][3 * x: 3 * x + 3])
+
+    def test_the_store_logos_carry_the_insignia_tile(self):
+        assets = ROOT / "installer" / "windows" / "msix" / "Assets"
+        for name in ("Square44x44Logo.targetsize-256.png", "Square44x44Logo.targetsize-256_altform-unplated.png",
+                     "Square44x44Logo.targetsize-256_altform-lightunplated.png"):
+            self.assertEqual(self.cream_at(assets / name, 18, 128), self.CREAM, name)
+        art_dir = ROOT / "installer" / "windows" / "store" / "art"
+        self.assertEqual(self.cream_at(art_dir / "app-tile-icon-300x300.png", 21, 150), self.CREAM)
+
+    def test_the_linux_and_macos_icons_carry_the_insignia_tile(self):
+        icons = ROOT / "installer" / "unix" / "icons"
+        for name in ("tempo", "tempo-vault", "tempo-room", "tempo-field"):
+            self.assertEqual(self.cream_at(icons / f"{name}-256.png", 18, 128), self.CREAM, name)
+        icns = (icons / "tempo.icns").read_bytes()
+        self.assertEqual(icns[:4], b"icns")
+        self.assertEqual(struct.unpack(">I", icns[4:8])[0], len(icns))
+
+    def test_no_generator_draws_the_old_tile_or_rewrites_the_program_icons(self):
+        for rel in ("installer/windows/msix/make_assets.py", "installer/unix/icons/make_icons.py"):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotIn("draw_mark(", text, rel)
+            self.assertNotIn("ico_bytes(", text, rel)
+            self.assertIn("make_insignia_icon", text, rel)
+
+
 class VersionDetails(unittest.TestCase):
     def test_each_program_says_perennos_and_names_its_part(self):
         for crate in CRATE_ICONS:
