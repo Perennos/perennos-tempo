@@ -30,13 +30,32 @@ fn valid_identifier(value: &str) -> bool {
 fn looks_secret_shaped(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     const PREFIXES: &[&str] = &[
-        "sk-proj-", "sk-ant-", "sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
-        "github_pat_", "hf_", "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-", "glpat-",
-        "npm_", "pypi-", "akia", "asia",
+        "sk-proj-",
+        "sk-ant-",
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "hf_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "xoxs-",
+        "glpat-",
+        "npm_",
+        "pypi-",
+        "akia",
+        "asia",
     ];
     value.char_indices().any(|(index, _)| {
         (index == 0 || matches!(value.as_bytes()[index - 1], b'_' | b'-'))
-            && PREFIXES.iter().any(|prefix| value[index..].starts_with(prefix))
+            && PREFIXES
+                .iter()
+                .any(|prefix| value[index..].starts_with(prefix))
     })
 }
 
@@ -46,7 +65,10 @@ fn lower_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N], String
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(format!("{label} must be {} lowercase hex characters", N * 2));
+        return Err(format!(
+            "{label} must be {} lowercase hex characters",
+            N * 2
+        ));
     }
     let bytes = unhex(value).ok_or_else(|| format!("{label} is malformed"))?;
     bytes
@@ -96,7 +118,9 @@ fn normalize_records(records: &J) -> Result<Vec<Receipt>, String> {
             .str("receipt_id")
             .ok_or_else(|| "receipt_id must be a string".to_string())?;
         if !valid_identifier(receipt_id) {
-            return Err("receipt_id must be 1-64 ASCII letters, digits, underscores or hyphens".into());
+            return Err(
+                "receipt_id must be 1-64 ASCII letters, digits, underscores or hyphens".into(),
+            );
         }
         let artifact_digest = row
             .str("artifact_digest")
@@ -381,7 +405,9 @@ fn read_identity(ctx: &Ctx) -> Result<SigningKey, String> {
     let requested = ctx.home.join("fleet-identity");
     if matches!(fs::symlink_metadata(&requested), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound)
     {
-        return Err("Fleet identity is missing; pair this computer before signing receipt batches".into());
+        return Err(
+            "Fleet identity is missing; pair this computer before signing receipt batches".into(),
+        );
     }
     let home = checked_path(&ctx.home, false, true)?;
     let identity = checked_path(&requested, false, false)?;
@@ -397,7 +423,10 @@ fn read_identity(ctx: &Ctx) -> Result<SigningKey, String> {
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if before.permissions().mode() & 0o077 != 0 || before.uid() != home_metadata.uid() {
-            return Err("Fleet identity must be owned by its private home and readable only by its owner".into());
+            return Err(
+                "Fleet identity must be owned by its private home and readable only by its owner"
+                    .into(),
+            );
         }
     }
     let mut file = open_read(&identity)?;
@@ -654,7 +683,9 @@ mod tests {
         if let J::Obj(fields) = batch {
             if let Some((_, J::Arr(rows))) = fields.iter_mut().find(|(key, _)| key == "records") {
                 if let Some(J::Obj(row)) = rows.first_mut() {
-                    if let Some((_, digest)) = row.iter_mut().find(|(key, _)| key == "artifact_digest") {
+                    if let Some((_, digest)) =
+                        row.iter_mut().find(|(key, _)| key == "artifact_digest")
+                    {
                         *digest = J::s(value);
                     }
                 }
@@ -679,7 +710,9 @@ mod tests {
         let home = temp_home();
         let trusted = identity(&home);
         let other_seed: [u8; 32] = random(32).try_into().unwrap();
-        let other_key = hex(SigningKey::from_bytes(&other_seed).verifying_key().as_bytes());
+        let other_key = hex(SigningKey::from_bytes(&other_seed)
+            .verifying_key()
+            .as_bytes());
         let batch = sign_batch(&ctx(home), "case_1", &records()).unwrap();
         assert!(verify_batch(&batch, &other_key, "case_1").is_err());
         assert!(verify_batch(&batch, &trusted, "case_2").is_err());
@@ -762,14 +795,27 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(output).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(output).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
     #[test]
     fn cli_options_reject_unknown_and_duplicate_flags() {
-        assert!(parse_export_args(&["--case", "case_1", "--case", "case_2", "--out", "x"]).is_err());
+        assert!(
+            parse_export_args(&["--case", "case_1", "--case", "case_2", "--out", "x"]).is_err()
+        );
         assert!(parse_export_args(&["--case", "case_1", "--out", "x", "--unknown", "y"]).is_err());
-        assert!(parse_verify_args(&["--signed", "x", "--trusted-key", &"a".repeat(64), "--signed", "y"]).is_err());
+        assert!(parse_verify_args(&[
+            "--signed",
+            "x",
+            "--trusted-key",
+            &"a".repeat(64),
+            "--signed",
+            "y"
+        ])
+        .is_err());
     }
 }

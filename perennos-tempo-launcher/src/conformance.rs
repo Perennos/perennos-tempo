@@ -691,7 +691,11 @@ fn signature_verification(ctx: &Ctx, opts: &Opts, section: &Section) -> J {
     };
     if section.hash.is_none() {
         return no_batch(
-            if opts.sign_receipts { "In progress" } else { "Untested" },
+            if opts.sign_receipts {
+                "In progress"
+            } else {
+                "Untested"
+            },
             "The fixed signed-receipts input is not available.",
         );
     }
@@ -1015,7 +1019,9 @@ fn render_markdown(
         .get("status")
         .and_then(json_is_string)
         .unwrap_or("In progress");
-    out.push_str(&format!("## Signature verification\n\nStatus: {signature_status}\n"));
+    out.push_str(&format!(
+        "## Signature verification\n\nStatus: {signature_status}\n"
+    ));
     if let Some(reason) = signature.get("reason").and_then(json_is_string) {
         out.push_str(&format!("{reason}\n"));
     }
@@ -1045,6 +1051,18 @@ mod tests {
     use std::cell::RefCell;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn private_dir(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(path).unwrap();
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(path).unwrap();
+    }
+
     fn temp() -> PathBuf {
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1052,7 +1070,7 @@ mod tests {
             .as_nanos();
         let path =
             std::env::temp_dir().join(format!("tempo-conformance-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
+        private_dir(&path);
         path
     }
 
@@ -1070,10 +1088,8 @@ mod tests {
     fn install_identity(context: &Ctx) -> String {
         use std::io::Write;
 
-        std::fs::create_dir_all(&context.home).unwrap();
-        let seed: [u8; 32] = crate::fleet::crypto::random(32)
-            .try_into()
-            .unwrap();
+        private_dir(&context.home);
+        let seed: [u8; 32] = crate::fleet::crypto::random(32).try_into().unwrap();
         let public_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
         let trusted_key = crate::fleet::crypto::hex(public_key.as_bytes());
         let path = context.home.join("fleet-identity");
@@ -1289,10 +1305,17 @@ mod tests {
 
         assert_eq!(export(&context, &options).unwrap().0, 2);
         let out = root.join("fresh-output");
-        let evidence = json::parse(&std::fs::read_to_string(out.join("evidence.json")).unwrap()).unwrap();
+        let evidence =
+            json::parse(&std::fs::read_to_string(out.join("evidence.json")).unwrap()).unwrap();
         let signature = evidence.get("signature_verification").unwrap();
-        assert_eq!(signature.get("status").and_then(json_is_string), Some("Verified complete"));
-        assert_eq!(evidence.get("status").and_then(json_is_string), Some("In progress"));
+        assert_eq!(
+            signature.get("status").and_then(json_is_string),
+            Some("Verified complete")
+        );
+        assert_eq!(
+            evidence.get("status").and_then(json_is_string),
+            Some("In progress")
+        );
         let batch = signature.get("batch").unwrap();
         let J::Arr(records) = batch.get("records").unwrap() else {
             panic!("canonical batch records are missing");
@@ -1313,7 +1336,10 @@ mod tests {
             .iter()
             .find(|section| section.get("name").and_then(json_is_string) == Some("signed receipts"))
             .unwrap();
-        assert_eq!(receipts.get("status").and_then(json_is_string), Some("In progress"));
+        assert_eq!(
+            receipts.get("status").and_then(json_is_string),
+            Some("In progress")
+        );
         let report = std::fs::read_to_string(out.join("report.md")).unwrap();
         assert!(report.contains("Status: Verified complete"));
         assert!(report.contains(&batch.pretty()));
@@ -1324,11 +1350,7 @@ mod tests {
         let supplied = ctx(&supplied_root);
         let supplied_dir = supplied.home.join("conformance/case-1");
         std::fs::create_dir_all(&supplied_dir).unwrap();
-        std::fs::write(
-            supplied_dir.join("signed-receipts.json"),
-            batch.pretty(),
-        )
-        .unwrap();
+        std::fs::write(supplied_dir.join("signed-receipts.json"), batch.pretty()).unwrap();
         let mut supplied_options = opts(&supplied_root);
         supplied_options.trusted_key = Some(trusted_key.clone());
         assert_eq!(export(&supplied, &supplied_options).unwrap().0, 2);
@@ -1364,7 +1386,11 @@ mod tests {
         assert!(crate::receipt_batches::verify_batch(&tampered, &trusted_key, "case-1").is_err());
         let wrong_key = format!(
             "{}{}",
-            if trusted_key.starts_with('0') { '1' } else { '0' },
+            if trusted_key.starts_with('0') {
+                '1'
+            } else {
+                '0'
+            },
             &trusted_key[1..]
         );
         assert!(crate::receipt_batches::verify_batch(&batch, &wrong_key, "case-1").is_err());
@@ -1376,16 +1402,20 @@ mod tests {
         let mut options = opts(&root);
         options.trusted_key = Some(wrong_key);
         assert_eq!(export(&context, &options).unwrap().0, 2);
-        let failed = json::parse(
-            &std::fs::read_to_string(root.join("fresh-output/evidence.json")).unwrap(),
-        )
-        .unwrap();
+        let failed =
+            json::parse(&std::fs::read_to_string(root.join("fresh-output/evidence.json")).unwrap())
+                .unwrap();
         let signature = failed.get("signature_verification").unwrap();
-        assert_eq!(signature.get("status").and_then(json_is_string), Some("In progress"));
+        assert_eq!(
+            signature.get("status").and_then(json_is_string),
+            Some("In progress")
+        );
         assert!(matches!(signature.get("batch"), Some(J::Null)));
-        assert!(!std::fs::read_to_string(root.join("fresh-output/report.md"))
-            .unwrap()
-            .contains("Canonical signed batch"));
+        assert!(
+            !std::fs::read_to_string(root.join("fresh-output/report.md"))
+                .unwrap()
+                .contains("Canonical signed batch")
+        );
 
         let bad_root = temp();
         let bad_context = ctx(&bad_root);
@@ -1405,7 +1435,8 @@ mod tests {
         bad_options.trusted_key = Some(bad_key);
         bad_options.sign_receipts = true;
         assert_eq!(export(&bad_context, &bad_options).unwrap().0, 2);
-        let bad_evidence = std::fs::read_to_string(bad_root.join("fresh-output/evidence.json")).unwrap();
+        let bad_evidence =
+            std::fs::read_to_string(bad_root.join("fresh-output/evidence.json")).unwrap();
         assert!(bad_evidence.contains("\"status\": \"In progress\""));
         assert!(bad_evidence.contains("\"batch\": null"));
         assert!(!bad_evidence.contains("private value"));

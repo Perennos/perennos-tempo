@@ -2003,9 +2003,15 @@ pub enum Cmd {
     /// `conformance`: export fixed-file evidence without certifying legal compliance.
     Conformance(conformance::Opts),
     /// Export the current receipt references as a signed snapshot.
-    ReceiptsExport { case_id: String, output: PathBuf },
+    ReceiptsExport {
+        case_id: String,
+        output: PathBuf,
+    },
     /// Verify a signed snapshot against an independently supplied key.
-    VerifySigned { file: PathBuf, trusted_key: String },
+    VerifySigned {
+        file: PathBuf,
+        trusted_key: String,
+    },
     Help,
     Version,
 }
