@@ -131,12 +131,15 @@ Python 3 and Inno Setup 6.4 or later.
 
 ### What a build does
 
-1. Draws the art: `art/make_art.py` (standard library only, the same files every run) makes the Perennos mark
-   as `tempo.ico`, `tempo-vault.ico` and `tempo-room.ico` (16 to 256 pixels; the same P, each app's dot in its
-   own colour from the products' palette) and the small wizard image, and turns `art/wizard-large-<pct>.png`
-   into the large wizard images at Inno Setup's seven sizes. Those PNGs are the README's lattice look,
+1. Lays out the art: `art/make_art.py` (standard library only, the same files every run) writes the official
+   Perennos insignia, the P perennos.com shows, as `tempo.ico`, `tempo-vault.ico` and `tempo-room.ico` (one icon,
+   16 to 256 pixels, the insignia as it is on a tile in the brand's cream), turns `art/wizard-small-<pct>.png` and
+   `art/wizard-large-<pct>.png` into the wizard images at Inno Setup's seven sizes. The icon and the small images
+   are made once from `art/perennos-insignia.png` by `art/make_insignia_icon.py` (Pillow; the build itself needs
+   none): run it only if the insignia changes, and commit the output. The large PNGs are the README's lattice look,
    rendered from brand art sources that are kept privately (the same picture at every size): to redraw them,
-   follow `art/finish_wizard_art.py` (Playwright and Pillow; the build itself needs neither).
+   follow `art/finish_wizard_art.py` (Playwright and Pillow). Each program's own icon is in its `assets/` folder
+   (the same file), so `cargo build` alone gives it too; `tempo-launch.exe` finds `assets/tempo-launch.ico`.
 2. Compiles the programs (`--release --locked`), each into a fresh `build/stage/<version>-<time>` folder.
 3. Writes `legal/THIRD-PARTY-NOTICES.txt` (`notices.py`: every crate built into the programs, with the license
    text it ships), the edition's license page (`license_page.py`: one RTF, a heading per part), and copies the
