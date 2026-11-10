@@ -536,7 +536,7 @@ mod tests {
     use super::*;
     use std::io::Read;
 
-    fn mixed(tag: &str) -> Ctx {
+    fn mixed(tag: &str) -> super::super::takes::TestCtx {
         let ctx = test_ctx(tag);
         std::fs::create_dir_all(ctx.home.join("woodshed")).unwrap();
         for f in ["base.gguf", "a.gguf", "b.gguf"] {
@@ -673,15 +673,42 @@ mod tests {
         assert_eq!(said(|o| add(&ctx, "new-one", "/no/such/file.gguf", o)).0, 1);
     }
 
-    /// A stand-in for llama-server's two lora endpoints.
-    fn fake_llama(adapters: &str) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
+    struct FakeServer {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                if thread.join().is_err() {
+                    if std::thread::panicking() { eprintln!("fake server thread panicked"); }
+                    else { panic!("fake server thread panicked"); }
+                }
+            }
+        }
+    }
+
+    /// A stand-in for llama-server's two lora endpoints, joined even on test unwind.
+    fn fake_llama_on(l: std::net::TcpListener, adapters: &str) -> (std::sync::Arc<std::sync::Mutex<Vec<String>>>, FakeServer) {
+        l.set_nonblocking(true).unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let (s2, body) = (seen.clone(), adapters.to_string());
-        std::thread::spawn(move || {
-            for s in l.incoming().flatten() {
-                let mut s = s;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut s = match l.accept() {
+                    Ok((s, _)) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => panic!("fake server accept: {e}"),
+                };
+                s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                s.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
                 let mut buf = vec![0u8; 4096];
                 let n = s.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).into_owned();
@@ -696,7 +723,25 @@ mod tests {
                 let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
             }
         });
-        (port, seen)
+        (seen, FakeServer { stop, thread: Some(thread) })
+    }
+
+    fn fake_llama(adapters: &str) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>, FakeServer) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let (seen, server) = fake_llama_on(l, adapters);
+        (port, seen, server)
+    }
+
+    #[test]
+    fn fake_server_releases_its_listener_on_unwind() {
+        let mut port = 0;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (p, _, _server) = fake_llama("[]");
+            port = p;
+            panic!("exercise fake server unwind");
+        }));
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 
     fn with_port(ctx: &Ctx, port: u16) {
@@ -714,7 +759,7 @@ mod tests {
             J::s(&m.adapters[0].1).compact(),
             J::s(&m.adapters[1].1).compact()
         );
-        let (port, _) = fake_llama(&body);
+        let (port, _, _server) = fake_llama(&body);
         with_port(&ctx, port);
         let (code, text) = said(|o| check(&ctx, o));
         assert_eq!(code, 0, "{text}");
@@ -723,7 +768,7 @@ mod tests {
             "{text}"
         );
         // a server that loaded something else
-        let (port, _) = fake_llama("[{\"id\":0,\"path\":\"/other.gguf\",\"scale\":1.0}]");
+        let (port, _, _server2) = fake_llama("[{\"id\":0,\"path\":\"/other.gguf\",\"scale\":1.0}]");
         with_port(&ctx, port);
         let (code, text) = said(|o| check(&ctx, o));
         assert_eq!(code, 1);
@@ -736,7 +781,7 @@ mod tests {
     #[test]
     fn global_scales_go_to_post_lora_adapters_in_the_documented_shape() {
         let ctx = mixed("m-global");
-        let (port, seen) = fake_llama("[]");
+        let (port, seen, _server) = fake_llama("[]");
         with_port(&ctx, port);
         let (code, _) = said(|o| global(&ctx, &[("dev-team".into(), 0.5)], o));
         assert_eq!(code, 0);
@@ -757,8 +802,7 @@ mod tests {
             J::s(&m.adapters[0].1).compact(),
             J::s(&m.adapters[1].1).compact()
         );
-        let (port, _) = fake_llama(&body);
-        // the stand-in is already "up" when spawn is called; free the port check by using a second port
+        // The stand-in appears only when the injected spawn callback runs.
         let free = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -766,32 +810,15 @@ mod tests {
             .port();
         with_port(&ctx, free);
         let started = std::cell::RefCell::new(vec![]);
+        let server = std::cell::RefCell::new(None);
         let spawn = |c: &[String], _log: &std::path::Path| -> Result<(), String> {
             started.borrow_mut().push(c.join(" "));
             // the "server" appears on the port as the real one would
             let l = std::net::TcpListener::bind(("127.0.0.1", free)).map_err(|e| e.to_string())?;
-            let body = body.clone();
-            std::thread::spawn(move || {
-                for s in l.incoming().flatten() {
-                    let mut s = s;
-                    let mut buf = vec![0u8; 4096];
-                    let n = s.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    let out = if req.starts_with("GET /lora-adapters") {
-                        body.clone()
-                    } else {
-                        "{\"status\":\"ok\"}".into()
-                    };
-                    let _ = write!(
-                        s,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
-                        out.len()
-                    );
-                }
-            });
+            let (_, guard) = fake_llama_on(l, &body);
+            *server.borrow_mut() = Some(guard);
             Ok(())
         };
-        let _ = port;
         // no: nothing starts
         let (code, text) = said(|o| {
             start(

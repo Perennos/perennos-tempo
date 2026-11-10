@@ -450,33 +450,45 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let got = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let g2 = got.clone();
-        std::thread::spawn(move || {
-            let (mut s, _) = l.accept().unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = s.read(&mut buf).unwrap();
-            *g2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
-            let body =
-                "{\"message\":{\"role\":\"assistant\",\"content\":\"Paris.\"},\"done\":true}";
-            let _ = write!(
-                s,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+        l.set_nonblocking(true).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let mut s = loop {
+                    match l.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                        _ => return,
+                    }
+                };
+                s.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                s.set_write_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = s.read(&mut buf).unwrap();
+                *g2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body =
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\"Paris.\"},\"done\":true}";
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+            let a = OllamaGen { port }
+                .answer(
+                    "tempo-b-20261107-try",
+                    &[("user".into(), "capital of France?".into())],
+                )
+                .unwrap();
+            assert_eq!(a, "Paris.");
+            let sent = got.lock().unwrap().clone();
+            assert!(sent.starts_with("POST /api/chat"), "{sent}");
+            assert!(
+                sent.contains("\"temperature\":0")
+                    && sent.contains("\"stream\":false")
+                    && sent.contains("tempo-b-20261107-try")
             );
         });
-        let a = OllamaGen { port }
-            .answer(
-                "tempo-b-20261107-try",
-                &[("user".into(), "capital of France?".into())],
-            )
-            .unwrap();
-        assert_eq!(a, "Paris.");
-        let sent = got.lock().unwrap().clone();
-        assert!(sent.starts_with("POST /api/chat"), "{sent}");
-        assert!(
-            sent.contains("\"temperature\":0")
-                && sent.contains("\"stream\":false")
-                && sent.contains("tempo-b-20261107-try")
-        );
         // nothing answering is an error, not an empty answer
         assert!(OllamaGen { port: 9 }.answer("m", &[]).is_err());
     }
