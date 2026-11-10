@@ -4,6 +4,8 @@
 //! On a Mac, `tempo-launch start` (what sign-in runs) starts it.
 
 use std::path::Path;
+
+use crate::{is_dev_build, DEV_BUILD_NOTE};
 use std::process::{Command, Stdio};
 
 pub const TASK: &str = "Perennos Tempo Fleet";
@@ -28,25 +30,6 @@ pub fn entry(exe: &Path) -> Result<String, String> {
         Ok(format!("*/5 * * * * \"{p}\" fleet serve --quiet {MARK}"))
     }
 }
-
-/// True when the path runs through a cargo output folder (`target/{debug,release,deps}`),
-/// written with `/` or `\`.
-fn in_cargo_target(exe: &Path) -> bool {
-    let p = exe.to_string_lossy();
-    let parts: Vec<&str> = p.split(['/', '\\']).collect();
-    parts
-        .windows(2)
-        .any(|w| w[0] == "target" && matches!(w[1], "debug" | "release" | "deps"))
-}
-
-/// True for a cargo build output, and always under `cargo test`, where `current_exe()` is the
-/// test binary. Such a program must never be scheduled or spawned as the messenger: the test
-/// harness reads `fleet serve` as test filters and reruns itself without end.
-pub fn is_dev_build(exe: &Path) -> bool {
-    cfg!(test) || in_cargo_target(exe)
-}
-
-pub const DEV_BUILD_NOTE: &str = "this is a development build (a cargo target folder, or a test run); it is not scheduled or started as the fleet messenger";
 
 /// Put the entry in (or take it out). Returns what was done, in words.
 pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
@@ -135,7 +118,7 @@ mod tests {
             "/home/x/repo/target/release/tempo-launch",
         ] {
             assert!(
-                in_cargo_target(Path::new(p)) && is_dev_build(Path::new(p)),
+                crate::in_cargo_target(Path::new(p)) && is_dev_build(Path::new(p)),
                 "{p}"
             );
         }
@@ -144,7 +127,7 @@ mod tests {
             r"C:\Users\x\AppData\Local\Programs\Perennos Tempo\bin\tempo-launch.exe",
             "/usr/local/bin/tempo-launch",
         ] {
-            assert!(!in_cargo_target(Path::new(p)), "{p}");
+            assert!(!crate::in_cargo_target(Path::new(p)), "{p}");
         }
     }
 

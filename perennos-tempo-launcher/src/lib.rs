@@ -2802,6 +2802,25 @@ fn cron_word(exe: &Path) -> Result<String, String> {
     ))
 }
 
+/// True when the path runs through a cargo output folder (`target/{debug,release,deps}`),
+/// written with `/` or `\`.
+pub(crate) fn in_cargo_target(exe: &Path) -> bool {
+    let p = exe.to_string_lossy();
+    let parts: Vec<&str> = p.split(['/', '\\']).collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == "target" && matches!(w[1], "debug" | "release" | "deps"))
+}
+
+/// True for a cargo build output, and always under `cargo test`, where `current_exe()` is the
+/// test binary. Such a program must never be scheduled or spawned as a background task: the test
+/// harness reads the task's arguments as test filters and reruns itself without end.
+pub(crate) fn is_dev_build(exe: &Path) -> bool {
+    cfg!(test) || in_cargo_target(exe)
+}
+
+pub(crate) const DEV_BUILD_NOTE: &str = "this is a development build (a cargo target folder, or a test run); it is not scheduled or started as a background task";
+
 /// The program a scheduled task should run. Inside the Store package the real path is a versioned
 /// folder that changes with every update, so the task runs the package's command name instead:
 /// `%LOCALAPPDATA%\Microsoft\WindowsApps\tempo-launch.exe` (declared in the manifest).
@@ -2965,6 +2984,10 @@ fn schedule(ctx: &Ctx, remove: bool, print: bool, daily: bool) -> Result<i32, Pr
     let (what, args) = schedule_plan(&exe, daily).map_err(fail)?;
     if print {
         println!("{what}");
+        return Ok(0);
+    }
+    if is_dev_build(&exe) {
+        println!("{DEV_BUILD_NOTE}");
         return Ok(0);
     }
     if cfg!(windows) {
