@@ -96,4 +96,3 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 if (token) poll();
-
