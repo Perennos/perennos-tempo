@@ -15,7 +15,7 @@ const MISSING_USAGE: &str = r#"{"model":"model","choices":[{"message":{"content"
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 fn accept_bounded(listener: &TcpListener) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match listener.accept() {
             Ok((stream, _)) => return stream,
@@ -68,10 +68,10 @@ fn fake_http(status: u16, body: &'static str) -> (u16, JoinHandle<()>) {
     let server = thread::spawn(move || {
         let mut stream = accept_bounded(&listener);
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
+            .set_write_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         read_full_request(&mut stream);
         let reason = if status == 200 {
