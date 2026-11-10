@@ -192,7 +192,7 @@ pub fn designer_prompt(role: Role, goal: &str) -> Result<String, String> {
     let tools = role.owner_tools().join(", ");
     let role_name = role.name();
     Ok(format!(
-        "Design one {role_name} agent for this goal. Return only one JSON object with exactly these keys: role, name, system_prompt, tools, guards, practice, budget. The role must be \"{role_name}\". The name is 2-32 bytes and matches [a-z0-9]+(?:-[a-z0-9]+)*: lowercase ASCII letters and digits separated by single hyphens, with no leading, trailing, or doubled hyphen. For example, use \"source-guide-2\"; underscores are invalid. system_prompt is 30-4000 characters. tools is metadata selected only from this owner list: [{tools}]; tools are not callable functions. guards has 2-6 short strings. practice has 1-3 objects, each exactly {{\"task\": string, \"rubric\": [1-4 strings]}}. Each practice task must include all supplied facts it needs so it can be answered from that task alone; practice is advisory only and never proves a recipe should be kept. Do not reproduce fixed exam cases or include exam answers. budget is exactly {{\"tokens\": positive integer <= {MAX_TOKENS}, \"request_tokens\": positive integer <= {MAX_REQUEST_TOKENS}, \"seconds\": positive integer <= {MAX_SECONDS}}}; request_tokens cannot exceed tokens. Do not add fields, choose an engine, or request a tool outside the list. Keep every task and rubric grounded in the goal.\n\nGoal: {goal}"
+        "Design one {role_name} agent for this goal. Return only one JSON object with exactly these keys: role, name, system_prompt, tools, guards, practice, budget. The role must be \"{role_name}\". The name must be 2-32 bytes (ASCII only) and match [a-z0-9]+(?:-[a-z0-9]+)*: lowercase ASCII letters and digits separated by single hyphens, with no leading, trailing, or doubled hyphen. For example, \"source-guide-2\" is valid; underscores are invalid. system_prompt must be 30-4000 characters, not blank, with no control characters except newline and tab. tools must be an array of 0-4 unique plain strings, each 1-300 characters, selected only from this owner list: [{tools}]; tools are metadata, not callable functions. guards must be 2-6 unique plain strings, each 1-300 characters. practice must be an array of 1-3 objects, each exactly {{\"task\": string, \"rubric\": [1-4 strings]}}. Each practice task must be 1-600 plain characters; each rubric must contain 1-4 unique plain strings, each 1-300 characters. Each practice task must include all supplied facts it needs so it can be answered from that task alone; practice is advisory only and never proves a recipe should be kept. Do not reproduce fixed exam cases or include exam answers. budget must contain exactly {{\"tokens\": positive integer <= {MAX_TOKENS}, \"request_tokens\": positive integer <= {MAX_REQUEST_TOKENS}, \"seconds\": positive integer <= {MAX_SECONDS}}}; request_tokens cannot exceed tokens. Do not add fields, choose an engine, or request a tool outside the list. Keep every task and rubric grounded in the goal.\n\nGoal: {goal}"
     ))
 }
 
@@ -747,10 +747,14 @@ mod tests {
     }
 
     #[test]
-    fn designer_prompt_contains_goal_but_no_exam_material() {
+    fn designer_prompt_discloses_design_bounds_and_keeps_exam_material_separate() {
         let p = designer_prompt(Role::Content, "Explain the supplied facts plainly.").unwrap();
         assert!(p.contains("Goal: Explain the supplied facts plainly."));
         assert!(p.contains("product.facts"));
+        assert!(p.contains("practice task must be 1-600 plain characters"));
+        assert!(p.contains("rubric must contain 1-4 unique plain strings, each 1-300 characters"));
+        assert!(p.contains("guards must be 2-6 unique plain strings, each 1-300 characters"));
+        assert!(p.contains("tools must be an array of 0-4 unique plain strings, each 1-300 characters"));
         assert!(p.contains("Each practice task must include all supplied facts"));
         assert!(p.contains("practice is advisory only"));
         assert!(p.contains("fixed exam cases"));

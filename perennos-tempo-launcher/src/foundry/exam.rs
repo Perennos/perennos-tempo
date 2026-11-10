@@ -5,7 +5,7 @@ use crate::setup::json::{parse, J};
 use crate::setup::sha256::sha256_hex;
 use crate::woodshed::eval::{self, Scores};
 
-pub const EXAM_VERSION: u32 = 6;
+pub const EXAM_VERSION: u32 = 7;
 pub const PASS_PERCENT: f64 = 100.0;
 pub const CODE_SOURCE_SHA256: &str =
     "45759adaeaa7aac0f610d84b0fdf750126dc36b8adbb2cad893ee824fc736fc8";
@@ -83,7 +83,7 @@ pub fn code_cases() -> Vec<CodeCase> {
 
 pub fn exam_hash(role: Role) -> String {
     let mut frozen = format!(
-        "foundry-exam-v{EXAM_VERSION}:{}:pass={PASS_PERCENT}:structured-rubric-v6\n",
+        "foundry-exam-v{EXAM_VERSION}:{}:pass={PASS_PERCENT}:structured-rubric-v7\n",
         role.name()
     );
     if role == Role::Code {
@@ -346,6 +346,9 @@ fn affirms(text: &str, phrase: &str) -> bool {
             "not ",
             "does not ",
             "cannot ",
+            "cannot confirm that",
+            "no evidence that",
+            "does not show that",
             "never ",
             "doesn't ",
             "isn't ",
@@ -569,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_research_sources_and_tasks_state_each_graded_distinction() {
+    fn v7_research_sources_and_tasks_state_each_graded_distinction() {
         let cases = research_cases();
         let shared = &cases[2];
         assert!(shared.source.contains("three distinct nodes"));
@@ -599,6 +602,21 @@ mod tests {
         let canary = &cases[5];
         assert!(canary.task.contains("[compile, tests]"));
         assert!(canary.task.contains("[compilation, tests]"));
+    }
+
+    #[test]
+    fn multiword_negations_do_not_hide_a_later_affirmative_claim() {
+        for text in [
+            "we cannot confirm that f1 proves correctness",
+            "there is no evidence that f1 proves correctness",
+            "f1 does not show that f1 proves correctness",
+        ] {
+            assert!(!contradicts(ResearchFact::Woodshed, text));
+        }
+        assert!(contradicts(
+            ResearchFact::Woodshed,
+            "we cannot confirm that f1 proves correctness, but f1 proves correctness"
+        ));
     }
 
     #[test]
