@@ -754,7 +754,9 @@ mod tests {
         assert!(p.contains("practice task must be 1-600 plain characters"));
         assert!(p.contains("rubric must contain 1-4 unique plain strings, each 1-300 characters"));
         assert!(p.contains("guards must be 2-6 unique plain strings, each 1-300 characters"));
-        assert!(p.contains("tools must be an array of 0-4 unique plain strings, each 1-300 characters"));
+        assert!(
+            p.contains("tools must be an array of 0-4 unique plain strings, each 1-300 characters")
+        );
         assert!(p.contains("Each practice task must include all supplied facts"));
         assert!(p.contains("practice is advisory only"));
         assert!(p.contains("fixed exam cases"));
