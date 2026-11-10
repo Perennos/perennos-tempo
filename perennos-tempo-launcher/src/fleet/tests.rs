@@ -14,7 +14,13 @@ struct Scratch(PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        // On Windows a node's database file can stay open a moment after the test ends.
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(&self.0).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -22,11 +28,12 @@ thread_local! {
     static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Once per run: scratch folders an earlier, interrupted run left over (over 24 hours old).
+/// Once per run: scratch folders an earlier run left over (over 10 minutes old; a node still
+/// holding its database open when its test ends keeps its folder until then).
 fn sweep_stale() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let old = Duration::from_secs(24 * 60 * 60);
+        let old = Duration::from_secs(10 * 60);
         let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
             return;
         };
