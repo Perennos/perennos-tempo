@@ -315,12 +315,221 @@ pub fn conn(node: &Arc<Node>, s: TcpStream) {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct Completion {
+    state: Mutex<CompletionState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct CompletionState {
+    active: usize,
+    failure: Option<&'static str>,
+}
+
+#[cfg(test)]
+struct CompletionToken(Arc<Completion>);
+
+#[cfg(test)]
+impl Drop for CompletionToken {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.active -= 1;
+        self.0.changed.notify_all();
+    }
+}
+
+// If spawning fails, dropping this wrapper drops all work captures before the token.
+#[cfg(test)]
+struct CompletionWork<F> {
+    work: Option<F>,
+    token: Option<CompletionToken>,
+}
+
+#[cfg(test)]
+impl<F> Drop for CompletionWork<F> {
+    fn drop(&mut self) {
+        drop(self.work.take());
+        drop(self.token.take());
+    }
+}
+
+#[cfg(test)]
+impl Completion {
+    fn token(self: &Arc<Self>) -> CompletionToken {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.active += 1;
+        CompletionToken(self.clone())
+    }
+
+    fn fail(&self, reason: &'static str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.failure.get_or_insert(reason);
+        self.changed.notify_all();
+    }
+
+    fn spawn_with<F, S>(self: &Arc<Self>, work: F, start: S)
+    where
+        F: FnOnce() + Send + 'static,
+        S: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    {
+        // The launch token prevents a failed spawn from appearing complete before failure is set.
+        let launch = self.token();
+        let task = CompletionWork {
+            work: Some(work),
+            token: Some(self.token()),
+        };
+        let tracker = self.clone();
+        let wrapped = Box::new(move || {
+            let mut task = task;
+            let work = task.work.take().expect("registered test work");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            if result.is_err() {
+                tracker.fail("server thread panicked");
+            }
+            drop(result);
+            drop(task);
+        });
+        let launched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(wrapped)));
+        if !matches!(launched, Ok(Ok(()))) {
+            self.fail("server thread spawn failed");
+        }
+        drop(launch);
+    }
+
+    pub(super) fn spawn<F>(self: &Arc<Self>, work: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with(work, |wrapped| {
+            std::thread::Builder::new().spawn(wrapped).map(|_| ())
+        })
+    }
+
+    pub(super) fn wait(&self, limit: Duration) -> Result<(), &'static str> {
+        let deadline = Instant::now() + limit;
+        let mut state = self.state.lock().map_err(|_| "completion lock poisoned")?;
+        loop {
+            if let Some(reason) = state.failure {
+                return Err(reason);
+            }
+            if state.active == 0 {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("server completion timed out");
+            }
+            state = self
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| "completion lock poisoned")?
+                .0;
+        }
+    }
+
+    pub(super) fn active(&self) -> usize {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).active
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    struct OnDrop(std::sync::mpsc::Sender<()>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn completion_follows_capture_destruction() {
+        let tracker = Arc::new(Completion::default());
+        let (sent, received) = std::sync::mpsc::channel();
+        let guard = OnDrop(sent);
+        tracker.spawn(move || {
+            let _guard = guard;
+        });
+        tracker.wait(Duration::from_secs(2)).unwrap();
+        assert_eq!(received.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn blocked_worker_times_out_then_completes() {
+        let tracker = Arc::new(Completion::default());
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        tracker.spawn(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            tracker.wait(Duration::from_millis(20)),
+            Err("server completion timed out")
+        );
+        release.send(()).unwrap();
+        tracker.wait(Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn panic_and_spawn_failure_are_reported() {
+        let panicked = Arc::new(Completion::default());
+        panicked.spawn(|| panic!("fixture panic"));
+        assert_eq!(
+            panicked.wait(Duration::from_secs(2)),
+            Err("server thread panicked")
+        );
+        let failed = Arc::new(Completion::default());
+        let (sent, dropped) = std::sync::mpsc::channel();
+        let guard = OnDrop(sent);
+        failed.spawn_with(
+            move || {
+                let _guard = guard;
+            },
+            |work| {
+                drop(work);
+                Err(std::io::Error::other("fixture spawn failure"))
+            },
+        );
+        assert_eq!(dropped.try_recv(), Ok(()));
+        assert_eq!(
+            failed.wait(Duration::ZERO),
+            Err("server thread spawn failed")
+        );
+    }
+}
+
+macro_rules! spawn_fleet {
+    ($tracker:expr, $work:expr) => {{
+        #[cfg(test)]
+        {
+            $tracker.spawn($work);
+        }
+        #[cfg(not(test))]
+        {
+            std::thread::spawn($work);
+        }
+    }};
+}
+
 pub struct Handle {
     pub addrs: Vec<SocketAddr>,
     stop: Arc<AtomicBool>,
+    #[cfg(test)]
+    completion: Arc<Completion>,
 }
 
 impl Handle {
+    #[cfg(test)]
+    pub(super) fn completion(&self) -> Arc<Completion> {
+        self.completion.clone()
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         for a in &self.addrs {
@@ -337,6 +546,10 @@ impl Drop for Handle {
 
 /// Listen on `addrs` and nothing else (what a test of the receiving side wants).
 pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
+    #[cfg(test)]
+    let completion = Arc::new(Completion::default());
+    #[cfg(test)]
+    super::tests::track_server(node, completion.clone())?;
     let _ = super::tools::local_token(&node.paths);
     let stop = Arc::new(AtomicBool::new(false));
     let mut bound = Vec::new();
@@ -344,14 +557,16 @@ pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> 
         if let Ok(l) = TcpListener::bind(a) {
             bound.push(l.local_addr().map_err(|e| e.to_string())?);
             let (node, stop) = (node.clone(), stop.clone());
-            std::thread::spawn(move || {
+            #[cfg(test)]
+            let handlers = completion.clone();
+            spawn_fleet!(completion, move || {
                 for c in l.incoming() {
                     if stop.load(Ordering::SeqCst) {
                         return;
                     }
                     if let Ok(c) = c {
                         let node = node.clone();
-                        std::thread::spawn(move || conn(&node, c));
+                        spawn_fleet!(handlers, move || conn(&node, c));
                     }
                 }
             });
@@ -360,7 +575,12 @@ pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> 
     if bound.is_empty() {
         return Err("no address could be listened on (is it already running?)".into());
     }
-    Ok(Handle { addrs: bound, stop })
+    Ok(Handle {
+        addrs: bound,
+        stop,
+        #[cfg(test)]
+        completion,
+    })
 }
 
 /// Listen, send what waits in the outbox, send heartbeats. Returns when listening.
@@ -370,7 +590,7 @@ pub fn start(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
     let hb: Arc<Mutex<(u64, Vec<u8>)>> = Arc::new(Mutex::new((0, Vec::new())));
     {
         let (node, stop, hb) = (node.clone(), stop.clone(), hb.clone());
-        std::thread::spawn(move || {
+        spawn_fleet!(h.completion, move || {
             let mut tick = 0u64;
             while !stop.load(Ordering::SeqCst) {
                 let mut h = health(&node, tick.is_multiple_of(6));
@@ -392,13 +612,26 @@ pub fn start(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
     }
     {
         let (node, stop) = (node.clone(), stop.clone());
-        std::thread::spawn(move || supervise(&node, &stop, &hb));
+        #[cfg(test)]
+        let senders = h.completion.clone();
+        spawn_fleet!(h.completion, move || supervise(
+            &node,
+            &stop,
+            &hb,
+            #[cfg(test)]
+            senders,
+        ));
     }
     Ok(h)
 }
 
 /// One sender per machine in the fleet: it delivers what is due and sends the heartbeat.
-fn supervise(node: &Arc<Node>, stop: &Arc<AtomicBool>, hb: &Arc<Mutex<(u64, Vec<u8>)>>) {
+fn supervise(
+    node: &Arc<Node>,
+    stop: &Arc<AtomicBool>,
+    hb: &Arc<Mutex<(u64, Vec<u8>)>>,
+    #[cfg(test)] completion: Arc<Completion>,
+) {
     let running: Arc<Mutex<HashSet<String>>> = Arc::default();
     let cell: Arc<Mutex<Fleet>> = Arc::default();
     while !stop.load(Ordering::SeqCst) {
@@ -413,7 +646,7 @@ fn supervise(node: &Arc<Node>, stop: &Arc<AtomicBool>, hb: &Arc<Mutex<(u64, Vec<
                     running.clone(),
                     m.name.clone(),
                 );
-                std::thread::spawn(move || {
+                spawn_fleet!(completion, move || {
                     sender(&node, &stop, &hb, &cell, &name);
                     lock(&running).remove(&name);
                 });
@@ -498,7 +731,7 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
     let own = super::scan::listen_addrs(&super::scan::local_addrs());
     {
         let (name, port, stop) = (node.me.clone(), store::fleet_port(), stop.clone());
-        std::thread::spawn(move || {
+        spawn_fleet!(h.completion, move || {
             if let Err(e) = super::mdns::announce(&stop, &name, port, &own, &["v=1".to_string()]) {
                 eprintln!("fleet: {e}");
             }

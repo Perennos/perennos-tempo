@@ -7,12 +7,13 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
-/// An exclusively created test folder. It survives a simulated restart and is removed at
-/// thread exit only after tracked nodes are gone; an unconfirmed server keeps its scratch.
+/// An exclusively created test folder. Unconfirmed work keeps its scratch.
 struct Scratch {
     path: PathBuf,
     token: Vec<u8>,
-    nodes: Vec<std::sync::Weak<Node>>,
+    nodes: Vec<Arc<Node>>,
+    servers: Vec<Arc<serve::Completion>>,
+    cleaned: bool,
 }
 
 impl Scratch {
@@ -28,29 +29,64 @@ impl Scratch {
             path,
             token,
             nodes: Vec::new(),
+            servers: Vec::new(),
+            cleaned: false,
         })
     }
 
-    fn idle(&self) -> bool {
-        self.nodes.iter().all(|node| node.strong_count() == 0)
+    fn remember_node(&mut self, node: &Arc<Node>) {
+        if !self.nodes.iter().any(|saved| Arc::ptr_eq(saved, node)) {
+            self.nodes.push(node.clone());
+        }
+    }
+
+    fn cleanup(&mut self, limit: Duration) -> Result<(), String> {
+        if self.cleaned {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + limit;
+        for server in &self.servers {
+            server
+                .wait(deadline.saturating_duration_since(std::time::Instant::now()))
+                .map_err(str::to_string)?;
+        }
+        for node in &self.nodes {
+            if !node
+                .handlers
+                .lock()
+                .map_err(|_| "node handler lock poisoned")?
+                .is_empty()
+            {
+                return Err("node handlers may own untracked work".into());
+            }
+        }
+        if self.nodes.iter().any(|node| Arc::strong_count(node) != 1) {
+            return Err("node still has unconfirmed owners".into());
+        }
+        // Scratch owns the last strong references; dropping them here completes Node destructors.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.nodes.clear())).is_err() {
+            return Err("node destructor panicked".into());
+        }
+        let marker = self.path.join(".fixture-owner");
+        if !std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_dir())
+            || !std::fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
+            || !std::fs::read(marker).is_ok_and(|token| token == self.token)
+        {
+            return Err("scratch ownership marker is missing or changed".into());
+        }
+        std::fs::remove_dir_all(&self.path).map_err(|e| format!("scratch removal failed: {e}"))?;
+        self.cleaned = true;
+        Ok(())
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !self.idle() {
-            if std::time::Instant::now() >= deadline {
-                return; // A detached server may still use this fixture: retain it.
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let marker = self.path.join(".fixture-owner");
-        if std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_dir())
-            && std::fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
-            && std::fs::read(marker).is_ok_and(|token| token == self.token)
-        {
-            let _ = std::fs::remove_dir_all(&self.path);
+        if let Err(reason) = self.cleanup(Duration::from_secs(3)) {
+            eprintln!(
+                "Fleet test scratch retained at {}: {reason}",
+                self.path.display()
+            );
         }
     }
 }
@@ -103,9 +139,33 @@ pub fn open_node(paths: &Paths, key: [u8; 32]) -> Result<Arc<Node>, String> {
             .iter_mut()
             .find(|s| paths.home.starts_with(&s.path))
             .expect("node must belong to this test's owned scratch");
-        scratch.nodes.push(Arc::downgrade(&node));
+        scratch.remember_node(&node);
     });
     Ok(node)
+}
+
+pub(super) fn track_server(
+    node: &Arc<Node>,
+    completion: Arc<serve::Completion>,
+) -> Result<(), String> {
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| node.paths.home.starts_with(&s.path))
+            .ok_or("test server requires owned scratch")?;
+        scratch.remember_node(node);
+        scratch.servers.push(completion);
+        Ok(())
+    })
+}
+
+fn scratch_for_check(tag: &str) -> Scratch {
+    let path = std::env::temp_dir().join(format!(
+        "tempo-fleet-check-{tag}-{}",
+        crypto::hex(&crypto::random(16))
+    ));
+    Scratch::create(path).unwrap()
 }
 
 #[test]
@@ -119,39 +179,141 @@ fn scratch_refuses_existing_directories_and_cleans_its_own_on_panic() {
         std::io::ErrorKind::AlreadyExists
     );
     assert_eq!(std::fs::read(existing.join("keep")).unwrap(), b"not ours");
-    let owned = root.join("owned");
+    let scratch = scratch_for_check("panic");
+    let owned = scratch.path.clone();
     let result = std::panic::catch_unwind(|| {
-        let _scratch = Scratch::create(owned.clone()).unwrap();
+        let _scratch = scratch;
         std::fs::write(owned.join("fixture"), b"ours").unwrap();
         panic!("fixture panic");
     });
     assert!(result.is_err());
     assert!(!owned.exists());
     assert!(existing.join("keep").exists());
-    let uncertain = root.join("uncertain");
-    let scratch = Scratch::create(uncertain.clone()).unwrap();
+    let mut scratch = scratch_for_check("marker");
+    let uncertain = scratch.path.clone();
     std::fs::write(uncertain.join(".fixture-owner"), b"changed").unwrap();
-    drop(scratch);
+    assert!(scratch.cleanup(Duration::ZERO).is_err());
     assert!(uncertain.exists());
+    std::fs::write(uncertain.join(".fixture-owner"), &scratch.token).unwrap();
+    scratch.cleanup(Duration::ZERO).unwrap();
 }
 
 #[test]
 fn scratch_waits_for_its_nodes_before_cleanup() {
-    let root = tmp("scratch-node");
-    let owned = root.join("owned");
-    let mut scratch = Scratch::create(owned.clone()).unwrap();
+    let mut scratch = scratch_for_check("node");
+    let owned = scratch.path.clone();
     let paths = Paths {
         home: owned.join("home"),
         agent_data: owned.join("agent"),
     };
     std::fs::create_dir(&paths.home).unwrap();
     let node = Node::open(&paths, [7; 32]).unwrap();
-    scratch.nodes.push(Arc::downgrade(&node));
-    assert!(!scratch.idle());
+    scratch.remember_node(&node);
+    assert!(scratch.cleanup(Duration::ZERO).is_err());
     drop(node);
-    assert!(scratch.idle());
-    drop(scratch);
+    scratch.cleanup(Duration::ZERO).unwrap();
     assert!(!owned.exists());
+}
+
+#[test]
+fn scratch_retains_nodes_with_untracked_handlers() {
+    let mut scratch = scratch_for_check("untracked-handler");
+    let owned = scratch.path.clone();
+    let paths = Paths {
+        home: owned.join("home"),
+        agent_data: owned.join("agent"),
+    };
+    std::fs::create_dir(&paths.home).unwrap();
+    let node = Node::open(&paths, [7; 32]).unwrap();
+    let handler = super::blob::attach(&node);
+    scratch.remember_node(&node);
+    drop(handler);
+    drop(node);
+    assert_eq!(
+        scratch.cleanup(Duration::ZERO),
+        Err("node handlers may own untracked work".into())
+    );
+    assert!(owned.exists());
+    scratch.nodes[0].handlers.lock().unwrap().clear();
+    scratch.cleanup(Duration::ZERO).unwrap();
+    assert!(!owned.exists());
+}
+
+#[test]
+fn server_without_registered_scratch_is_refused_before_listening() {
+    let mut scratch = scratch_for_check("unregistered-server");
+    let paths = Paths {
+        home: scratch.path.join("home"),
+        agent_data: scratch.path.join("agent"),
+    };
+    std::fs::create_dir(&paths.home).unwrap();
+    let node = Node::open(&paths, [7; 32]).unwrap();
+    let error = serve::listen(&node, &[SocketAddr::from(([127, 0, 0, 1], 0))])
+        .err()
+        .unwrap();
+    assert!(error.contains("owned scratch"));
+    drop(node);
+    scratch.cleanup(Duration::ZERO).unwrap();
+}
+
+#[test]
+fn scratch_retains_a_blocked_handler_until_completion() {
+    let mut scratch = scratch_for_check("blocked");
+    let owned = scratch.path.clone();
+    let tracker = Arc::new(serve::Completion::default());
+    scratch.servers.push(tracker.clone());
+    let (started, ready) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    tracker.spawn(move || {
+        started.send(()).unwrap();
+        let _ = blocked.recv();
+    });
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(scratch.cleanup(Duration::from_millis(20)).is_err());
+    assert!(owned.exists());
+    release.send(()).unwrap();
+    scratch.cleanup(Duration::from_secs(2)).unwrap();
+    assert!(!owned.exists());
+}
+
+#[test]
+fn real_blocked_handler_retains_scratch_until_peer_closes() {
+    let paths = paths("real-blocked-handler");
+    store::update(&paths, |f| f.me = "blocked".into()).unwrap();
+    let node = open_node(&paths, [7; 32]).unwrap();
+    let handle = serve::listen(&node, &[SocketAddr::from(([127, 0, 0, 1], 0))]).unwrap();
+    let completion = handle.completion();
+    let client = TcpStream::connect_timeout(&handle.addrs[0], Duration::from_secs(1)).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while completion.active() < 2 && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(completion.active() >= 2, "handler was not tracked");
+    handle.stop();
+    drop(handle);
+    let timed_out = MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .unwrap();
+        scratch.cleanup(Duration::from_millis(20))
+    });
+    assert_eq!(timed_out, Err("server completion timed out".into()));
+    assert!(paths.home.exists());
+    drop(client);
+    completion.wait(Duration::from_secs(2)).unwrap();
+    drop(node);
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .unwrap()
+            .cleanup(Duration::from_secs(2))
+            .unwrap();
+    });
+    assert!(!paths.home.exists());
 }
 
 fn free_port() -> u16 {
@@ -167,6 +329,50 @@ pub struct Rig {
     pub node: Arc<Node>,
     pub port: u16,
     pub handle: Option<Handle>,
+}
+
+fn stop_for_restart(rig: Rig) -> Result<Paths, String> {
+    let Rig {
+        paths,
+        node,
+        handle,
+        ..
+    } = rig;
+    if let Some(handle) = handle {
+        let completion = handle.completion();
+        handle.stop();
+        drop(handle);
+        completion
+            .wait(Duration::from_secs(3))
+            .map_err(str::to_string)?;
+    }
+    if !node
+        .handlers
+        .lock()
+        .map_err(|_| "node handler lock poisoned")?
+        .is_empty()
+    {
+        return Err("restart node has untracked handler work".into());
+    }
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .ok_or("restart requires owned scratch")?;
+        let index = scratch
+            .nodes
+            .iter()
+            .position(|saved| Arc::ptr_eq(saved, &node))
+            .ok_or("restart node is not owned")?;
+        if Arc::strong_count(&node) != 2 {
+            return Err("restart node still has unconfirmed owners".into());
+        }
+        drop(scratch.nodes.remove(index));
+        Ok(())
+    })?;
+    drop(node);
+    Ok(paths)
 }
 
 /// A node named `name` listening only (no senders) on this computer, with the shared `key`.
@@ -1090,8 +1296,7 @@ fn nothing_is_lost_when_the_peer_is_down_and_a_retry_is_never_a_second_message()
     assert_eq!(a.node.tries(&id), 1);
 
     // this program stops and starts again: the outbox is still there
-    let paths = a.paths.clone();
-    drop(a);
+    let paths = stop_for_restart(a).unwrap();
     let a2 = open_node(&paths, KEY).unwrap();
     assert_eq!(a2.queued(Some("later")), 1);
 
