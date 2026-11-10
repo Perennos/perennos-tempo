@@ -18,7 +18,14 @@ impl Drop for Scratch {
     }
 }
 
+// Rust 1.99's Windows GNU backend still exposes an initializer function to this lint
+// even though the source initializer below is already const. Keep the expectation local;
+// an unfulfilled expectation asks us to remove it when the compiler stops reporting it.
 thread_local! {
+    #[cfg_attr(
+        all(windows, target_env = "gnu"),
+        expect(clippy::missing_const_for_thread_local)
+    )]
     static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -1219,6 +1226,99 @@ fn signed_pongs_must_match_the_ping_and_pass_the_guard() {
 }
 
 #[test]
+fn signed_acks_without_a_nonce_or_with_a_future_clock_leave_the_message_pending() {
+    for (tag, nonce, offset, error) in [
+        ("ack-empty", "", 0, "no nonce"),
+        ("ack-future", "future-ack", 10 * 60_000, "clock"),
+    ] {
+        let owner = rig(tag, KEY);
+        let signer = SigningKey::from_bytes(&[79; 32]);
+        let (peer, listener) = fake_peer(&owner, "peer", &signer);
+        owner.node.enqueue("peer", "note", b"pending").unwrap();
+        let replies = fake_replies(
+            listener,
+            vk_of(&owner.node.identity_hex()),
+            signer,
+            1,
+            move |request, _| Frame {
+                kind: 'a',
+                id: request.id,
+                from: "peer".into(),
+                to: tag.into(),
+                ts: store::now_ms() + offset,
+                nonce: nonce.into(),
+                ..Frame::default()
+            },
+        );
+        let result = owner.node.deliver(&peer);
+        replies.join().unwrap();
+        assert_eq!(result, Err(format!("refused: {error}")));
+        assert_eq!(owner.node.queued(Some("peer")), 1);
+    }
+}
+
+#[test]
+fn losing_a_real_ack_retries_the_same_message_and_stores_it_once() {
+    let owner = rig("lost-ack-sender", KEY);
+    let receiver = rig("lost-ack-peer", KEY);
+    know(
+        &receiver,
+        &owner.node.me,
+        owner.port,
+        &owner.node.identity_hex(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = know(
+        &owner,
+        &receiver.node.me,
+        listener.local_addr().unwrap().port(),
+        &receiver.node.identity_hex(),
+    );
+    let id = owner
+        .node
+        .enqueue(&peer.name, "note", b"keep once")
+        .unwrap();
+    let recipient = receiver.node.clone();
+    let requester = vk_of(&owner.node.identity_hex());
+    let expected_id = id.clone();
+    let replies = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = read_frame(&mut stream, &KEY, &|_| Some(requester)).unwrap();
+        assert_eq!(request.id, expected_id);
+        assert!(recipient.store(
+            &request.from,
+            &request.id,
+            &request.topic,
+            request.created,
+            &request.body
+        ));
+        // The message reached the receiver, but the connection ends before its ACK.
+        drop(stream);
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        recipient.frames(std::io::BufReader::new(stream));
+    });
+    assert!(owner.node.deliver(&peer).is_err());
+    assert_eq!(owner.node.queued(Some(&peer.name)), 1);
+    assert_eq!(owner.node.tries(&id), 1);
+    owner.node.retry_now();
+    assert_eq!(owner.node.deliver(&peer), Ok(1));
+    assert_eq!(owner.node.queued(Some(&peer.name)), 0);
+    let got = receiver.node.inbox(Some("note"), 10);
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        (got[0].id.as_str(), got[0].body.as_slice()),
+        (id.as_str(), &b"keep once"[..])
+    );
+    replies.join().unwrap();
+}
+
+#[test]
 fn a_stale_connection_is_replaced_without_losing_the_message() {
     let a = rig("stale-a", KEY);
     let mut b = rig("stale-b", KEY);
@@ -1451,4 +1551,123 @@ fn a_running_messenger_picks_up_a_new_key_without_a_restart() {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(a.node.key(), [3u8; 32]);
+}
+
+#[test]
+fn callback_endpoint_keeps_its_actual_controller_port() {
+    assert_eq!(peer_endpoint("10.0.0.2:9123"), Some(("10.0.0.2", 9123)));
+    assert_eq!(peer_endpoint("10.0.0.2:0"), None);
+    assert_eq!(peer_endpoint("8.8.8.8:9123"), None);
+    assert_eq!(
+        peer_endpoint("10.0.0.2"),
+        Some(("10.0.0.2", store::fleet_port()))
+    );
+}
+
+#[test]
+fn checked_enrollment_update_preserves_malformed_duplicate_and_unfamiliar_registry_bytes() {
+    let p = paths("checked-registry");
+    std::fs::create_dir_all(&p.home).unwrap();
+    for bytes in [
+        "{broken",
+        "{\"self\":\"main\",\"self\":\"other\",\"machines\":[]}",
+        "{\"self\":\"main\",\"machines\":[],\"future_field\":true}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"8.8.8.8\"}]}",
+        "{\"self\":\"main\",\"machines\":[],\"allow\":[12]}",
+        "{\"self\":\"main\",\"machines\":[],\"version\":01}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"health\":{\"count\":00}}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"health\":{\"a\":1,\"a\":2}}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"bad\nline\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"\\uD800\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"\\uD800\\u0041\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"\\u+123\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"port\":65536}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"enabled\":\"yes\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"id\":\"invalid\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\"},{\"name\":\"worker\",\"addr\":\"10.0.0.3\"}]}",
+    ] {
+        std::fs::write(p.file("fleet.json"), bytes).unwrap();
+        let called = std::cell::Cell::new(false);
+        let result = store::update_checked(&p, |_| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(result.is_err(), "accepted {bytes}");
+        assert!(!called.get());
+        assert_eq!(
+            std::fs::read_to_string(p.file("fleet.json")).unwrap(),
+            bytes
+        );
+        assert!(!p.file("fleet.json.lock").exists());
+    }
+    let valid = "{ \"self\":\"main\", \"machines\":[], \"allow\":[] }";
+    std::fs::write(p.file("fleet.json"), valid).unwrap();
+    let result: Result<(), String> = store::update_checked(&p, |_| Err("declined".into()));
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(p.file("fleet.json")).unwrap(),
+        valid
+    );
+    store::update_checked(&p, |fleet| {
+        fleet
+            .machines
+            .push(Machine::new("worker", "10.0.0.2", "agent"));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(store::load_checked(&p).unwrap().machines.len(), 1);
+}
+
+#[test]
+fn checked_enrollment_update_preserves_escaped_non_bmp_nested_metadata() {
+    let p = paths("checked-unicode-metadata");
+    std::fs::create_dir_all(&p.home).unwrap();
+    let input = r#"{"self":"main","machines":[{"name":"worker","addr":"10.0.0.2","health":{"nested":[{"label":"\ud83c\udfb5"}]},"probe":{"\ud83d\ude80":"\ud83d\ude00"},"tools":[{"label":"\udbff\udfff"}]}]}"#;
+    std::fs::write(p.file("fleet.json"), input).unwrap();
+    store::update_checked(&p, |fleet| {
+        fleet
+            .machines
+            .push(Machine::new("other", "10.0.0.3", "agent"));
+        Ok(())
+    })
+    .unwrap();
+    let fleet = store::load_checked(&p).unwrap();
+    let machine = &fleet.machines[0];
+    assert_eq!(machine.health.arr("nested")[0].str("label"), Some("🎵"));
+    assert_eq!(machine.probe.str("🚀"), Some("😀"));
+    assert_eq!(
+        machine.tools,
+        crate::setup::json::J::Arr(vec![crate::setup::json::J::Obj(vec![(
+            "label".into(),
+            crate::setup::json::J::s("\u{10ffff}")
+        )])])
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn checked_enrollment_update_does_not_replace_an_unreadable_registry() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let p = paths("checked-locked-registry");
+    std::fs::create_dir_all(&p.home).unwrap();
+    let bytes = "{\"self\":\"main\",\"machines\":[]}";
+    std::fs::write(p.file("fleet.json"), bytes).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(p.file("fleet.json"))
+        .unwrap();
+    let called = std::cell::Cell::new(false);
+    assert!(store::update_checked(&p, |_| {
+        called.set(true);
+        Ok(())
+    })
+    .is_err());
+    assert!(!called.get());
+    drop(held);
+    assert_eq!(
+        std::fs::read_to_string(p.file("fleet.json")).unwrap(),
+        bytes
+    );
+    assert!(!p.file("fleet.json.lock").exists());
 }

@@ -129,7 +129,7 @@ pub fn release(fetch: &dyn Fetch, version: Version, target: &str) -> Result<Arti
         || sums_asset.str("browser_download_url") != Some(sums_url.as_str())
         || sums_asset
             .f64("size")
-            .map_or(true, |n| n < 1.0 || n > (1 << 20) as f64)
+            .is_none_or(|n| n < 1.0 || n > (1 << 20) as f64)
     {
         return Err("The official SHA256SUMS asset facts were invalid.".into());
     }
@@ -147,11 +147,12 @@ fn body(result: Fetched) -> Result<String, String> {
 
 /// Download once to an owned `.part` file with a hard byte and wall-clock ceiling.
 pub fn download(artifact: &Artifact, part: &Path) -> Result<(), String> {
+    let expected = format!("https://github.com/Perennos/perennos-tempo/releases/download/{}/perennos-tempo-controls-{}-{}.tar.gz", artifact.version.tag(), artifact.version_tag(), artifact.target);
     if artifact.size == 0
         || artifact.size > MAX_ARCHIVE_BYTES
-        || !artifact
-            .url
-            .starts_with("https://github.com/Perennos/perennos-tempo/releases/download/")
+        || artifact.url != expected
+        || artifact.sha256.len() != 64
+        || !artifact.sha256.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err("The approved controls download facts are invalid.".into());
     }
@@ -204,8 +205,18 @@ pub fn download(artifact: &Artifact, part: &Path) -> Result<(), String> {
 }
 
 pub fn inspect_bundle(artifact: &Artifact, archive: &Path) -> Result<Vec<ControlFile>, String> {
-    let meta = std::fs::metadata(archive)
+    let meta = std::fs::symlink_metadata(archive)
         .map_err(|e| format!("Could not read the controls bundle: {e}"))?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err("The controls archive must be a regular file.".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err("The controls archive must not be a reparse point.".into());
+        }
+    }
     if meta.len() != artifact.size
         || meta.len() > MAX_ARCHIVE_BYTES
         || crate::setup::sha256::file_sha256(archive, &mut |_| {}).map_err(|e| e.to_string())?
@@ -454,5 +465,103 @@ impl Artifact {
             "{}.{}.{}",
             self.version.0[0], self.version.0[1], self.version.0[2]
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::setup::json::J;
+
+    fn release_fixture() -> (String, String) {
+        let name = "perennos-tempo-controls-2.1.0-x86_64-unknown-linux-gnu.tar.gz";
+        let url =
+            format!("https://github.com/Perennos/perennos-tempo/releases/download/v2.1.0/{name}");
+        let metadata = J::Obj(vec![
+            ("tag_name".into(), J::s("v2.1.0")),
+            (
+                "html_url".into(),
+                J::s("https://github.com/Perennos/perennos-tempo/releases/tag/v2.1.0"),
+            ),
+            ("draft".into(), J::Bool(false)),
+            ("prerelease".into(), J::Bool(false)),
+            (
+                "assets".into(),
+                J::Arr(vec![J::Obj(vec![
+                    ("name".into(), J::s(name)),
+                    ("browser_download_url".into(), J::s(&url)),
+                    ("size".into(), J::n(100.0)),
+                ])]),
+            ),
+        ])
+        .pretty();
+        (metadata, format!("{}  {name}\n", "a".repeat(64)))
+    }
+
+    #[test]
+    fn release_requires_exact_publisher_tag_asset_size_and_checksum() {
+        let (metadata, sums) = release_fixture();
+        let resolve = |m: &str, s: &str| {
+            resolve_release(Version([2, 1, 0]), "x86_64-unknown-linux-gnu", m, s)
+        };
+        assert_eq!(resolve(&metadata, &sums).unwrap().size, 100);
+        for changed in [
+            metadata.replace("Perennos/", "Other/"),
+            metadata.replace("v2.1.0", "v2.1.1"),
+            metadata.replace("100", "67108865"),
+            metadata.replace("false", "true"),
+        ] {
+            assert!(resolve(&changed, &sums).is_err());
+        }
+        assert!(resolve(&metadata, "").is_err());
+        assert!(resolve(&metadata, &format!("{sums}{sums}")).is_err());
+    }
+
+    #[test]
+    fn listing_rejects_links_traversal_duplicates_and_missing_members() {
+        let root = "perennos-tempo-controls-2.1.0-x86_64-unknown-linux-gnu";
+        let mut listing = ["", "bin/", "legal/"]
+            .map(|p| format!("drwx------ 0 0 0 0 {root}/{p}\n"))
+            .concat();
+        for file in expected_files("x86_64-unknown-linux-gnu")
+            .into_iter()
+            .chain(["CONTROLS.json"])
+        {
+            listing.push_str(&format!("-rw------- 0 0 0 0 {root}/{file}\n"));
+        }
+        assert!(safe_listing(&listing, root, "x86_64-unknown-linux-gnu"));
+        for changed in [
+            listing.replace("-rw", "lrw"),
+            listing.replace("/VERSION", "/../VERSION"),
+            format!("{listing}{listing}"),
+            listing.replace(&format!("-rw------- 0 0 0 0 {root}/VERSION\n"), ""),
+        ] {
+            assert!(!safe_listing(&changed, root, "x86_64-unknown-linux-gnu"));
+        }
+        assert!(target("Windows", "AMD64").is_ok());
+        assert!(target("Darwin", "arm64").is_ok());
+        assert!(target("Linux", "aarch64").is_err());
+    }
+
+    #[test]
+    fn corrupt_archive_is_refused_before_tar_or_execution() {
+        let (metadata, sums) = release_fixture();
+        let artifact = resolve_release(
+            Version([2, 1, 0]),
+            "x86_64-unknown-linux-gnu",
+            &metadata,
+            &sums,
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!("tempo-corrupt-{}", crypto_nonce()));
+        std::fs::write(&path, b"interrupted transfer").unwrap();
+        let error = inspect_bundle(&artifact, &path).unwrap_err();
+        assert!(error.contains("changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"interrupted transfer");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn crypto_nonce() -> String {
+        super::super::crypto::hex(&super::super::crypto::random(8))
     }
 }

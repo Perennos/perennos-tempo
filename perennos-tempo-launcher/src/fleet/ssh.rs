@@ -665,4 +665,51 @@ mod tests {
             .shown
             .contains("Bootstrap pending"));
     }
+
+    #[test]
+    fn a_child_that_refuses_input_cannot_outlive_the_transfer_deadline() {
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    "Start-Sleep -Seconds 10".into(),
+                ],
+            )
+        } else {
+            ("sh", vec!["-c".into(), "sleep 10".into()])
+        };
+        let started = Instant::now();
+        let result = run_program(
+            program,
+            &args,
+            Some(vec![0; 4 * 1024 * 1024]),
+            Duration::from_millis(300),
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_descendant_holding_output_is_cleaned_at_the_same_deadline() {
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    "& $env:ComSpec /c 'start /b ping -n 15 127.0.0.1 >nul'; exit 0".into(),
+                ],
+            )
+        } else {
+            ("sh", vec!["-c".into(), "sleep 10 & exit 0".into()])
+        };
+        let started = Instant::now();
+        let result = run_program(program, &args, None, Duration::from_millis(500));
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
 }

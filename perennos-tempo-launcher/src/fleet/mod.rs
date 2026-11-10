@@ -12,6 +12,7 @@ pub mod crypto;
 pub mod jobs;
 pub mod mdns;
 pub mod msg;
+pub mod onboarding;
 pub mod page;
 pub mod pair;
 pub mod route;
@@ -765,7 +766,7 @@ pub fn setup_cmd(
     };
     let _ = writeln!(
         out,
-        "{} ({}) at {}:{}; Tempo {} is already installed in {}.",
+        "{} ({}) at {}:{}; Perennos Tempo {} will use {}.",
         plan.name,
         plan.target,
         plan.private_addr,
@@ -775,7 +776,7 @@ pub fn setup_cmd(
     );
     let _ = writeln!(
         out,
-        "This sends the fleet key on SSH input and starts the messenger. Ollama, models and sign-in settings stay as they are."
+        "This installs missing verified controls, starts this computer's messenger for this session if needed, sends the fleet key on SSH input, and enables a per-user background messenger on the other computer. Models and their settings stay as they are."
     );
     if !yes && !ask("Link this computer now? [y/N] ") {
         let _ = writeln!(out, "Nothing was changed.");
@@ -786,7 +787,7 @@ pub fn setup_cmd(
         Ok(()) => {
             let _ = writeln!(
                 out,
-                "{} is linked. Ollama, models and sign-in settings were left as they are.",
+                "{} is linked. Models and their settings were left as they are.",
                 plan.name
             );
             0
@@ -799,6 +800,18 @@ pub fn setup_cmd(
 }
 /// `fleet install-key`: what the other end of `fleet setup` runs. The key comes on standard
 /// input as hex; an existing different key is kept aside, never overwritten.
+fn peer_endpoint(endpoint: &str) -> Option<(&str, u16)> {
+    if let Ok(socket) = endpoint.parse::<std::net::SocketAddr>() {
+        let host = if endpoint.starts_with('[') {
+            endpoint.strip_prefix('[')?.split_once(']')?.0
+        } else {
+            endpoint.rsplit_once(':')?.0
+        };
+        return (socket.port() != 0 && allowed_remote_host(host)).then_some((host, socket.port()));
+    }
+    allowed_remote_host(endpoint).then_some((endpoint, store::fleet_port()))
+}
+
 pub fn install_key(
     p: &Paths,
     name: Option<&str>,
@@ -828,16 +841,25 @@ pub fn install_key(
         for pe in peers {
             // `name=address`, or `name=address#identity` (the identity to pin, 64 hex characters)
             if let Some((n, rest)) = pe.split_once('=') {
-                let (a, id) = rest.split_once('#').unwrap_or((rest, ""));
+                let (endpoint, id) = rest.split_once('#').unwrap_or((rest, ""));
+                let (a, port) = match peer_endpoint(endpoint) {
+                    Some(value) => value,
+                    None => continue,
+                };
                 let n = store::clean_name(n);
                 if allowed_remote_host(a) && !n.is_empty() {
                     let i = match f.find(&n) {
                         Some(i) => {
                             f.machines[i].addr = a.to_string();
+                            if endpoint.parse::<std::net::SocketAddr>().is_ok() {
+                                f.machines[i].port = port;
+                            }
                             i
                         }
                         None => {
-                            f.machines.push(Machine::new(&n, a, "both"));
+                            let mut member = Machine::new(&n, a, "agent");
+                            member.port = port;
+                            f.machines.push(member);
                             f.machines.len() - 1
                         }
                     };
@@ -1697,11 +1719,8 @@ pub fn run(ctx: &Ctx, cmd: FleetCmd) -> i32 {
         FleetCmd::Send { who, text } => send_cmd(&p, &who, &text, &mut out),
         FleetCmd::Inbox => inbox_cmd(&p, &mut out),
         FleetCmd::Ping(w) => ping_cmd(&p, &w, &mut out),
-        FleetCmd::Page => match page::write(ctx) {
-            Ok(f) => {
-                let _ = ctx.open(&f.to_string_lossy());
-                0
-            }
+        FleetCmd::Page => match onboarding::run(ctx) {
+            Ok(()) => 0,
             Err(e) => {
                 eprintln!("tempo-launch: fleet page: {e}");
                 1

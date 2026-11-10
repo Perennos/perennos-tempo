@@ -191,6 +191,12 @@ fn install_key_updates_only_valid_peer_addresses_and_keeps_existing_fields() {
     let got = store::load(&r.paths).machines.remove(0);
     assert_eq!(got.addr, "10.0.0.4");
     assert_eq!(got.id, updated_id);
+    let explicit_port = [format!("worker=10.0.0.4:9123#{updated_id}")];
+    assert_eq!(
+        super::install_key(&r.paths, None, &explicit_port, &key, &mut out),
+        0
+    );
+    assert_eq!(store::load(&r.paths).machines[0].port, 9123);
 }
 
 #[test]

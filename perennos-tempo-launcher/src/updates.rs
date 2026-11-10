@@ -264,7 +264,7 @@ impl Fetch for Offline {
     }
 }
 
-fn check_local(home: &Path, automatic: bool) -> Result<Cache, String> {
+pub(crate) fn check_local(home: &Path, automatic: bool) -> Result<Cache, String> {
     let fetcher = crate::setup::registry::real_fetcher(&crate::setup::probe::RealHost);
     match fetcher {
         Some(f) => check_with(home, f.as_ref(), unix_now(), automatic),

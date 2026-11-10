@@ -956,6 +956,10 @@ pub fn signed(body: &str, signs: &[&str]) -> bool {
 // Test-local override: only the owning test thread can suppress and count health probes.
 #[cfg(test)]
 thread_local! {
+    #[cfg_attr(
+        all(windows, target_env = "gnu"),
+        expect(clippy::missing_const_for_thread_local, reason = "initializer is already const; reproduced with Clippy 0.1.99 on Windows GNU")
+    )]
     static STATUS_FAKE_PROBES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
