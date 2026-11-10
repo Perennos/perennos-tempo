@@ -17,6 +17,7 @@ pub mod bank;
 pub mod brand;
 pub mod conductor;
 pub mod fleet;
+pub mod foundry;
 pub mod home;
 pub mod retune;
 pub mod setup;
