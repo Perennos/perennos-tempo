@@ -192,29 +192,43 @@ pub struct TestDir(std::path::PathBuf);
 
 #[cfg(test)]
 impl TestDir {
+    fn create(path: std::path::PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+
     pub fn new(tag: &str) -> Self {
         assert!(tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        loop {
-            let path = std::env::temp_dir().join(format!("tempo-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-            match std::fs::create_dir(&path) {
-                Ok(()) => return Self(path),
+        for _ in 0..128 {
+            let path = std::env::temp_dir().join(format!(
+                "tempo-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match Self::create(path) {
+                Ok(dir) => return dir,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => panic!("cannot create test directory: {e}"),
             }
         }
+        panic!("could not create an exclusive test directory after 128 collisions");
     }
 }
 
 #[cfg(test)]
 impl std::ops::Deref for TestDir {
     type Target = std::path::Path;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 #[cfg(test)]
 impl AsRef<std::path::Path> for TestDir {
-    fn as_ref(&self) -> &std::path::Path { &self.0 }
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
 }
 
 #[cfg(test)]
@@ -223,9 +237,15 @@ impl Drop for TestDir {
         if let Err(e) = std::fs::remove_dir_all(&self.0) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 if std::thread::panicking() {
-                    eprintln!("could not remove owned test directory {}: {e}", self.0.display());
+                    eprintln!(
+                        "could not remove owned test directory {}: {e}",
+                        self.0.display()
+                    );
                 } else {
-                    panic!("could not remove owned test directory {}: {e}", self.0.display());
+                    panic!(
+                        "could not remove owned test directory {}: {e}",
+                        self.0.display()
+                    );
                 }
             }
         }
@@ -233,12 +253,17 @@ impl Drop for TestDir {
 }
 
 #[cfg(test)]
-pub struct TestCtx { ctx: Ctx, _dir: TestDir }
+pub struct TestCtx {
+    ctx: Ctx,
+    _dir: TestDir,
+}
 
 #[cfg(test)]
 impl std::ops::Deref for TestCtx {
     type Target = Ctx;
-    fn deref(&self) -> &Ctx { &self.ctx }
+    fn deref(&self) -> &Ctx {
+        &self.ctx
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +287,15 @@ mod tests {
     #[test]
     fn test_directories_are_exclusive_and_cleaned_on_drop_and_unwind() {
         let survivor = TestDir::new("woodshed-owner");
+        let existing = survivor.join("preexisting");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::write(existing.join("sentinel"), "untouched").unwrap();
+        let error = TestDir::create(existing.clone()).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(existing.join("sentinel")).unwrap(),
+            "untouched"
+        );
         let mut removed = std::path::PathBuf::new();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let dir = TestDir::new("woodshed-owner");

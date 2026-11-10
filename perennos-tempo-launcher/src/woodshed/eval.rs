@@ -457,12 +457,19 @@ mod tests {
                 let mut s = loop {
                     match l.accept() {
                         Ok((s, _)) => break s,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(10))
+                        }
                         _ => return,
                     }
                 };
-                s.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
-                s.set_write_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                s.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                s.set_write_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
                 let mut buf = vec![0u8; 8192];
                 let n = s.read(&mut buf).unwrap();
                 *g2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();

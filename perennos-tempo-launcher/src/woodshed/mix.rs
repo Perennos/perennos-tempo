@@ -683,15 +683,21 @@ mod tests {
             self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(thread) = self.thread.take() {
                 if thread.join().is_err() {
-                    if std::thread::panicking() { eprintln!("fake server thread panicked"); }
-                    else { panic!("fake server thread panicked"); }
+                    if std::thread::panicking() {
+                        eprintln!("fake server thread panicked");
+                    } else {
+                        panic!("fake server thread panicked");
+                    }
                 }
             }
         }
     }
 
     /// A stand-in for llama-server's two lora endpoints, joined even on test unwind.
-    fn fake_llama_on(l: std::net::TcpListener, adapters: &str) -> (std::sync::Arc<std::sync::Mutex<Vec<String>>>, FakeServer) {
+    fn fake_llama_on(
+        l: std::net::TcpListener,
+        adapters: &str,
+    ) -> (std::sync::Arc<std::sync::Mutex<Vec<String>>>, FakeServer) {
         l.set_nonblocking(true).unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let (s2, body) = (seen.clone(), adapters.to_string());
@@ -723,10 +729,22 @@ mod tests {
                 let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
             }
         });
-        (seen, FakeServer { stop, thread: Some(thread) })
+        (
+            seen,
+            FakeServer {
+                stop,
+                thread: Some(thread),
+            },
+        )
     }
 
-    fn fake_llama(adapters: &str) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>, FakeServer) {
+    fn fake_llama(
+        adapters: &str,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        FakeServer,
+    ) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let (seen, server) = fake_llama_on(l, adapters);
