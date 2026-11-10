@@ -1,0 +1,7 @@
+{
+  "kind": "cmd",
+  "argv": ["tempo-desk", "harness"],
+  "timeout": 180,
+  "egress":  {"begin": ["./capture.sh", "begin"], "end": ["./capture.sh", "end"]},
+  "restart": {"kill": ["pkill", "-9", "-f", "tempo-desk serve"], "start": ["tempo-desk", "serve", "--detach"]}
+}
