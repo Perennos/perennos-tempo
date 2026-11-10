@@ -10,6 +10,34 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SSH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct TestSsh(
+    Option<std::path::PathBuf>,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
+
+#[cfg(test)]
+pub(super) fn test_ssh(path: std::path::PathBuf) -> TestSsh {
+    TestSsh(
+        TEST_SSH.with(|slot| slot.replace(Some(path))),
+        std::marker::PhantomData,
+    )
+}
+
+#[cfg(test)]
+impl Drop for TestSsh {
+    fn drop(&mut self) {
+        TEST_SSH.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
 /// The arguments before the host: the three options, and nothing the remote side can change.
 pub fn base_args() -> Vec<String> {
     [
@@ -160,6 +188,16 @@ fn run_program(
         return Err("SSH input exceeded the 64 MiB transfer limit".into());
     }
     let deadline = Instant::now() + limit;
+    #[cfg(test)]
+    let mut cmd = if program == "ssh" {
+        let fake = TEST_SSH
+            .with(|slot| slot.borrow().clone())
+            .ok_or("test SSH requires a scoped fake executable")?;
+        Command::new(fake)
+    } else {
+        Command::new(program)
+    };
+    #[cfg(not(test))]
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(if stdin.is_some() {
@@ -603,6 +641,31 @@ pub fn exists(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ssh_is_scoped_thread_local_and_unwinds_without_host_ssh() {
+        assert!(run(&[], None, Duration::ZERO)
+            .err()
+            .unwrap()
+            .contains("scoped fake executable"));
+        let first = std::path::PathBuf::from("first-fake");
+        let _first = test_ssh(first.clone());
+        assert_eq!(
+            TEST_SSH.with(|slot| slot.borrow().clone()),
+            Some(first.clone())
+        );
+        assert!(
+            std::thread::spawn(|| TEST_SSH.with(|slot| slot.borrow().is_none()))
+                .join()
+                .unwrap()
+        );
+        let unwind = std::panic::catch_unwind(|| {
+            let _nested = test_ssh(std::path::PathBuf::from("nested-fake"));
+            panic!("fixture panic");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(TEST_SSH.with(|slot| slot.borrow().clone()), Some(first));
+    }
 
     #[test]
     fn the_arguments_are_the_three_options_then_the_host_then_the_command() {

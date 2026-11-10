@@ -491,8 +491,7 @@ fn the_first_scan_says_what_it_does_and_a_no_scans_nothing() {
 #[cfg(unix)]
 struct FakeSsh {
     dir: PathBuf,
-    old_path: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _override: ssh::TestSsh,
 }
 
 #[cfg(unix)]
@@ -504,20 +503,7 @@ impl std::ops::Deref for FakeSsh {
 }
 
 #[cfg(unix)]
-impl Drop for FakeSsh {
-    fn drop(&mut self) {
-        if let Some(path) = &self.old_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-    }
-}
-
-#[cfg(unix)]
 fn fake_ssh() -> FakeSsh {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmp("fake-ssh");
     let script = dir.join("ssh");
     std::fs::write(
@@ -543,16 +529,9 @@ esac
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut parts = vec![dir.clone()];
-    if let Some(path) = &old_path {
-        parts.extend(std::env::split_paths(path));
-    }
-    std::env::set_var("PATH", std::env::join_paths(parts).unwrap());
     FakeSsh {
         dir,
-        old_path,
-        _lock: lock,
+        _override: ssh::test_ssh(script),
     }
 }
 
