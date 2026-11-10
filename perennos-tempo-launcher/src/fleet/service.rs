@@ -29,8 +29,30 @@ pub fn entry(exe: &Path) -> Result<String, String> {
     }
 }
 
+/// True when the path runs through a cargo output folder (`target/{debug,release,deps}`),
+/// written with `/` or `\`.
+fn in_cargo_target(exe: &Path) -> bool {
+    let p = exe.to_string_lossy();
+    let parts: Vec<&str> = p.split(['/', '\\']).collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == "target" && matches!(w[1], "debug" | "release" | "deps"))
+}
+
+/// True for a cargo build output, and always under `cargo test`, where `current_exe()` is the
+/// test binary. Such a program must never be scheduled or spawned as the messenger: the test
+/// harness reads `fleet serve` as test filters and reruns itself without end.
+pub fn is_dev_build(exe: &Path) -> bool {
+    cfg!(test) || in_cargo_target(exe)
+}
+
+pub const DEV_BUILD_NOTE: &str = "this is a development build (a cargo target folder, or a test run); it is not scheduled or started as the fleet messenger";
+
 /// Put the entry in (or take it out). Returns what was done, in words.
 pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
+    if is_dev_build(exe) {
+        return Ok(DEV_BUILD_NOTE.into());
+    }
     if cfg!(target_os = "macos") {
         return Ok(
             "on a Mac, tempo-launch start (run at sign-in) starts the fleet messenger".into(),
@@ -102,5 +124,35 @@ mod tests {
             assert!(e.starts_with("*/5 * * * * ") && e.ends_with(MARK));
             assert!(entry(Path::new("/opt/te'mpo/x")).is_err());
         }
+    }
+
+    #[test]
+    fn cargo_outputs_are_dev_builds_and_installed_programs_are_not() {
+        for p in [
+            r"D:\w\target\debug\deps\tempo_launch-1a2b.exe",
+            r"C:\x\target\release\tempo-launch.exe",
+            "/home/x/target/debug/deps/tempo_launch-1a2b",
+            "/home/x/repo/target/release/tempo-launch",
+        ] {
+            assert!(
+                in_cargo_target(Path::new(p)) && is_dev_build(Path::new(p)),
+                "{p}"
+            );
+        }
+        // under cargo test is_dev_build is true for everything, so the path rule is checked alone
+        for p in [
+            r"C:\Users\x\AppData\Local\Programs\Perennos Tempo\bin\tempo-launch.exe",
+            "/usr/local/bin/tempo-launch",
+        ] {
+            assert!(!in_cargo_target(Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn install_of_a_dev_build_runs_nothing() {
+        // returns the note at once: no schtasks, crontab or systemctl is started
+        let exe = Path::new("/x/target/debug/deps/tempo_launch-1");
+        assert_eq!(install(exe, false).unwrap(), DEV_BUILD_NOTE);
+        assert_eq!(install(exe, true).unwrap(), DEV_BUILD_NOTE);
     }
 }

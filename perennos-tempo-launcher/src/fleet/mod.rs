@@ -1266,7 +1266,10 @@ pub fn invite_cmd(p: &Paths, wait: bool, out: &mut dyn Write) -> i32 {
     let port = store::fleet_port();
     if !hello_answers(port) {
         // the messenger has to be up to hear the new computer knock
-        if let Ok(exe) = std::env::current_exe() {
+        let exe = std::env::current_exe().ok();
+        if exe.as_deref().is_some_and(service::is_dev_build) {
+            eprintln!("tempo-launch: fleet invite: {}", service::DEV_BUILD_NOTE);
+        } else if let Some(exe) = exe {
             let mut c = std::process::Command::new(exe);
             // an invite is the moment to be found by name (mDNS), so the new computer finds this one at once
             c.args(["fleet", "serve", "--quiet", "--announce"])
@@ -1735,6 +1738,10 @@ pub fn autostart(ctx: &Ctx) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
+    if service::is_dev_build(&exe) {
+        ctx.note(&format!("fleet: {}", service::DEV_BUILD_NOTE));
+        return;
+    }
     let log = crate::open_log(&ctx.log_path("fleet")).ok();
     let mut c = std::process::Command::new(exe);
     c.args(["fleet", "serve", "--quiet"])
