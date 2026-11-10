@@ -3,11 +3,30 @@
 //! has to start it every few minutes; it is installed when the fleet has more than one machine.
 //! On a Mac, `tempo-launch start` (what sign-in runs) starts it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const TASK: &str = "Perennos Tempo Fleet";
 const MARK: &str = "# perennos-tempo-fleet";
+
+// Cargo's output root can be configured and its profile can have any name. Look for the
+// profile's build structure, not a directory named `target`; canonicalize before use so an
+// ordinary symlink to a build artifact does not bypass the check. This is a guard, not a
+// signature or proof of an executable's origin.
+fn in_build_tree(exe: &Path, is_dir: impl Fn(&Path) -> bool) -> bool {
+    exe.ancestors().skip(1).any(|dir| {
+        is_dir(&dir.join(".fingerprint")) && is_dir(&dir.join("deps")) && is_dir(&dir.join("build"))
+    })
+}
+
+pub(super) fn background_executable(exe: &Path) -> Result<PathBuf, String> {
+    let path = std::fs::canonicalize(exe)
+        .map_err(|e| format!("cannot resolve the fleet executable: {e}"))?;
+    if in_build_tree(&path, Path::is_dir) {
+        return Err("fleet self-start and scheduling refuse Cargo build artifacts".into());
+    }
+    Ok(path)
+}
 
 /// The cron line, or the Windows task command.
 pub fn entry(exe: &Path) -> Result<String, String> {
@@ -31,18 +50,20 @@ pub fn entry(exe: &Path) -> Result<String, String> {
 
 /// Put the entry in (or take it out). Returns what was done, in words.
 pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
-    if cfg!(target_os = "macos") {
-        return Ok(
-            "on a Mac, tempo-launch start (run at sign-in) starts the fleet messenger".into(),
-        );
-    }
-    let e = entry(exe)?;
     if cfg!(test) {
+        let e = entry(exe)?;
         return Ok(format!(
             "test run: would {} {e}",
             if remove { "remove" } else { "install" }
         ));
     }
+    let exe = background_executable(exe)?;
+    if cfg!(target_os = "macos") {
+        return Ok(
+            "on a Mac, tempo-launch start (run at sign-in) starts the fleet messenger".into(),
+        );
+    }
+    let e = entry(&exe)?;
     if cfg!(windows) {
         let args: Vec<String> = if remove {
             vec!["/Delete".into(), "/F".into(), "/TN".into(), TASK.into()]
@@ -99,6 +120,54 @@ pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_profiles_are_refused_even_with_custom_target_directories() {
+        for path in [
+            "C:/cargo-cache/debug/deps/tempo_launch-0123456789abcdef.exe",
+            "C:/cargo-cache/x86_64-pc-windows-gnu/release/tempo-launch.exe",
+            "/home/a/out/custom-profile/deps/tempo_launch-0123456789abcdef",
+            "/home/a/out/x86_64-unknown-linux-gnu/debug/tempo-launch",
+        ] {
+            let exe = Path::new(path);
+            let profile = if exe.parent().unwrap().ends_with("deps") {
+                exe.parent().unwrap().parent().unwrap()
+            } else {
+                exe.parent().unwrap()
+            };
+            assert!(
+                in_build_tree(exe, |p| [".fingerprint", "deps", "build"]
+                    .iter()
+                    .any(|name| p == profile.join(name))),
+                "{path}"
+            );
+        }
+        assert!(!in_build_tree(
+            Path::new("C:/Users/a/AppData/Local/Programs/Perennos Tempo/bin/tempo-launch.exe"),
+            |_| false
+        ));
+        assert!(!in_build_tree(
+            Path::new("/home/a/.local/bin/tempo-launch"),
+            |_| false
+        ));
+    }
+
+    #[test]
+    fn actual_build_structure_refuses_self_start_without_touching_a_schedule() {
+        let root = super::super::tests::tmp("build-guard");
+        let profile = root.join("arbitrary-target/custom-profile");
+        for dir in [".fingerprint", "deps", "build"] {
+            std::fs::create_dir_all(profile.join(dir)).unwrap();
+        }
+        let artifact = profile.join("deps/tempo_launch-test.exe");
+        std::fs::write(&artifact, b"fixture").unwrap();
+        assert!(background_executable(&artifact).is_err());
+        let installed = root.join("bin/tempo-launch.exe");
+        std::fs::create_dir(root.join("bin")).unwrap();
+        std::fs::write(&installed, b"fixture").unwrap();
+        assert!(background_executable(&installed).is_ok());
+        assert!(background_executable(&root.join("missing")).is_err());
+    }
 
     #[test]
     fn the_entry_runs_serve_quietly_and_refuses_odd_paths() {

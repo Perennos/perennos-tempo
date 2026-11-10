@@ -1256,14 +1256,17 @@ fn ensure_invite_messenger(port: u16) -> bool {
     {
         if !hello_answers(port) {
             // A test harness is not the fleet messenger, so only a real launch may start it.
-            if let Ok(exe) = std::env::current_exe() {
-                let mut c = std::process::Command::new(exe);
-                c.args(["fleet", "serve", "--quiet"])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                let _ = crate::spawn_hidden(&mut c);
-            }
+            let Ok(exe) = std::env::current_exe()
+                .and_then(|p| service::background_executable(&p).map_err(std::io::Error::other))
+            else {
+                return false;
+            };
+            let mut c = std::process::Command::new(exe);
+            c.args(["fleet", "serve", "--quiet"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let _ = crate::spawn_hidden(&mut c);
             for _ in 0..50 {
                 if hello_answers(port) {
                     break;
@@ -1652,7 +1655,9 @@ pub fn autostart(ctx: &Ctx) {
         if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
             return;
         }
-        let Ok(exe) = std::env::current_exe() else {
+        let Ok(exe) = std::env::current_exe()
+            .and_then(|p| service::background_executable(&p).map_err(std::io::Error::other))
+        else {
             return;
         };
         let log = crate::open_log(&ctx.log_path("fleet")).ok();

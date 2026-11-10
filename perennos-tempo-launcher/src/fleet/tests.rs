@@ -7,14 +7,51 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
-/// A test's scratch folder, removed when the test's thread ends (every test gets its own
-/// thread), so a run leaves nothing behind. A `Rig` and every `paths()` live in one, and a test that
-/// drops a `Rig` to pretend the program restarted still finds its folder. It is test scratch, never user data.
-struct Scratch(PathBuf);
+/// An exclusively created test folder. It survives a simulated restart and is removed at
+/// thread exit only after tracked nodes are gone; an unconfirmed server keeps its scratch.
+struct Scratch {
+    path: PathBuf,
+    token: Vec<u8>,
+    nodes: Vec<std::sync::Weak<Node>>,
+}
+
+impl Scratch {
+    fn create(path: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        let token = crypto::random(32);
+        let mut marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.join(".fixture-owner"))?;
+        marker.write_all(&token)?;
+        Ok(Self {
+            path,
+            token,
+            nodes: Vec::new(),
+        })
+    }
+
+    fn idle(&self) -> bool {
+        self.nodes.iter().all(|node| node.strong_count() == 0)
+    }
+}
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !self.idle() {
+            if std::time::Instant::now() >= deadline {
+                return; // A detached server may still use this fixture: retain it.
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let marker = self.path.join(".fixture-owner");
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_dir())
+            && std::fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
+            && std::fs::read(marker).is_ok_and(|token| token == self.token)
+        {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 
@@ -29,39 +66,25 @@ thread_local! {
     static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Once per run: scratch folders an earlier, interrupted run left over (over 24 hours old).
-fn sweep_stale() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let old = Duration::from_secs(24 * 60 * 60);
-        let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
-            return;
-        };
-        for e in rd.flatten() {
-            let stale = e.file_name().to_string_lossy().starts_with("tempo-fleet-")
-                && e.metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > old);
-            if stale {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    });
-}
-
 pub fn tmp(tag: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    sweep_stale();
-    let d = std::env::temp_dir().join(format!(
-        "tempo-fleet-{tag}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    MINE.with(|m| m.borrow_mut().push(Scratch(d.clone())));
-    d
+    for _ in 0..32 {
+        let d = std::env::temp_dir().join(format!(
+            "tempo-fleet-{tag}-{}-{}",
+            std::process::id(),
+            crypto::hex(&crypto::random(16))
+        ));
+        match Scratch::create(d.clone()) {
+            Ok(scratch) => {
+                let fixture = d.join("fixture");
+                std::fs::create_dir(&fixture).expect("cannot create Fleet test fixture");
+                MINE.with(|m| m.borrow_mut().push(scratch));
+                return fixture;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot create owned Fleet test scratch: {e}"),
+        }
+    }
+    panic!("could not allocate unique Fleet test scratch")
 }
 
 pub fn paths(tag: &str) -> Paths {
@@ -70,6 +93,65 @@ pub fn paths(tag: &str) -> Paths {
         home: d.join("home"),
         agent_data: d.join("home").join("agent"),
     }
+}
+
+pub fn open_node(paths: &Paths, key: [u8; 32]) -> Result<Arc<Node>, String> {
+    let node = Node::open(paths, key)?;
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .expect("node must belong to this test's owned scratch");
+        scratch.nodes.push(Arc::downgrade(&node));
+    });
+    Ok(node)
+}
+
+#[test]
+fn scratch_refuses_existing_directories_and_cleans_its_own_on_panic() {
+    let root = tmp("scratch-ownership");
+    let existing = root.join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::write(existing.join("keep"), b"not ours").unwrap();
+    assert_eq!(
+        Scratch::create(existing.clone()).err().unwrap().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(std::fs::read(existing.join("keep")).unwrap(), b"not ours");
+    let owned = root.join("owned");
+    let result = std::panic::catch_unwind(|| {
+        let _scratch = Scratch::create(owned.clone()).unwrap();
+        std::fs::write(owned.join("fixture"), b"ours").unwrap();
+        panic!("fixture panic");
+    });
+    assert!(result.is_err());
+    assert!(!owned.exists());
+    assert!(existing.join("keep").exists());
+    let uncertain = root.join("uncertain");
+    let scratch = Scratch::create(uncertain.clone()).unwrap();
+    std::fs::write(uncertain.join(".fixture-owner"), b"changed").unwrap();
+    drop(scratch);
+    assert!(uncertain.exists());
+}
+
+#[test]
+fn scratch_waits_for_its_nodes_before_cleanup() {
+    let root = tmp("scratch-node");
+    let owned = root.join("owned");
+    let mut scratch = Scratch::create(owned.clone()).unwrap();
+    let paths = Paths {
+        home: owned.join("home"),
+        agent_data: owned.join("agent"),
+    };
+    std::fs::create_dir(&paths.home).unwrap();
+    let node = Node::open(&paths, [7; 32]).unwrap();
+    scratch.nodes.push(Arc::downgrade(&node));
+    assert!(!scratch.idle());
+    drop(node);
+    assert!(scratch.idle());
+    drop(scratch);
+    assert!(!owned.exists());
 }
 
 fn free_port() -> u16 {
@@ -91,7 +173,7 @@ pub struct Rig {
 pub fn rig(name: &str, key: [u8; 32]) -> Rig {
     let paths = paths(name);
     store::update(&paths, |f| f.me = name.into()).unwrap();
-    let node = Node::open(&paths, key).unwrap();
+    let node = open_node(&paths, key).unwrap();
     // A free port can be taken by a parallel test between asking and binding, so try a few.
     let (port, handle) = (0..20)
         .find_map(|_| {
@@ -407,15 +489,40 @@ fn the_first_scan_says_what_it_does_and_a_no_scans_nothing() {
 // ---- ssh, with a fake ssh on PATH
 
 #[cfg(unix)]
-fn fake_ssh() -> PathBuf {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    let dir = std::env::temp_dir().join(format!("tempo-fake-ssh-{}", std::process::id()));
-    ONCE.call_once(|| {
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("ssh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
+struct FakeSsh {
+    dir: PathBuf,
+    old_path: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for FakeSsh {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.dir
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeSsh {
+    fn drop(&mut self) {
+        if let Some(path) = &self.old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn fake_ssh() -> FakeSsh {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp("fake-ssh");
+    let script = dir.join("ssh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
 d="$(dirname "$0")"
 echo "$@" >> "$d/log"
 case "$*" in *10.0.0.33*) echo "Permission denied (publickey)." >&2; exit 255;; esac
@@ -432,19 +539,21 @@ case "$*" in
   *) echo "ran: $*";;
 esac
 "#,
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut parts = vec![dir.clone()];
-        parts.extend(std::env::split_paths(&path));
-        std::env::set_var("PATH", std::env::join_paths(parts).unwrap());
-    });
-    dir
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut parts = vec![dir.clone()];
+    if let Some(path) = &old_path {
+        parts.extend(std::env::split_paths(path));
+    }
+    std::env::set_var("PATH", std::env::join_paths(parts).unwrap());
+    FakeSsh {
+        dir,
+        old_path,
+        _lock: lock,
+    }
 }
 
 #[cfg(unix)]
@@ -484,7 +593,7 @@ fn ssh_runs_with_the_three_options_and_reports_what_the_other_side_said() {
 #[cfg(unix)]
 #[test]
 fn check_reads_the_machine_and_records_the_result_and_a_failure() {
-    fake_ssh();
+    let _ssh = fake_ssh();
     let p = paths("sshcheck");
     store::update(&p, |f| {
         f.machines
@@ -1004,11 +1113,11 @@ fn nothing_is_lost_when_the_peer_is_down_and_a_retry_is_never_a_second_message()
     // this program stops and starts again: the outbox is still there
     let paths = a.paths.clone();
     drop(a);
-    let a2 = Node::open(&paths, KEY).unwrap();
+    let a2 = open_node(&paths, KEY).unwrap();
     assert_eq!(a2.queued(Some("later")), 1);
 
     // the peer comes up on that port
-    let bnode = Node::open(&bpaths, KEY).unwrap();
+    let bnode = open_node(&bpaths, KEY).unwrap();
     let _h = serve::listen(&bnode, &[SocketAddr::from(([127, 0, 0, 1], port))]).unwrap();
     a2.retry_now();
     assert_eq!(a2.deliver(&to_b), Ok(1));

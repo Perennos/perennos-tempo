@@ -1489,12 +1489,10 @@ mod tests {
 
     #[test]
     fn other_fleet_key_is_refused_before_install_or_pairing() {
+        let root = super::super::tests::tmp("other-fleet");
         let paths = Paths {
-            home: std::env::temp_dir().join(format!(
-                "tempo-other-fleet-{}",
-                crypto::hex(&crypto::random(8))
-            )),
-            agent_data: std::env::temp_dir(),
+            home: root.join("home"),
+            agent_data: root.join("agent"),
         };
         let mut p = plan();
         p.key_hash = "a".repeat(64);
@@ -1506,12 +1504,10 @@ mod tests {
 
     #[test]
     fn invalid_local_key_is_never_treated_as_permission_to_replace_it() {
+        let root = super::super::tests::tmp("local-key");
         let paths = Paths {
-            home: std::env::temp_dir().join(format!(
-                "tempo-local-key-{}",
-                crypto::hex(&crypto::random(8))
-            )),
-            agent_data: std::env::temp_dir(),
+            home: root.join("home"),
+            agent_data: root.join("agent"),
         };
         assert!(check_local_key(&paths).is_ok());
         std::fs::create_dir_all(&paths.home).unwrap();
@@ -1527,12 +1523,10 @@ mod tests {
 
     #[test]
     fn absent_local_key_is_created_once_and_never_replaced() {
+        let root = super::super::tests::tmp("create-key");
         let paths = Paths {
-            home: std::env::temp_dir().join(format!(
-                "tempo-create-key-{}",
-                crypto::hex(&crypto::random(8))
-            )),
-            agent_data: std::env::temp_dir(),
+            home: root.join("home"),
+            agent_data: root.join("agent"),
         };
         assert!(initialize_local_key(&paths).unwrap());
         let first = std::fs::read(paths.file("fleet.key")).unwrap();

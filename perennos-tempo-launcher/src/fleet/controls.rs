@@ -553,15 +553,10 @@ mod tests {
             &sums,
         )
         .unwrap();
-        let path = std::env::temp_dir().join(format!("tempo-corrupt-{}", crypto_nonce()));
+        let path = super::super::tests::tmp("corrupt").join("archive");
         std::fs::write(&path, b"interrupted transfer").unwrap();
         let error = inspect_bundle(&artifact, &path).unwrap_err();
         assert!(error.contains("changed"));
         assert_eq!(std::fs::read(&path).unwrap(), b"interrupted transfer");
-        std::fs::remove_file(path).unwrap();
-    }
-
-    fn crypto_nonce() -> String {
-        super::super::crypto::hex(&super::super::crypto::random(8))
     }
 }

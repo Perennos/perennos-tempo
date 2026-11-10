@@ -695,10 +695,10 @@ mod tests {
         let handle = gate.review(48);
         gate.pending = None;
         assert!(gate.consume(&handle).is_err());
+        let root = super::super::tests::tmp("poll");
         let paths = Paths {
-            home: std::env::temp_dir()
-                .join(format!("tempo-poll-{}", crypto::hex(&crypto::random(8)))),
-            agent_data: std::env::temp_dir(),
+            home: root.join("home"),
+            agent_data: root.join("agent"),
         };
         let state = Arc::new(Mutex::new(State::new()));
         for _ in 0..5 {
