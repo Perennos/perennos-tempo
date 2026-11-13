@@ -371,7 +371,7 @@ impl Studio {
 }
 
 /// A home with paint-edit-photo added and on: its workflow file in place, its models in place.
-pub fn ready(tag: &str) -> (Ctx, Catalog, PathBuf) {
+pub fn ready(tag: &str) -> (Ctx, Catalog, crate::woodshed::takes::TestDir) {
     let d = tmp(tag);
     let ctx = ctx_in(&d.join("home"));
     std::fs::create_dir_all(&ctx.home).unwrap();

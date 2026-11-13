@@ -354,7 +354,7 @@ fn stop_for_restart(rig: Rig) -> Result<Paths, String> {
     {
         return Err("restart node has untracked handler work".into());
     }
-    MINE.with(|m| {
+    MINE.with(|m| -> Result<(), String> {
         let mut fixtures = m.borrow_mut();
         let scratch = fixtures
             .iter_mut()
