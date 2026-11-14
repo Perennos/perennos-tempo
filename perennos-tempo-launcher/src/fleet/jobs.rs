@@ -9,18 +9,30 @@ use crate::setup::json::{parse, J};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerOutput {
+    pub text: String,
+    pub tool_calls: usize,
+    pub tool_digest: String,
+}
+
 pub trait Runner: Send + Sync {
-    fn run(&self, model: &str, role: &str, prompt: &str) -> Result<String, String>;
+    fn run(&self, model: &str, role: &str, prompt: &str) -> Result<RunnerOutput, String>;
 }
 
 /// This computer's own agent.
 pub struct AgentRunner(pub Paths);
 
 impl Runner for AgentRunner {
-    fn run(&self, model: &str, role: &str, prompt: &str) -> Result<String, String> {
+    fn run(&self, _model: &str, role: &str, prompt: &str) -> Result<RunnerOutput, String> {
         let ctx = self.0.ctx();
         crate::conductor::net::Agent::new(crate::AGENT.port, crate::agent_key(&ctx))
-            .say(model, role, prompt)
+            .say_fleet_job(role, prompt)
+            .map(|answer| RunnerOutput {
+                text: answer.text,
+                tool_calls: answer.tool_calls,
+                tool_digest: answer.tool_digest,
+            })
     }
 }
 
@@ -45,14 +57,16 @@ impl Handler for JobHandler {
                 j.str("role").unwrap_or(""),
                 j.str("prompt").unwrap_or(""),
             );
-            let (ok, text) = match r {
-                Ok(t) => (true, t),
-                Err(e) => (false, e),
+            let (ok, text, tool_calls, tool_digest) = match r {
+                Ok(out) => (true, out.text, out.tool_calls, out.tool_digest),
+                Err(e) => (false, e, 0, String::new()),
             };
             let reply = J::Obj(vec![
                 ("job".into(), J::s(&job)),
                 ("ok".into(), J::Bool(ok)),
                 ("text".into(), J::s(&text)),
+                ("tool_calls".into(), J::Num(tool_calls.to_string())),
+                ("tool_digest".into(), J::s(&tool_digest)),
             ]);
             if let Some(m) = store::load(&node.paths)
                 .machines
@@ -74,6 +88,9 @@ pub fn submit_as(
     role: &str,
     prompt: &str,
 ) -> Result<(), String> {
+    if role.len() > 2000 || prompt.len() > 16 * 1024 {
+        return Err("fleet job role or prompt exceeds its byte cap".into());
+    }
     let body = J::Obj(vec![
         ("job".into(), J::s(job)),
         ("model".into(), J::s(model)),
@@ -96,6 +113,45 @@ pub fn submit(
     Ok(job)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobResult {
+    pub text: String,
+    pub tool_calls: usize,
+    pub tool_digest: String,
+}
+
+fn receipt_from(j: &J) -> Result<(usize, String), String> {
+    let calls = j.f64("tool_calls").ok_or("the fleet job returned no tool count")?;
+    if !calls.is_finite() || calls < 0.0 || calls.fract() != 0.0 || calls > 4.0 {
+        return Err("the fleet job returned an invalid tool count".into());
+    }
+    let digest = j
+        .str("tool_digest")
+        .filter(|digest| crate::conductor::net::valid_fleet_digest(digest))
+        .ok_or("the fleet job returned no valid tool digest")?
+        .to_string();
+    Ok((calls as usize, digest))
+}
+
+pub fn wait_result(node: &Node, job: &str, limit: Duration) -> Result<JobResult, String> {
+    let m = node
+        .wait_for("result", "job", job, limit)
+        .ok_or("the other computer did not answer in time")?;
+    let j = parse(&String::from_utf8_lossy(&m.body)).map_err(|e| e.to_string())?;
+    let text = j.str("text").unwrap_or("").to_string();
+    if j.bool("ok") == Some(true) {
+        let (tool_calls, tool_digest) = receipt_from(&j)?;
+        Ok(JobResult {
+            text,
+            tool_calls,
+            tool_digest,
+        })
+    } else {
+        Err(text)
+    }
+}
+
+/// Legacy text-only wait remains usable for jobs that do not promise bounded fleet-job receipts.
 pub fn wait(node: &Node, job: &str, limit: Duration) -> Result<String, String> {
     let m = node
         .wait_for("result", "job", job, limit)
@@ -106,6 +162,25 @@ pub fn wait(node: &Node, job: &str, limit: Duration) -> Result<String, String> {
         Ok(text)
     } else {
         Err(text)
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn fleet_job_success_requires_bounded_digest_receipt() {
+        let digest = "a".repeat(64);
+        let good = parse(&format!("{{\"tool_calls\":2,\"tool_digest\":\"{digest}\"}}")).unwrap();
+        assert_eq!(receipt_from(&good), Ok((2, digest)));
+
+        let old_peer = parse("{\"tool_calls\":0}").unwrap();
+        assert!(receipt_from(&old_peer).is_err());
+        let excess = parse(&format!("{{\"tool_calls\":5,\"tool_digest\":\"{}\"}}", "b".repeat(64))).unwrap();
+        assert!(receipt_from(&excess).is_err());
+        let non_integer = parse(&format!("{{\"tool_calls\":2.5,\"tool_digest\":\"{}\"}}", "c".repeat(64))).unwrap();
+        assert!(receipt_from(&non_integer).is_err());
     }
 }
 

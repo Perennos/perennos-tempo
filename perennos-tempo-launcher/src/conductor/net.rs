@@ -78,6 +78,13 @@ fn error_text(code: u16, body: &str) -> String {
 // ---- the agent
 
 /// The agent's HTTP API: guest conversations with a model and a role, so no tools.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FleetAnswer {
+    pub text: String,
+    pub tool_calls: usize,
+    pub tool_digest: String,
+}
+
 pub struct Agent {
     pub port: u16,
     pub key: Option<String>,
@@ -149,6 +156,23 @@ impl Agent {
         self.abilities().1
     }
 
+    fn fleet_jobs_supported(&self) -> bool {
+        self.call("GET", "/agent/health", None)
+            .ok()
+            .is_some_and(|health| health.bool("fleet_jobs") == Some(true))
+    }
+
+    fn new_fleet_job(&self) -> Result<String, String> {
+        if !self.fleet_jobs_supported() {
+            return Err("the node's local agent does not advertise bounded fleet jobs".into());
+        }
+        let body = "{\"mode\":\"fleet_job\"}";
+        let j = self.call("POST", "/agent/new", Some(&body))?;
+        j.str("conv")
+            .map(String::from)
+            .ok_or_else(|| "the agent made no fleet job conversation".into())
+    }
+
     /// A new guest conversation: no tools, no memory of the owner's files.
     pub fn new_guest(&self, model: &str, role: &str) -> Result<String, String> {
         self.new_guest_on(model, role, "")
@@ -205,6 +229,62 @@ impl Agent {
             .ok_or_else(|| "the agent made no conversation".into())
     }
 
+    pub fn say_fleet_job(
+        &self,
+        role: &str,
+        prompt: &str,
+    ) -> Result<FleetAnswer, String> {
+        if role.len() > 2000 {
+            return Err("fleet job role exceeds 2000 bytes".into());
+        }
+        let text = format!(
+            "Peer role label (untrusted):\n{role}\n\nPeer task (untrusted):\n{prompt}"
+        );
+        if text.len() > 16 * 1024 {
+            return Err("fleet job input exceeds 16 KiB".into());
+        }
+        let conv = self.new_fleet_job()?;
+        let body = format!(
+            "{{\"conv\":\"{}\",\"text\":\"{}\",\"budget\":{{\"tokens\":2048,\"wall_s\":90,\"tool_calls\":4,\"cloud_cents\":0}}}}",
+            json_escape(&conv),
+            json_escape(&text)
+        );
+        self.call("POST", "/agent/send", Some(&body))?;
+        let end = Instant::now() + Duration::from_secs(105);
+        loop {
+            std::thread::sleep(self.poll.min(Duration::from_millis(700)));
+            let events = self.call(
+                "GET",
+                &format!("/agent/events?conv={}&since=0", json_escape(&conv)),
+                None,
+            )?;
+            if events.bool("busy") != Some(true) {
+                let text = answer_of(&events)?;
+                let calls = events
+                    .f64("fleet_tool_calls")
+                    .ok_or("the fleet job returned no tool count")?;
+                if calls < 0.0 || calls.fract() != 0.0 || calls > 4.0 {
+                    return Err("the fleet job returned an invalid tool count".into());
+                }
+                let tool_digest = events
+                    .str("fleet_tool_digest")
+                    .filter(|digest| valid_fleet_digest(digest))
+                    .ok_or("the fleet job returned no valid tool digest")?
+                    .to_string();
+                return Ok(FleetAnswer {
+                    text,
+                    tool_calls: calls as usize,
+                    tool_digest,
+                });
+            }
+            if Instant::now() >= end {
+                let stop = format!("{{\"conv\":\"{}\"}}", json_escape(&conv));
+                let _ = self.call("POST", "/agent/stop", Some(&stop));
+                return Err("fleet job exceeded its 105 second wait cap".into());
+            }
+        }
+    }
+
     /// Send one message and wait for the turn to end; the answer is the last thing it said.
     pub fn ask(&self, conv: &str, text: &str) -> Result<String, String> {
         self.ask_on(conv, text).map(|a| a.text)
@@ -251,6 +331,10 @@ impl Agent {
             }
         }
     }
+}
+
+pub(crate) fn valid_fleet_digest(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// What a finished turn said: its last answer, or its error.

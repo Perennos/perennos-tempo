@@ -74,6 +74,9 @@ struct ConvLog {
     /// A guest conversation, remembered here as well as in its file: if the file is lost the
     /// conversation stays a guest one (it never falls back to the owner's tools and memory).
     guest: bool,
+    fleet_job: bool,
+    fleet_tool_calls: usize,
+    fleet_tool_digest: String,
     events: Vec<Value>,
     busy: bool,
     /// File names the last turn's memory search used.
@@ -121,6 +124,15 @@ struct Job {
 
 /// The budget a send asks for: none (the turn is only stoppable), the config's defaults for
 /// `"budget": {}`, or those with any of `tokens`, `wall_s`, `tool_calls`, `cloud_cents` changed.
+fn clamp_fleet_budget(mut budget: crate::budget::Budget) -> crate::budget::Budget {
+    budget.tokens = if budget.tokens == 0 { 2048 } else { budget.tokens.min(2048) };
+    let wall = Duration::from_secs(90);
+    budget.wall_time = if budget.wall_time.is_zero() { wall } else { budget.wall_time.min(wall) };
+    budget.tool_calls = if budget.tool_calls == 0 { 4 } else { budget.tool_calls.min(4) };
+    budget.cloud_cents = 0;
+    budget
+}
+
 fn budget_of(body: &Value, cfg: &Config) -> Result<crate::budget::Budget, &'static str> {
     use crate::budget::Budget;
     let Some(b) = body.get("budget").filter(|b| !b.is_null()) else {
@@ -143,6 +155,48 @@ fn budget_of(body: &Value, cfg: &Config) -> Result<crate::budget::Budget, &'stat
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod fleet_job_policy_tests {
+    use super::*;
+
+    #[test]
+    fn mode_fails_closed_and_fleet_budget_is_bounded() {
+        assert_eq!(mode_of(&json!({})), Ok((false, false)));
+        assert_eq!(mode_of(&json!({"mode": "guest"})), Ok((true, false)));
+        assert_eq!(mode_of(&json!({"mode": "fleet_job"})), Ok((true, true)));
+        assert!(mode_of(&json!({"mode": "unknown"})).is_err());
+        assert!(mode_of(&json!({"mode": true})).is_err());
+
+        let peer_hints = (
+            Some("caller-model".to_string()),
+            Some("caller-role".to_string()),
+            Some("remote-engine".to_string()),
+            Some(json!({"type": "object"})),
+            Some("caller-band".to_string()),
+            Some("caller-part".to_string()),
+        );
+        assert_eq!(hints_for_mode(true, peer_hints.clone()), (None, None, None, None, None, None));
+        assert_eq!(hints_for_mode(false, peer_hints.clone()), peer_hints);
+
+        let zero = clamp_fleet_budget(crate::budget::Budget::unlimited());
+        assert_eq!(zero.tokens, 2048);
+        assert_eq!(zero.wall_time, Duration::from_secs(90));
+        assert_eq!(zero.tool_calls, 4);
+        assert_eq!(zero.cloud_cents, 0);
+
+        let high = clamp_fleet_budget(crate::budget::Budget {
+            tokens: 50_000,
+            wall_time: Duration::from_secs(600),
+            tool_calls: 100,
+            cloud_cents: 9,
+        });
+        assert_eq!(high.tokens, 2048);
+        assert_eq!(high.wall_time, Duration::from_secs(90));
+        assert_eq!(high.tool_calls, 4);
+        assert_eq!(high.cloud_cents, 0);
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -185,8 +239,12 @@ impl Shared {
             return false;
         };
         let saved: Value = serde_json::from_str(&txt).unwrap_or(Value::Null);
+        let fleet_job = saved["mode"] == "fleet_job";
         let mut log = ConvLog {
-            guest: saved["mode"] == "guest",
+            guest: saved["mode"] == "guest" || fleet_job,
+            fleet_job,
+            fleet_tool_calls: saved["fleet_tool_calls"].as_u64().unwrap_or(0) as usize,
+            fleet_tool_digest: saved["fleet_tool_digest"].as_str().unwrap_or("").to_string(),
             ..ConvLog::default()
         };
         for (n, ev) in saved["events"].as_array().into_iter().flatten().enumerate() {
@@ -271,6 +329,13 @@ impl Confirm for ServerConfirm {
         if conv.is_empty() {
             return false;
         }
+        if lock(&self.shared.state)
+            .convs
+            .get(&conv)
+            .is_some_and(|log| log.fleet_job)
+        {
+            return false;
+        }
         let id = format!(
             "{}{:x}",
             util::secret_id(),
@@ -344,18 +409,31 @@ fn worker(shared: Arc<Shared>, servers: BTreeMap<String, ServerCfg>, rx: mpsc::R
         let mut served = None;
         match Conv::open(&cfg, Some(&job.conv)) {
             Ok(mut conv) => {
-                if lock(&shared.state)
-                    .convs
-                    .get(&job.conv)
-                    .is_some_and(|l| l.guest)
                 {
-                    conv.guest = true;
+                    let state = lock(&shared.state);
+                    if let Some(log) = state.convs.get(&job.conv) {
+                        if log.guest {
+                            conv.guest = true;
+                        }
+                        if log.fleet_job {
+                            conv.guest = true;
+                            conv.fleet_job = true;
+                            conv.permission = crate::conv::Permission::Plan;
+                        }
+                    }
                 }
                 let tap = live.clone();
                 conv.on_event = Some(Box::new(move |ev| tap.event(ev)));
                 conv.meter = Some(job.meter.clone());
                 let mut sink = LiveSink(live.clone());
                 let _ = agent.turn(&mut conv, &job.text, &mut sink); // an error is already an event
+                {
+                    let mut state = lock(&shared.state);
+                    if let Some(log) = state.convs.get_mut(&job.conv) {
+                        log.fleet_tool_calls = conv.fleet_tool_calls;
+                        log.fleet_tool_digest.clone_from(&conv.fleet_tool_digest);
+                    }
+                }
                 live.flush();
                 conv.on_event = None;
                 conv.meter = None;
@@ -810,6 +888,10 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             // {"model": "<tag>", "role": "<text>", "engine": "<url>"}, all optional: a Room
             // teammate's model (tried first; the config's models stay as fallbacks), the role its
             // owner wrote for it and the engine to ask first (one of the configured ones)
+            let (guest, fleet_job) = match mode_of(&body) {
+                Ok(mode) => mode,
+                Err(e) => return refuse(&mut s, 400, e),
+            };
             let model = match body.get("model").and_then(Value::as_str).map(str::trim) {
                 Some(m) if !m.is_empty() && !crate::conv::valid_model(m) => {
                     return refuse(
@@ -862,9 +944,9 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             };
             new_conv(
                 sh,
-                body["mode"] == "guest",
-                (model, role, engine, format),
-                (band, part),
+                guest,
+                fleet_job,
+                (model, role, engine, format, band, part),
                 s,
             )
         }
@@ -876,10 +958,21 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             if !valid_id(conv) || text.is_empty() {
                 return refuse(&mut s, 400, "need conv and text");
             }
+            let fleet_job = {
+                let mut state = lock(&sh.state);
+                if !sh.ensure(&mut state, conv) {
+                    return refuse(&mut s, 404, "unknown conversation");
+                }
+                state.convs.get(conv).is_some_and(|log| log.fleet_job)
+            };
+            if fleet_job && text.len() > 16 * 1024 {
+                return refuse(&mut s, 413, "fleet job input exceeds 16 KiB");
+            }
             let budget = match budget_of(body, &sh.cfg) {
                 Ok(b) => b,
                 Err(e) => return refuse(&mut s, 400, e),
             };
+            let budget = if fleet_job { clamp_fleet_budget(budget) } else { budget };
             let meter = crate::budget::Meter::root(budget);
             let verdict = {
                 let mut st = lock(&sh.state);
@@ -949,7 +1042,8 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             let mut st = lock(&sh.state);
             let v = if sh.ensure(&mut st, req.q("conv")) {
                 let log = &st.convs[req.q("conv")];
-                json!({"events": log.events.get(since..).unwrap_or(&[]), "busy": log.busy, "engine": log.engine})
+                json!({"events": log.events.get(since..).unwrap_or(&[]), "busy": log.busy, "engine": log.engine,
+                    "fleet_tool_calls": log.fleet_tool_calls, "fleet_tool_digest": log.fleet_tool_digest})
             } else {
                 json!({"events": [], "busy": false})
             };
@@ -1055,7 +1149,7 @@ fn health(sh: &Shared, keyed: bool) -> Value {
     // `auth: "key"`: every other call needs X-Tempo-Key (see `serve`).
     let auth = if sh.opts.key.is_some() { "key" } else { "none" };
     if !keyed {
-        return json!({"ok": true, "stream": true, "guest": true, "roles": true, "engines": true, "stop": true, "auth": auth});
+        return json!({"ok": true, "stream": true, "guest": true, "fleet_jobs": true, "roles": true, "engines": true, "stop": true, "auth": auth});
     }
     let hosts = {
         let mut seen = lock(&sh.hosts_seen);
@@ -1086,26 +1180,57 @@ fn health(sh: &Shared, keyed: bool) -> Value {
         }
     };
     let embed = lock(&sh.state).embed_ok;
-    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "roles": true, "engines": true, "stop": true, "auth": auth})
+    json!({"ok": true, "net": net_up(&sh.cfg), "models": sh.cfg.models, "hosts": hosts, "rag": embed, "stream": true, "guest": true, "fleet_jobs": true, "roles": true, "engines": true, "stop": true, "auth": auth})
 }
 
 /// A new conversation: a guest one for a chat room (no tools, memory or owner context), with the
 /// model, role and engine a Room teammate was given, if any.
+fn mode_of(body: &Value) -> Result<(bool, bool), &'static str> {
+    match body.get("mode") {
+        None => Ok((false, false)),
+        Some(Value::String(mode)) => match mode.as_str() {
+            "owner" => Ok((false, false)),
+            "guest" => Ok((true, false)),
+            "fleet_job" => Ok((true, true)),
+            _ => Err("mode: owner, guest or fleet_job"),
+        },
+        Some(_) => Err("mode: text only"),
+    }
+}
+
+type ConvHints = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+    Option<String>,
+);
+
+fn hints_for_mode(fleet_job: bool, hints: ConvHints) -> ConvHints {
+    if fleet_job {
+        (None, None, None, None, None, None)
+    } else {
+        hints
+    }
+}
+
 fn new_conv(
     sh: &Arc<Shared>,
     guest: bool,
-    (model, role, engine, format): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<Value>,
-    ),
-    (band, part): (Option<String>, Option<String>),
+    fleet_job: bool,
+    hints: ConvHints,
     mut s: TcpStream,
 ) {
+    let (model, role, engine, format, band, part) = hints_for_mode(fleet_job, hints);
     match Conv::open(&sh.cfg, None) {
         Ok(mut c) => {
-            c.guest = guest;
+            c.fleet_job = fleet_job;
+            c.guest = guest || fleet_job;
+            if fleet_job {
+                c.permission = crate::conv::Permission::Plan;
+                c.fleet_tool_digest = crate::mcp::sha256_hex(b"");
+            }
             c.model = model;
             c.role = role;
             c.engine = engine;
@@ -1121,7 +1246,14 @@ fn new_conv(
             {
                 c.save();
             }
-            lock(&sh.state).convs.entry(c.id.clone()).or_default().guest = c.guest;
+            {
+                let mut state = lock(&sh.state);
+                let log = state.convs.entry(c.id.clone()).or_default();
+                log.guest = c.guest;
+                log.fleet_job = c.fleet_job;
+                log.fleet_tool_calls = c.fleet_tool_calls;
+                log.fleet_tool_digest.clone_from(&c.fleet_tool_digest);
+            }
             send_json(&mut s, 200, &json!({"conv": c.id}));
         }
         Err(e) => send_json(&mut s, 500, &json!({ "error": e })),
