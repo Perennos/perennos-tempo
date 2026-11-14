@@ -677,6 +677,7 @@ mod tests {
 
     /// A band (the product ad), a run folder with the shooter's note, and Stage ready.
     struct Rig {
+        _dir: crate::woodshed::takes::TestDir,
         ctx: Ctx,
         cat: Catalog,
         band: Band,
@@ -685,7 +686,7 @@ mod tests {
     }
 
     fn rig(tag: &str, shooter: &str) -> Rig {
-        let (ctx, cat, _) = ready(tag);
+        let (ctx, cat, _fixture) = ready(tag);
         let band = templates::find("product-ad")
             .unwrap()
             .band("product-ad", &models());
@@ -701,6 +702,7 @@ mod tests {
         std::fs::write(dir.join("2 shooter.md"), shooter).unwrap();
         let notes = vec![dir.join("1 director.md"), dir.join("2 shooter.md")];
         Rig {
+            _dir: _fixture,
             ctx,
             cat,
             band,

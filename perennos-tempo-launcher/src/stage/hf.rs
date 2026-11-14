@@ -296,7 +296,8 @@ pub mod tests {
             "https://huggingface.co/a/b/resolve/main/m.safetensors",
             "https://cdn-lfs.huggingface.co/repos/xx/m.safetensors?sig=1",
         )]);
-        let part = crate::bank::detect::tests::tmp("hf-part").join("m.part");
+        let part_dir = crate::bank::detect::tests::tmp("hf-part");
+        let part = part_dir.join("m.part");
         fetch(
             &f,
             "https://huggingface.co/a/b/resolve/main/m.safetensors",
@@ -323,7 +324,8 @@ pub mod tests {
     #[test]
     fn a_redirect_to_another_host_or_off_https_never_gets_the_token() {
         let t = Token::new(&fake_token()).unwrap();
-        let part = crate::bank::detect::tests::tmp("hf-part2").join("m.part");
+        let part_dir = crate::bank::detect::tests::tmp("hf-part2");
+        let part = part_dir.join("m.part");
         let start = "https://huggingface.co/a/b/resolve/main/m";
         for to in [
             "https://evil.example/steal",
@@ -373,7 +375,8 @@ pub mod tests {
     fn a_no_from_huggingface_says_what_to_do_and_never_shows_the_token() {
         let tok = fake_token();
         let t = Token::new(&tok).unwrap();
-        let part = crate::bank::detect::tests::tmp("hf-part3").join("m.part");
+        let part_dir = crate::bank::detect::tests::tmp("hf-part3");
+        let part = part_dir.join("m.part");
         let url = "https://huggingface.co/black-forest-labs/x/resolve/main/m.safetensors";
         let mut f = hops(&[]);
         f.deny = Some(401);

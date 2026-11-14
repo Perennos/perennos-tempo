@@ -7,61 +7,140 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
-/// A test's scratch folder, removed when the test's thread ends (every test gets its own
-/// thread), so a run leaves nothing behind. A `Rig` and every `paths()` live in one, and a test that
-/// drops a `Rig` to pretend the program restarted still finds its folder. It is test scratch, never user data.
-struct Scratch(PathBuf);
+/// An exclusively created test folder. Unconfirmed work keeps its scratch.
+struct Scratch {
+    path: PathBuf,
+    token: Vec<u8>,
+    nodes: Vec<Arc<Node>>,
+    servers: Vec<Arc<serve::Completion>>,
+    cleaned: bool,
+}
+
+impl Scratch {
+    fn create(path: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        let token = crypto::random(32);
+        let mut marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.join(".fixture-owner"))?;
+        marker.write_all(&token)?;
+        Ok(Self {
+            path,
+            token,
+            nodes: Vec::new(),
+            servers: Vec::new(),
+            cleaned: false,
+        })
+    }
+
+    fn remember_node(&mut self, node: &Arc<Node>) {
+        if !self.nodes.iter().any(|saved| Arc::ptr_eq(saved, node)) {
+            self.nodes.push(node.clone());
+        }
+    }
+
+    fn cleanup(&mut self, limit: Duration) -> Result<(), String> {
+        if self.cleaned {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + limit;
+        for server in &self.servers {
+            server
+                .wait(deadline.saturating_duration_since(std::time::Instant::now()))
+                .map_err(str::to_string)?;
+        }
+        for node in &self.nodes {
+            if !node
+                .handlers
+                .lock()
+                .map_err(|_| "node handler lock poisoned")?
+                .is_empty()
+            {
+                return Err("node handlers may own untracked work".into());
+            }
+        }
+        if self.nodes.iter().any(|node| Arc::strong_count(node) != 1) {
+            return Err("node still has unconfirmed owners".into());
+        }
+        // Scratch owns the last strong references; dropping them here completes Node destructors.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.nodes.clear())).is_err() {
+            return Err("node destructor panicked".into());
+        }
+        let marker = self.path.join(".fixture-owner");
+        if !std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_dir())
+            || !std::fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
+            || !std::fs::read(marker).is_ok_and(|token| token == self.token)
+        {
+            return Err("scratch ownership marker is missing or changed".into());
+        }
+        let mut removal_error = None;
+        for attempt in 0..20 {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => {
+                    self.cleaned = true;
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.cleaned = true;
+                    return Ok(());
+                }
+                Err(e) => {
+                    removal_error = Some(e);
+                    if attempt < 19 {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+        Err(format!(
+            "scratch removal failed: {}",
+            removal_error.unwrap()
+        ))
+    }
+}
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        // On Windows a node's database file can stay open a moment after the test ends.
-        for _ in 0..20 {
-            if std::fs::remove_dir_all(&self.0).is_ok() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        if let Err(reason) = self.cleanup(Duration::from_secs(3)) {
+            eprintln!(
+                "Fleet test scratch retained at {}: {reason}",
+                self.path.display()
+            );
         }
     }
 }
 
+// Rust 1.99's Windows GNU backend still exposes an initializer function to this lint
+// even though the source initializer below is already const. Keep the expectation local;
+// an unfulfilled expectation asks us to remove it when the compiler stops reporting it.
 thread_local! {
+    #[cfg_attr(
+        all(windows, target_env = "gnu"),
+        expect(clippy::missing_const_for_thread_local)
+    )]
     static MINE: std::cell::RefCell<Vec<Scratch>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Once per run: scratch folders an earlier run left over (over 10 minutes old; a node still
-/// holding its database open when its test ends keeps its folder until then).
-fn sweep_stale() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let old = Duration::from_secs(10 * 60);
-        let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
-            return;
-        };
-        for e in rd.flatten() {
-            let stale = e.file_name().to_string_lossy().starts_with("tempo-fleet-")
-                && e.metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > old);
-            if stale {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    });
-}
-
 pub fn tmp(tag: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    sweep_stale();
-    let d = std::env::temp_dir().join(format!(
-        "tempo-fleet-{tag}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    MINE.with(|m| m.borrow_mut().push(Scratch(d.clone())));
-    d
+    for _ in 0..32 {
+        let d = std::env::temp_dir().join(format!(
+            "tempo-fleet-{tag}-{}-{}",
+            std::process::id(),
+            crypto::hex(&crypto::random(16))
+        ));
+        match Scratch::create(d.clone()) {
+            Ok(scratch) => {
+                let fixture = d.join("fixture");
+                std::fs::create_dir(&fixture).expect("cannot create Fleet test fixture");
+                MINE.with(|m| m.borrow_mut().push(scratch));
+                return fixture;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot create owned Fleet test scratch: {e}"),
+        }
+    }
+    panic!("could not allocate unique Fleet test scratch")
 }
 
 pub fn paths(tag: &str) -> Paths {
@@ -70,6 +149,191 @@ pub fn paths(tag: &str) -> Paths {
         home: d.join("home"),
         agent_data: d.join("home").join("agent"),
     }
+}
+
+pub fn open_node(paths: &Paths, key: [u8; 32]) -> Result<Arc<Node>, String> {
+    let node = Node::open(paths, key)?;
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .expect("node must belong to this test's owned scratch");
+        scratch.remember_node(&node);
+    });
+    Ok(node)
+}
+
+pub(super) fn track_server(
+    node: &Arc<Node>,
+    completion: Arc<serve::Completion>,
+) -> Result<(), String> {
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| node.paths.home.starts_with(&s.path))
+            .ok_or("test server requires owned scratch")?;
+        scratch.remember_node(node);
+        scratch.servers.push(completion);
+        Ok(())
+    })
+}
+
+fn scratch_for_check(tag: &str) -> Scratch {
+    let path = std::env::temp_dir().join(format!(
+        "tempo-fleet-check-{tag}-{}",
+        crypto::hex(&crypto::random(16))
+    ));
+    Scratch::create(path).unwrap()
+}
+
+#[test]
+fn scratch_refuses_existing_directories_and_cleans_its_own_on_panic() {
+    let root = tmp("scratch-ownership");
+    let existing = root.join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::write(existing.join("keep"), b"not ours").unwrap();
+    assert_eq!(
+        Scratch::create(existing.clone()).err().unwrap().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(std::fs::read(existing.join("keep")).unwrap(), b"not ours");
+    let scratch = scratch_for_check("panic");
+    let owned = scratch.path.clone();
+    let result = std::panic::catch_unwind(|| {
+        let _scratch = scratch;
+        std::fs::write(owned.join("fixture"), b"ours").unwrap();
+        panic!("fixture panic");
+    });
+    assert!(result.is_err());
+    assert!(!owned.exists());
+    assert!(existing.join("keep").exists());
+    let mut scratch = scratch_for_check("marker");
+    let uncertain = scratch.path.clone();
+    std::fs::write(uncertain.join(".fixture-owner"), b"changed").unwrap();
+    assert!(scratch.cleanup(Duration::ZERO).is_err());
+    assert!(uncertain.exists());
+    std::fs::write(uncertain.join(".fixture-owner"), &scratch.token).unwrap();
+    scratch.cleanup(Duration::ZERO).unwrap();
+}
+
+#[test]
+fn scratch_waits_for_its_nodes_before_cleanup() {
+    let mut scratch = scratch_for_check("node");
+    let owned = scratch.path.clone();
+    let paths = Paths {
+        home: owned.join("home"),
+        agent_data: owned.join("agent"),
+    };
+    std::fs::create_dir(&paths.home).unwrap();
+    let node = Node::open(&paths, [7; 32]).unwrap();
+    scratch.remember_node(&node);
+    assert!(scratch.cleanup(Duration::ZERO).is_err());
+    drop(node);
+    scratch.cleanup(Duration::ZERO).unwrap();
+    assert!(!owned.exists());
+}
+
+#[test]
+fn scratch_retains_nodes_with_untracked_handlers() {
+    let mut scratch = scratch_for_check("untracked-handler");
+    let owned = scratch.path.clone();
+    let paths = Paths {
+        home: owned.join("home"),
+        agent_data: owned.join("agent"),
+    };
+    std::fs::create_dir(&paths.home).unwrap();
+    let node = Node::open(&paths, [7; 32]).unwrap();
+    let handler = super::blob::attach(&node);
+    scratch.remember_node(&node);
+    drop(handler);
+    drop(node);
+    assert_eq!(
+        scratch.cleanup(Duration::ZERO),
+        Err("node handlers may own untracked work".into())
+    );
+    assert!(owned.exists());
+    scratch.nodes[0].handlers.lock().unwrap().clear();
+    scratch.cleanup(Duration::ZERO).unwrap();
+    assert!(!owned.exists());
+}
+
+#[test]
+fn server_without_registered_scratch_is_refused_before_listening() {
+    let mut scratch = scratch_for_check("unregistered-server");
+    let paths = Paths {
+        home: scratch.path.join("home"),
+        agent_data: scratch.path.join("agent"),
+    };
+    std::fs::create_dir(&paths.home).unwrap();
+    let node = Node::open(&paths, [7; 32]).unwrap();
+    let error = serve::listen(&node, &[SocketAddr::from(([127, 0, 0, 1], 0))])
+        .err()
+        .unwrap();
+    assert!(error.contains("owned scratch"));
+    drop(node);
+    scratch.cleanup(Duration::ZERO).unwrap();
+}
+
+#[test]
+fn scratch_retains_a_blocked_handler_until_completion() {
+    let mut scratch = scratch_for_check("blocked");
+    let owned = scratch.path.clone();
+    let tracker = Arc::new(serve::Completion::default());
+    scratch.servers.push(tracker.clone());
+    let (started, ready) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    tracker.spawn(move || {
+        started.send(()).unwrap();
+        let _ = blocked.recv();
+    });
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(scratch.cleanup(Duration::from_millis(20)).is_err());
+    assert!(owned.exists());
+    release.send(()).unwrap();
+    scratch.cleanup(Duration::from_secs(2)).unwrap();
+    assert!(!owned.exists());
+}
+
+#[test]
+fn real_blocked_handler_retains_scratch_until_peer_closes() {
+    let paths = paths("real-blocked-handler");
+    store::update(&paths, |f| f.me = "blocked".into()).unwrap();
+    let node = open_node(&paths, [7; 32]).unwrap();
+    let handle = serve::listen(&node, &[SocketAddr::from(([127, 0, 0, 1], 0))]).unwrap();
+    let completion = handle.completion();
+    let client = TcpStream::connect_timeout(&handle.addrs[0], Duration::from_secs(1)).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while completion.active() < 2 && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(completion.active() >= 2, "handler was not tracked");
+    handle.stop();
+    drop(handle);
+    let timed_out = MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .unwrap();
+        scratch.cleanup(Duration::from_millis(20))
+    });
+    assert_eq!(timed_out, Err("server completion timed out".into()));
+    assert!(paths.home.exists());
+    drop(client);
+    completion.wait(Duration::from_secs(2)).unwrap();
+    drop(node);
+    MINE.with(|m| {
+        let mut fixtures = m.borrow_mut();
+        fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .unwrap()
+            .cleanup(Duration::from_secs(2))
+            .unwrap();
+    });
+    assert!(!paths.home.exists());
 }
 
 fn free_port() -> u16 {
@@ -87,11 +351,55 @@ pub struct Rig {
     pub handle: Option<Handle>,
 }
 
+fn stop_for_restart(rig: Rig) -> Result<Paths, String> {
+    let Rig {
+        paths,
+        node,
+        handle,
+        ..
+    } = rig;
+    if let Some(handle) = handle {
+        let completion = handle.completion();
+        handle.stop();
+        drop(handle);
+        completion
+            .wait(Duration::from_secs(3))
+            .map_err(str::to_string)?;
+    }
+    if !node
+        .handlers
+        .lock()
+        .map_err(|_| "node handler lock poisoned")?
+        .is_empty()
+    {
+        return Err("restart node has untracked handler work".into());
+    }
+    MINE.with(|m| -> Result<(), String> {
+        let mut fixtures = m.borrow_mut();
+        let scratch = fixtures
+            .iter_mut()
+            .find(|s| paths.home.starts_with(&s.path))
+            .ok_or("restart requires owned scratch")?;
+        let index = scratch
+            .nodes
+            .iter()
+            .position(|saved| Arc::ptr_eq(saved, &node))
+            .ok_or("restart node is not owned")?;
+        if Arc::strong_count(&node) != 2 {
+            return Err("restart node still has unconfirmed owners".into());
+        }
+        drop(scratch.nodes.remove(index));
+        Ok(())
+    })?;
+    drop(node);
+    Ok(paths)
+}
+
 /// A node named `name` listening only (no senders) on this computer, with the shared `key`.
 pub fn rig(name: &str, key: [u8; 32]) -> Rig {
     let paths = paths(name);
     store::update(&paths, |f| f.me = name.into()).unwrap();
-    let node = Node::open(&paths, key).unwrap();
+    let node = open_node(&paths, key).unwrap();
     // A free port can be taken by a parallel test between asking and binding, so try a few.
     let (port, handle) = (0..20)
         .find_map(|_| {
@@ -231,6 +539,7 @@ fn add_remove_and_toggle_write_the_settings_and_keep_a_backup() {
         said.contains("Switched on") && store::load(&p).machines.len() == 1,
         "{said}"
     );
+    assert_eq!(store::load(&p).machines[0].addr, "192.168.0.20");
     assert_eq!(settings(&p).strs("ollama_fallbacks").len(), 2);
 
     let (c, _) = out_of(|o| remove(&p, None, "tower", o));
@@ -241,6 +550,56 @@ fn add_remove_and_toggle_write_the_settings_and_keep_a_backup() {
         ["http://10.0.0.99:11434"]
     );
     assert_eq!(out_of(|o| remove(&p, None, "tower", o)).0, 1);
+}
+
+#[test]
+fn explicit_engine_address_update_migrates_only_unshared_fallbacks() {
+    let p = paths("address-migration");
+    std::fs::create_dir_all(&p.agent_data).unwrap();
+    std::fs::write(
+        p.agent_data.join("config.json"),
+        "{\"ollama_fallbacks\":[\"http://10.0.0.99:11434\"]}",
+    )
+    .unwrap();
+    let tower = Machine::new("tower", "192.168.0.20", "engine");
+    store::update(&p, |f| f.machines.push(tower.clone())).unwrap();
+    store::config_set(&p, None, &tower, true, store::now_s()).unwrap();
+    let other = Machine::new("other", "192.168.0.20", "engine");
+    store::update(&p, |f| f.machines.push(other.clone())).unwrap();
+    store::config_set(&p, None, &other, true, store::now_s()).unwrap();
+
+    let (code, said) = out_of(|o| add(&p, None, "192.168.0.21", Some("engine"), Some("tower"), o));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        settings(&p).strs("ollama_fallbacks"),
+        [
+            "http://10.0.0.99:11434",
+            "http://192.168.0.20:11434",
+            "http://192.168.0.21:11434"
+        ]
+    );
+    assert_eq!(
+        settings(&p)
+            .get("hosts")
+            .unwrap()
+            .get("other")
+            .unwrap()
+            .strs("urls"),
+        ["http://192.168.0.20:11434"]
+    );
+
+    assert_eq!(out_of(|o| remove(&p, None, "other", o)).0, 0);
+    assert_eq!(
+        settings(&p).strs("ollama_fallbacks"),
+        ["http://10.0.0.99:11434", "http://192.168.0.21:11434"]
+    );
+
+    let (code, said) = out_of(|o| add(&p, None, "192.168.0.22", Some("engine"), Some("tower"), o));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        settings(&p).strs("ollama_fallbacks"),
+        ["http://10.0.0.99:11434", "http://192.168.0.22:11434"]
+    );
 }
 
 #[test]
@@ -358,40 +717,50 @@ fn the_first_scan_says_what_it_does_and_a_no_scans_nothing() {
 // ---- ssh, with a fake ssh on PATH
 
 #[cfg(unix)]
-fn fake_ssh() -> PathBuf {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    let dir = std::env::temp_dir().join(format!("tempo-fake-ssh-{}", std::process::id()));
-    ONCE.call_once(|| {
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("ssh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
+struct FakeSsh {
+    dir: PathBuf,
+    _override: ssh::TestSsh,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for FakeSsh {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.dir
+    }
+}
+
+#[cfg(unix)]
+fn fake_ssh() -> FakeSsh {
+    let dir = tmp("fake-ssh");
+    let script = dir.join("ssh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
 d="$(dirname "$0")"
 echo "$@" >> "$d/log"
 case "$*" in *10.0.0.33*) echo "Permission denied (publickey)." >&2; exit 255;; esac
 case "$*" in
-  *"sh -s"*)
+  *"-G "*) printf 'hostname 10.0.0.9\nport 22\nproxycommand none\nproxyjump none\n';;
+  *"sh -s"*|*"sh -c"*)
     input=$(cat)
     printf '%s\n--END--\n' "$input" >> "$d/stdin"
-    case "$input" in *install-key*) printf 'The fleet key is in place.\nidentity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';; esac
+    if [ "${#input}" -eq 64 ]; then printf 'The fixture received a 64-byte key payload.\n'; fi
+    case "$input" in *__TEMPO_BOOTSTRAP_BEGIN__*) printf '__TEMPO_BOOTSTRAP_BEGIN__\nos=Linux\narch=x86_64\nuser=setupbox\nuser_home=/home/setupbox\nname=system-host\nlauncher=/home/setupbox/.local/bin/tempo-launch\nversion=tempo-launch 2.1.0\nhome_json={"home":"/home/setupbox/.local/state/perennos-tempo"}\nfleet_port=8770\n__TEMPO_BOOTSTRAP_END__\n';; esac
+    case "$input" in *fleet.json*) printf 'key_hash=\nfleet_hex=__TEMPO_ABSENT__\n';; esac
+    case "$input" in *"command -v curl"*) printf 'messenger=ready\n';; esac
     case "$input" in *nproc*) printf 'os=Linux x86_64\ncpus=8\nram_kb=16777216\ngpu=NVIDIA Test GPU, 8192 MiB\ndisk_kb=104857600\nlaunch=tempo-launch 2.0.1\nollama=ollama version is 0.5.1\n';; esac;;
   *) echo "ran: $*";;
 esac
 "#,
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut parts = vec![dir.clone()];
-        parts.extend(std::env::split_paths(&path));
-        std::env::set_var("PATH", std::env::join_paths(parts).unwrap());
-    });
-    dir
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    FakeSsh {
+        dir,
+        _override: ssh::test_ssh(script),
+    }
 }
 
 #[cfg(unix)]
@@ -431,7 +800,7 @@ fn ssh_runs_with_the_three_options_and_reports_what_the_other_side_said() {
 #[cfg(unix)]
 #[test]
 fn check_reads_the_machine_and_records_the_result_and_a_failure() {
-    fake_ssh();
+    let _ssh = fake_ssh();
     let p = paths("sshcheck");
     store::update(&p, |f| {
         f.machines
@@ -466,7 +835,7 @@ fn check_reads_the_machine_and_records_the_result_and_a_failure() {
 
 #[cfg(unix)]
 #[test]
-fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
+fn setup_asks_and_keeps_the_key_on_stdin_when_pairing_cannot_be_verified() {
     let dir = fake_ssh();
     let p = paths("sshsetup");
     store::update(&p, |f| {
@@ -491,31 +860,35 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
     });
     assert_eq!((c, asked), (0, 1));
     assert!(
-        said.contains("OLLAMA_HOST=127.0.0.1:11434") && said.contains("setup --apply --yes"),
+        said.contains("Perennos Tempo v2.1.0 will use /home/setupbox/.local/state/perennos-tempo"),
         "{said}"
     );
-    assert!(said.contains("Nothing was run"));
+    assert!(said.contains("Nothing was changed"));
     // a yes
     let (c, said) = out_of(|o| setup_cmd(&p, None, "setupbox", true, &mut |_| true, o));
-    assert_eq!(c, 0, "{said}");
+    assert_eq!(
+        c, 1,
+        "unverified pairing must not register the target: {said}"
+    );
     let key = crypto::hex(&store::read_key(&p).unwrap());
     let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
-    assert!(stdin.contains("install-key --name setupbox"));
-    assert!(stdin.contains(&key), "the key goes in ssh's input");
+    let log = std::fs::read_to_string(dir.join("log")).unwrap();
     assert!(
-        !std::fs::read_to_string(dir.join("log"))
-            .unwrap()
-            .contains(&key),
-        "never on a command line"
+        log.contains("fleet install-key --name "),
+        "the remote install command is present without exposing its arguments"
     );
-    assert!(said.contains("is set up and linked here"));
-    assert_eq!(
-        store::load(&p).machines[0].id,
-        "a".repeat(64),
-        "its identity was pinned"
+    assert!(stdin.contains(&key), "the key goes in SSH standard input");
+    assert!(
+        !log.contains(&key),
+        "the key never appears on the command line"
     );
-    assert!(!said.contains("identity="));
-    assert!(store::load(&p).machines[0].enabled);
+    let fleet = store::load(&p);
+    assert!(
+        fleet
+            .find("setupbox")
+            .is_some_and(|i| fleet.machines[i].id.is_empty()),
+        "an unverified target stays unregistered"
+    );
     let mode_ok = {
         #[cfg(unix)]
         {
@@ -759,6 +1132,76 @@ fn answered(port: u16, wire: &[u8], who: &Rig) -> bool {
     read_frame(&mut s, &KEY, &|_| Some(vk)).is_ok()
 }
 
+fn fake_peer(owner: &Rig, name: &str, sk: &SigningKey) -> (Machine, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let id = crypto::hex(sk.verifying_key().as_bytes());
+    (know(owner, name, port, &id), listener)
+}
+
+fn fake_replies(
+    listener: TcpListener,
+    requester: ed25519_dalek::VerifyingKey,
+    signer: SigningKey,
+    count: usize,
+    reply: impl Fn(Frame, usize) -> Frame + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for i in 0..count {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let request = read_frame(&mut stream, &KEY, &|_| Some(requester)).unwrap();
+            stream
+                .write_all(&encode(&KEY, &signer, &reply(request, i)))
+                .unwrap();
+        }
+    })
+}
+
+fn fake_ping(tag: &str, reply: impl Fn(Frame) -> Frame + Send + 'static) -> Result<u64, String> {
+    let owner = rig(tag, KEY);
+    let signer = SigningKey::from_bytes(&[71; 32]);
+    let (peer, listener) = fake_peer(&owner, "remote", &signer);
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        signer,
+        1,
+        move |request, _| reply(request),
+    );
+    let result = owner.node.ping(&peer);
+    replies.join().unwrap();
+    result
+}
+
+fn fake_pings_with_replayed_nonce(tag: &str) -> (Result<u64, String>, Result<u64, String>) {
+    let owner = rig(tag, KEY);
+    let recipient = tag.to_string();
+    let signer = SigningKey::from_bytes(&[72; 32]);
+    let (peer, listener) = fake_peer(&owner, "remote", &signer);
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        signer,
+        2,
+        move |request, _| Frame {
+            kind: 'o',
+            id: request.id,
+            from: "remote".into(),
+            to: recipient.clone(),
+            ts: store::now_ms(),
+            nonce: "reused-pong-nonce".into(),
+            ..Frame::default()
+        },
+    );
+    let first = owner.node.ping(&peer);
+    let second = owner.node.ping(&peer);
+    replies.join().unwrap();
+    (first, second)
+}
+
 #[test]
 fn only_a_good_new_frame_for_this_node_is_answered() {
     let b = rig("recv", KEY);
@@ -880,13 +1323,12 @@ fn nothing_is_lost_when_the_peer_is_down_and_a_retry_is_never_a_second_message()
     assert_eq!(a.node.tries(&id), 1);
 
     // this program stops and starts again: the outbox is still there
-    let paths = a.paths.clone();
-    drop(a);
-    let a2 = Node::open(&paths, KEY).unwrap();
+    let paths = stop_for_restart(a).unwrap();
+    let a2 = open_node(&paths, KEY).unwrap();
     assert_eq!(a2.queued(Some("later")), 1);
 
     // the peer comes up on that port
-    let bnode = Node::open(&bpaths, KEY).unwrap();
+    let bnode = open_node(&bpaths, KEY).unwrap();
     let _h = serve::listen(&bnode, &[SocketAddr::from(([127, 0, 0, 1], port))]).unwrap();
     a2.retry_now();
     assert_eq!(a2.deliver(&to_b), Ok(1));
@@ -908,6 +1350,292 @@ fn lock_first_outbox(a: &Rig) -> String {
     let db = rusqlite::Connection::open(a.paths.file("fleet.db")).unwrap();
     db.query_row("SELECT id FROM outbox LIMIT 1", [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn a_signed_ack_from_another_pinned_member_is_refused() {
+    let owner = rig("ack-sender", KEY);
+    let peer_sk = SigningKey::from_bytes(&[73; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    let other_sk = SigningKey::from_bytes(&[74; 32]);
+    know(
+        &owner,
+        "other",
+        peer.port,
+        &crypto::hex(other_sk.verifying_key().as_bytes()),
+    );
+    owner.node.enqueue("peer", "note", b"pending").unwrap();
+    let to = owner.node.me.clone();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        other_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "other".into(),
+            to: to.clone(),
+            ts: store::now_ms(),
+            nonce: "wrong-sender".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn a_signed_ack_for_another_recipient_is_refused() {
+    let owner = rig("ack-recipient", KEY);
+    let peer_sk = SigningKey::from_bytes(&[75; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    owner.node.enqueue("peer", "note", b"pending").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        peer_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "someone-else".into(),
+            ts: store::now_ms(),
+            nonce: "wrong-recipient".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn an_ack_for_another_queued_row_is_refused_without_marking_either_row() {
+    let owner = rig("ack-row", KEY);
+    let peer_sk = SigningKey::from_bytes(&[76; 32]);
+    let (peer, listener) = fake_peer(&owner, "peer", &peer_sk);
+    owner.node.enqueue("peer", "note", b"first").unwrap();
+    let other_id = owner.node.enqueue("peer", "note", b"second").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&owner.node.identity_hex()),
+        peer_sk,
+        1,
+        move |_, _| Frame {
+            kind: 'a',
+            id: other_id.clone(),
+            from: "peer".into(),
+            to: "ack-row".into(),
+            ts: store::now_ms(),
+            nonce: "wrong-row".into(),
+            ..Frame::default()
+        },
+    );
+
+    let result = owner.node.deliver(&peer);
+    replies.join().unwrap();
+    assert!(matches!(result, Err(e) if e == "unexpected answer"));
+    assert_eq!(owner.node.queued(Some("peer")), 2);
+}
+
+#[test]
+fn stale_and_replayed_signed_acks_are_refused() {
+    let stale_owner = rig("ack-stale", KEY);
+    let stale_sk = SigningKey::from_bytes(&[77; 32]);
+    let (stale_peer, listener) = fake_peer(&stale_owner, "peer", &stale_sk);
+    stale_owner
+        .node
+        .enqueue("peer", "note", b"pending")
+        .unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&stale_owner.node.identity_hex()),
+        stale_sk,
+        1,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "ack-stale".into(),
+            ts: store::now_ms() - 10 * 60_000,
+            nonce: "stale-ack".into(),
+            ..Frame::default()
+        },
+    );
+    let stale = stale_owner.node.deliver(&stale_peer);
+    replies.join().unwrap();
+    assert!(matches!(stale, Err(e) if e.contains("clock")));
+    assert_eq!(stale_owner.node.queued(Some("peer")), 1);
+
+    let replay_owner = rig("ack-replay", KEY);
+    let replay_sk = SigningKey::from_bytes(&[78; 32]);
+    let (replay_peer, listener) = fake_peer(&replay_owner, "peer", &replay_sk);
+    replay_owner.node.enqueue("peer", "note", b"first").unwrap();
+    let replies = fake_replies(
+        listener,
+        vk_of(&replay_owner.node.identity_hex()),
+        replay_sk,
+        2,
+        move |request, _| Frame {
+            kind: 'a',
+            id: request.id,
+            from: "peer".into(),
+            to: "ack-replay".into(),
+            ts: store::now_ms(),
+            nonce: "replayed-ack".into(),
+            ..Frame::default()
+        },
+    );
+    let first = replay_owner.node.deliver(&replay_peer);
+    replay_owner
+        .node
+        .enqueue("peer", "note", b"second")
+        .unwrap();
+    let replayed = replay_owner.node.deliver(&replay_peer);
+    replies.join().unwrap();
+    assert_eq!(first, Ok(1));
+    assert!(matches!(replayed, Err(e) if e.contains("replay")));
+    assert_eq!(replay_owner.node.queued(Some("peer")), 1);
+}
+
+#[test]
+fn signed_pongs_must_match_the_ping_and_pass_the_guard() {
+    let wrong = fake_ping("pong-wrong", |_request| Frame {
+        kind: 'o',
+        id: "not-the-ping".into(),
+        from: "remote".into(),
+        to: "pong-wrong".into(),
+        ts: store::now_ms(),
+        nonce: "wrong-pong".into(),
+        ..Frame::default()
+    });
+    assert!(matches!(wrong, Err(e) if e == "unexpected answer"));
+
+    let stale = fake_ping("pong-stale", |request| Frame {
+        kind: 'o',
+        id: request.id,
+        from: "remote".into(),
+        to: "pong-stale".into(),
+        ts: store::now_ms() - 10 * 60_000,
+        nonce: "stale-pong".into(),
+        ..Frame::default()
+    });
+    assert!(matches!(stale, Err(e) if e.contains("clock")));
+
+    let valid = fake_ping("pong-valid", |request| Frame {
+        kind: 'o',
+        id: request.id,
+        from: "remote".into(),
+        to: "pong-valid".into(),
+        ts: store::now_ms(),
+        nonce: "valid-pong".into(),
+        ..Frame::default()
+    });
+    assert!(valid.is_ok());
+
+    let (first, replayed) = fake_pings_with_replayed_nonce("pong-replay");
+    assert!(first.is_ok());
+    assert!(matches!(replayed, Err(e) if e.contains("replay")));
+}
+
+#[test]
+fn signed_acks_without_a_nonce_or_with_a_future_clock_leave_the_message_pending() {
+    for (tag, nonce, offset, error) in [
+        ("ack-empty", "", 0, "no nonce"),
+        ("ack-future", "future-ack", 10 * 60_000, "clock"),
+    ] {
+        let owner = rig(tag, KEY);
+        let signer = SigningKey::from_bytes(&[79; 32]);
+        let (peer, listener) = fake_peer(&owner, "peer", &signer);
+        owner.node.enqueue("peer", "note", b"pending").unwrap();
+        let replies = fake_replies(
+            listener,
+            vk_of(&owner.node.identity_hex()),
+            signer,
+            1,
+            move |request, _| Frame {
+                kind: 'a',
+                id: request.id,
+                from: "peer".into(),
+                to: tag.into(),
+                ts: store::now_ms() + offset,
+                nonce: nonce.into(),
+                ..Frame::default()
+            },
+        );
+        let result = owner.node.deliver(&peer);
+        replies.join().unwrap();
+        assert_eq!(result, Err(format!("refused: {error}")));
+        assert_eq!(owner.node.queued(Some("peer")), 1);
+    }
+}
+
+#[test]
+fn losing_a_real_ack_retries_the_same_message_and_stores_it_once() {
+    let owner = rig("lost-ack-sender", KEY);
+    let receiver = rig("lost-ack-peer", KEY);
+    know(
+        &receiver,
+        &owner.node.me,
+        owner.port,
+        &owner.node.identity_hex(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = know(
+        &owner,
+        &receiver.node.me,
+        listener.local_addr().unwrap().port(),
+        &receiver.node.identity_hex(),
+    );
+    let id = owner
+        .node
+        .enqueue(&peer.name, "note", b"keep once")
+        .unwrap();
+    let recipient = receiver.node.clone();
+    let requester = vk_of(&owner.node.identity_hex());
+    let expected_id = id.clone();
+    let replies = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = read_frame(&mut stream, &KEY, &|_| Some(requester)).unwrap();
+        assert_eq!(request.id, expected_id);
+        assert!(recipient.store(
+            &request.from,
+            &request.id,
+            &request.topic,
+            request.created,
+            &request.body
+        ));
+        // The message reached the receiver, but the connection ends before its ACK.
+        drop(stream);
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        recipient.frames(std::io::BufReader::new(stream));
+    });
+    assert!(owner.node.deliver(&peer).is_err());
+    assert_eq!(owner.node.queued(Some(&peer.name)), 1);
+    assert_eq!(owner.node.tries(&id), 1);
+    owner.node.retry_now();
+    assert_eq!(owner.node.deliver(&peer), Ok(1));
+    assert_eq!(owner.node.queued(Some(&peer.name)), 0);
+    let got = receiver.node.inbox(Some("note"), 10);
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        (got[0].id.as_str(), got[0].body.as_slice()),
+        (id.as_str(), &b"keep once"[..])
+    );
+    replies.join().unwrap();
 }
 
 #[test]
@@ -1235,4 +1963,123 @@ fn a_running_messenger_picks_up_a_new_key_without_a_restart() {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(a.node.key(), [3u8; 32]);
+}
+
+#[test]
+fn callback_endpoint_keeps_its_actual_controller_port() {
+    assert_eq!(peer_endpoint("10.0.0.2:9123"), Some(("10.0.0.2", 9123)));
+    assert_eq!(peer_endpoint("10.0.0.2:0"), None);
+    assert_eq!(peer_endpoint("8.8.8.8:9123"), None);
+    assert_eq!(
+        peer_endpoint("10.0.0.2"),
+        Some(("10.0.0.2", store::fleet_port()))
+    );
+}
+
+#[test]
+fn checked_enrollment_update_preserves_malformed_duplicate_and_unfamiliar_registry_bytes() {
+    let p = paths("checked-registry");
+    std::fs::create_dir_all(&p.home).unwrap();
+    for bytes in [
+        "{broken",
+        "{\"self\":\"main\",\"self\":\"other\",\"machines\":[]}",
+        "{\"self\":\"main\",\"machines\":[],\"future_field\":true}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"8.8.8.8\"}]}",
+        "{\"self\":\"main\",\"machines\":[],\"allow\":[12]}",
+        "{\"self\":\"main\",\"machines\":[],\"version\":01}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"health\":{\"count\":00}}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"health\":{\"a\":1,\"a\":2}}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"bad\nline\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"\\uD800\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"\\uD800\\u0041\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"probe\":\"\\u+123\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"port\":65536}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"enabled\":\"yes\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\",\"id\":\"invalid\"}]}",
+        "{\"self\":\"main\",\"machines\":[{\"name\":\"worker\",\"addr\":\"10.0.0.2\"},{\"name\":\"worker\",\"addr\":\"10.0.0.3\"}]}",
+    ] {
+        std::fs::write(p.file("fleet.json"), bytes).unwrap();
+        let called = std::cell::Cell::new(false);
+        let result = store::update_checked(&p, |_| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(result.is_err(), "accepted {bytes}");
+        assert!(!called.get());
+        assert_eq!(
+            std::fs::read_to_string(p.file("fleet.json")).unwrap(),
+            bytes
+        );
+        assert!(!p.file("fleet.json.lock").exists());
+    }
+    let valid = "{ \"self\":\"main\", \"machines\":[], \"allow\":[] }";
+    std::fs::write(p.file("fleet.json"), valid).unwrap();
+    let result: Result<(), String> = store::update_checked(&p, |_| Err("declined".into()));
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(p.file("fleet.json")).unwrap(),
+        valid
+    );
+    store::update_checked(&p, |fleet| {
+        fleet
+            .machines
+            .push(Machine::new("worker", "10.0.0.2", "agent"));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(store::load_checked(&p).unwrap().machines.len(), 1);
+}
+
+#[test]
+fn checked_enrollment_update_preserves_escaped_non_bmp_nested_metadata() {
+    let p = paths("checked-unicode-metadata");
+    std::fs::create_dir_all(&p.home).unwrap();
+    let input = r#"{"self":"main","machines":[{"name":"worker","addr":"10.0.0.2","health":{"nested":[{"label":"\ud83c\udfb5"}]},"probe":{"\ud83d\ude80":"\ud83d\ude00"},"tools":[{"label":"\udbff\udfff"}]}]}"#;
+    std::fs::write(p.file("fleet.json"), input).unwrap();
+    store::update_checked(&p, |fleet| {
+        fleet
+            .machines
+            .push(Machine::new("other", "10.0.0.3", "agent"));
+        Ok(())
+    })
+    .unwrap();
+    let fleet = store::load_checked(&p).unwrap();
+    let machine = &fleet.machines[0];
+    assert_eq!(machine.health.arr("nested")[0].str("label"), Some("🎵"));
+    assert_eq!(machine.probe.str("🚀"), Some("😀"));
+    assert_eq!(
+        machine.tools,
+        crate::setup::json::J::Arr(vec![crate::setup::json::J::Obj(vec![(
+            "label".into(),
+            crate::setup::json::J::s("\u{10ffff}")
+        )])])
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn checked_enrollment_update_does_not_replace_an_unreadable_registry() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let p = paths("checked-locked-registry");
+    std::fs::create_dir_all(&p.home).unwrap();
+    let bytes = "{\"self\":\"main\",\"machines\":[]}";
+    std::fs::write(p.file("fleet.json"), bytes).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(p.file("fleet.json"))
+        .unwrap();
+    let called = std::cell::Cell::new(false);
+    assert!(store::update_checked(&p, |_| {
+        called.set(true);
+        Ok(())
+    })
+    .is_err());
+    assert!(!called.get());
+    drop(held);
+    assert_eq!(
+        std::fs::read_to_string(p.file("fleet.json")).unwrap(),
+        bytes
+    );
+    assert!(!p.file("fleet.json.lock").exists());
 }

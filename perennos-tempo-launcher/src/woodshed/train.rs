@@ -803,7 +803,7 @@ pub mod tests {
     }
 
     /// A home with `n` winning takes for band `b` (run log and takes file), the band switched on.
-    pub fn world(tag: &str, n: usize) -> Ctx {
+    pub fn world(tag: &str, n: usize) -> super::super::takes::TestCtx {
         let ctx = test_ctx(tag);
         let d = ctx.agent_data.join("runs/2026-11-07");
         std::fs::create_dir_all(&d).unwrap();

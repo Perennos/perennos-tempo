@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod bank;
 pub mod brand;
+pub mod company;
 pub mod conductor;
 pub mod fleet;
 pub mod home;
@@ -22,6 +23,7 @@ pub mod retune;
 pub mod setup;
 pub mod stage;
 pub mod tempo_home;
+pub mod updates;
 pub mod woodshed;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -77,6 +79,8 @@ usage: tempo-launch [command]
                     after a y/N that shows the sizes. Speech stays on this computer.
   welcome           the first-run page: what the scan found, one computer or several, and how to
                     let your AI help (opened by itself the first time, then `tempo-launch welcome`)
+  updates [--check | --enable | --disable | --open]
+                    check the official stable release; checks are off until you turn them on
   link URL          add another computer's Ollama (a tailnet or home-network address) to the
                     agent's ollama_fallbacks; nothing is contacted
   mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
@@ -355,11 +359,14 @@ impl Ctx {
             && !Path::new(target)
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir));
+        let loopback = loopback_url(target);
+        let official_release = updates::is_official_release_url(target);
         // or exactly the address of an entry in remote.json that passed its checks
         let remote = !own_file
-            && !loopback_url(target)
+            && !loopback
+            && !official_release
             && load_remote(&self.home).0.iter().any(|r| r.url == target);
-        if !(loopback_url(target) || own_file || remote) {
+        if !(loopback || own_file || remote || official_release) {
             return Err("refused: tempo-launch only opens its own pages".into());
         }
         self.opened.borrow_mut().push(target.to_string());
@@ -947,8 +954,29 @@ pub fn signed(body: &str, signs: &[&str]) -> bool {
     signs.iter().any(|s| flat.contains(s))
 }
 
+// Test-local override: only the owning test thread can suppress and count health probes.
+#[cfg(test)]
+thread_local! {
+    #[cfg_attr(
+        all(windows, target_env = "gnu"),
+        expect(clippy::missing_const_for_thread_local, reason = "initializer is already const; reproduced with Clippy 0.1.99 on Windows GNU")
+    )]
+    static STATUS_FAKE_PROBES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// The app's health answer on `port`, if the app is what answers there.
 pub fn answers(app: &App, port: u16) -> Option<String> {
+    #[cfg(test)]
+    if STATUS_FAKE_PROBES.with(|state| {
+        if let Some(count) = state.get() {
+            state.set(Some(count + 1));
+            true
+        } else {
+            false
+        }
+    }) {
+        return None;
+    }
     // the agent checks its model hosts before it answers
     let t = Duration::from_secs(if app.id == "agent" { 15 } else { 3 });
     match http_get(port, app.health, t) {
@@ -1974,6 +2002,8 @@ pub enum Cmd {
     Setup(setup::apply::Opts),
     /// `welcome`: write and open the first-run page.
     Welcome,
+    /// Cached update status and an explicit, bounded check of the official release.
+    Updates(updates::Action),
     /// `link URL`: add another computer's Ollama to the agent's `ollama_fallbacks`.
     Link(String),
     /// `mcp`: the setup helper as an MCP server on stdio; `--scan` prints the scan facts.
@@ -2118,6 +2148,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             only(&[])?;
             Cmd::Welcome
         }
+        "updates" => Cmd::Updates(updates::parse_args(&rest)?),
         "link" => match rest.as_slice() {
             [u] if !u.starts_with("--") => Cmd::Link(u.to_string()),
             _ => return Err("link takes one address, like http://192.168.0.20:11434".into()),
@@ -2155,7 +2186,24 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    run_cmd(&Ctx::from_env(), cmd)
+    let ctx = Ctx::from_env();
+    #[cfg(not(test))]
+    if matches!(
+        &cmd,
+        Cmd::Home
+            | Cmd::Field
+            | Cmd::Vault(_)
+            | Cmd::Room
+            | Cmd::Agent
+            | Cmd::Studio
+            | Cmd::Start
+            | Cmd::Welcome
+            | Cmd::Fleet(fleet::FleetCmd::Page)
+            | Cmd::Fleet(fleet::FleetCmd::Serve { .. })
+    ) {
+        updates::schedule_auto_check(&ctx);
+    }
+    run_cmd(&ctx, cmd)
 }
 
 pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
@@ -2187,6 +2235,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
                 .map(|_| 0)
                 .map_err(|e| Problem::other("The welcome page could not be opened", e))
         }
+        Cmd::Updates(action) => Ok(updates::run(ctx, action)),
         Cmd::Link(url) => Ok(setup::propose::link(
             ctx,
             setup::propose::real_pinned(),
@@ -2478,7 +2527,8 @@ fn start(ctx: &Ctx) -> i32 {
 
 fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
     // the first time, before any settings exist: the plan for this computer, as a page, once
-    if let Some(page) = setup::first_start(ctx, &setup::probe::RealHost, ollama_port) {
+    let first_run = setup::first_start(ctx, &setup::probe::RealHost, ollama_port);
+    if let Some(page) = first_run.as_ref() {
         ctx.note(&format!("setup: plan written to {}", page.display()));
     }
     // Tempo's own Ollama, when it has one and none answers, before the agent: the agent's models
@@ -2511,6 +2561,21 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
         }
     }
     fleet::autostart(ctx);
+    #[cfg(not(test))]
+    if first_run.is_some() {
+        let mut child = Command::new(setup::own_exe());
+        child
+            .args(["fleet", "page"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match spawn_hidden(&mut child) {
+            Ok(_) => {
+                let _ = setup::mark_first_start_opened(ctx);
+            }
+            Err(e) => ctx.note(&format!("setup: first-run workbench could not start: {e}")),
+        }
+    }
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut failed = 0;
     for l in waiting {
@@ -3583,6 +3648,7 @@ mod tests {
 
     #[test]
     fn the_usual_launches() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("launch");
         let ctx = ctx_in(&root);
         let a = launch_for(&ctx, AGENT);
@@ -3721,6 +3787,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn starts_hidden_waits_opens_and_stops() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let root = tmp("e2e");
         let ctx = ctx_in(&root);
@@ -3780,6 +3847,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_crash_while_starting_shows_its_last_words() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let root = tmp("crash");
         let ctx = ctx_in(&root);
@@ -4042,6 +4110,13 @@ mod tests {
 
     #[test]
     fn a_missing_or_broken_remote_file_is_no_apps_and_never_a_crash() {
+        struct ProbeGuard(Option<usize>);
+        impl Drop for ProbeGuard {
+            fn drop(&mut self) {
+                STATUS_FAKE_PROBES.with(|state| state.set(self.0));
+            }
+        }
+        let _guard = ProbeGuard(STATUS_FAKE_PROBES.with(|state| state.replace(Some(0))));
         let root = tmp("remote-file");
         let ctx = ctx_in(&root);
         assert_eq!(load_remote(&ctx.home), (vec![], vec![]), "missing file");
@@ -4079,6 +4154,10 @@ mod tests {
         assert_eq!(apps[0].sign, "\"app\":\"tempo-vault\"");
         assert_eq!(warns.len(), 2, "{warns:?}");
         assert!(warns[0].contains("evil") && warns[0].contains("not a tailnet or private"));
+        assert_eq!(
+            STATUS_FAKE_PROBES.with(|state| state.get()),
+            Some(13 * (APPS.len() + 1))
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4616,7 +4695,7 @@ mod tests {
     }
 
     #[test]
-    fn first_start_opens_the_welcome_page_once_and_fetches_nothing() {
+    fn first_start_prepares_welcome_once_and_fetches_nothing() {
         use setup::probe::tests::Fake;
         let root = tmp("firststart");
         let ctx = ctx_in(&root);
@@ -4661,15 +4740,13 @@ mod tests {
         ] {
             assert!(!html.contains(bad), "{bad}");
         }
-        // the plan page is there too, and the welcome page was the one opened
+        // The plan page is there; start() opens the hidden Fleet workbench later.
         let plan_html = fs::read_to_string(ctx.home.join("setup.html")).unwrap();
         assert!(plan_html.contains("USD 10 million") && plan_html.contains("--with-d1"));
         assert!(plan_html.contains("never downloaded"));
-        assert_eq!(ctx.opened.borrow().len(), 1);
-        assert!(ctx.opened.borrow()[0].ends_with("welcome.html"));
-        // the second start: nothing more
+        assert!(ctx.opened.borrow().is_empty());
+        assert!(setup::mark_first_start_opened(&ctx).is_ok());
         assert!(setup::first_start(&ctx, &host, 1).is_none());
-        assert_eq!(ctx.opened.borrow().len(), 1);
         // a plan page the installer wrote with `setup --page` is kept as it is
         let root3 = tmp("firststart3");
         let ctx3 = ctx_in(&root3);
@@ -4689,20 +4766,21 @@ mod tests {
         let written = fs::read_to_string(ctx3.home.join("setup.html")).unwrap();
         assert!(ctx3.opened.borrow().is_empty());
         assert!(setup::first_start(&ctx3, &host, 1).is_some());
-        assert_eq!(ctx3.opened.borrow().len(), 1);
+        assert!(ctx3.opened.borrow().is_empty());
         assert_eq!(
             fs::read_to_string(ctx3.home.join("setup.html")).unwrap(),
             written
         );
+        assert!(setup::mark_first_start_opened(&ctx3).is_ok());
         assert!(setup::first_start(&ctx3, &host, 1).is_none());
         let _ = fs::remove_dir_all(root3);
-        // with settings already there it never runs at all
+        // Existing model settings do not suppress the first-run company setup.
         let root2 = tmp("firststart2");
         let ctx2 = ctx_in(&root2);
         fs::create_dir_all(&ctx2.agent_data).unwrap();
         fs::write(ctx2.agent_data.join("config.json"), "{}").unwrap();
-        assert!(setup::first_start(&ctx2, &host, 1).is_none());
-        assert!(!ctx2.home.join("welcome.html").exists());
+        assert!(setup::first_start(&ctx2, &host, 1).is_some());
+        assert!(ctx2.home.join("welcome.html").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(root2);
     }
@@ -4807,6 +4885,10 @@ mod tests {
         }
     }
 
+    /// Vault startup tests share the app's reserved port range; take turns so an unrelated fake
+    /// server cannot claim a port between the availability check and launch.
+    static VAULT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The fake agent (and the check that none is there) uses the agent's real port, so the tests
     /// that do take turns.
     static AGENT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4861,11 +4943,17 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(20000);
+        for _ in 0..5000 {
+            let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if port > u16::MAX as u32 {
+                break;
+            }
+            if TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+                return port as u16;
+            }
+        }
+        panic!("no unique local test port was available");
     }
 
     #[test]

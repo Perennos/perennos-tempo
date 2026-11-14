@@ -312,6 +312,283 @@ pub fn update<T>(p: &Paths, f: impl FnOnce(&mut Fleet) -> T) -> Result<T, String
     r.map(|()| out)
 }
 
+/// Enrollment-only update: validate and edit while holding the existing registry lock.
+pub fn update_checked<T>(
+    p: &Paths,
+    f: impl FnOnce(&mut Fleet) -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = p.file("fleet.json.lock");
+    std::fs::create_dir_all(&p.home).map_err(|e| format!("could not open fleet home: {e}"))?;
+    let start = Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(_) => break,
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(format!("could not lock fleet.json: {e}"))
+            }
+            Err(_) if start.elapsed() > Duration::from_secs(5) => {
+                return Err("fleet.json is busy; try again".into())
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    let result = (|| {
+        let mut fleet = load_checked(p)?;
+        let out = f(&mut fleet)?;
+        write_atomic(&p.file("fleet.json"), fleet.to_j().pretty().as_bytes())
+            .map_err(|e| format!("could not write fleet.json: {e}"))?;
+        Ok(out)
+    })();
+    let _ = std::fs::remove_file(&lock);
+    result
+}
+
+pub fn load_checked(p: &Paths) -> Result<Fleet, String> {
+    use std::io::Read;
+    let path = p.file("fleet.json");
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(load(p)),
+        Err(e) => return Err(format!("could not inspect fleet.json: {e}")),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 1024 * 1024 {
+        return Err("fleet.json is not a bounded regular file; it was kept unchanged".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err("fleet.json is a reparse point; it was kept unchanged".into());
+        }
+    }
+    let mut text = String::new();
+    std::fs::File::open(&path)
+        .map_err(|e| format!("could not read fleet.json: {e}"))?
+        .take(1024 * 1024 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("could not read fleet.json: {e}"))?;
+    if text.len() > 1024 * 1024 {
+        return Err("fleet.json exceeded its read limit; it was kept unchanged".into());
+    }
+    let json = parse_registry_text(&text)?;
+    validate_registry(&json)
+}
+
+/// Reject malformed string escapes that the legacy general-purpose parser accepts lossily.
+pub fn parse_registry_text(text: &str) -> Result<J, String> {
+    fn valid_number(token: &[u8]) -> bool {
+        let mut n = 0;
+        if token.get(n) == Some(&b'-') {
+            n += 1;
+        }
+        match token.get(n) {
+            Some(b'0') => {
+                n += 1;
+                if token.get(n).is_some_and(u8::is_ascii_digit) {
+                    return false;
+                }
+            }
+            Some(b'1'..=b'9') => {
+                n += 1;
+                while token.get(n).is_some_and(u8::is_ascii_digit) {
+                    n += 1;
+                }
+            }
+            _ => return false,
+        }
+        if token.get(n) == Some(&b'.') {
+            n += 1;
+            let start = n;
+            while token.get(n).is_some_and(u8::is_ascii_digit) {
+                n += 1;
+            }
+            if start == n {
+                return false;
+            }
+        }
+        if matches!(token.get(n), Some(b'e' | b'E')) {
+            n += 1;
+            if matches!(token.get(n), Some(b'+' | b'-')) {
+                n += 1;
+            }
+            let start = n;
+            while token.get(n).is_some_and(u8::is_ascii_digit) {
+                n += 1;
+            }
+            if start == n {
+                return false;
+            }
+        }
+        n == token.len()
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut quoted = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        i += 1;
+        if !quoted {
+            if c == b'"' {
+                quoted = true;
+            } else if c == b'-' || c.is_ascii_digit() {
+                let start = i - 1;
+                while bytes
+                    .get(i)
+                    .is_some_and(|b| b.is_ascii_digit() || b".+-eE".contains(b))
+                {
+                    i += 1;
+                }
+                if !valid_number(&bytes[start..i]) {
+                    return Err("fleet.json has an invalid number; it was kept unchanged".into());
+                }
+            }
+            continue;
+        }
+        if c == b'"' {
+            quoted = false;
+            continue;
+        }
+        if c < 0x20 {
+            return Err("fleet.json contains an unescaped control; it was kept unchanged".into());
+        }
+        if c != b'\\' {
+            continue;
+        }
+        let e = *bytes.get(i).ok_or("fleet.json has an incomplete escape")?;
+        i += 1;
+        if e == b'u' {
+            fn hex4(bytes: &[u8]) -> Option<u16> {
+                let digits = bytes.get(..4)?;
+                if !digits.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|s| u16::from_str_radix(s, 16).ok())
+            }
+            let u = hex4(&bytes[i..]).ok_or("fleet.json has an invalid Unicode escape")?;
+            i += 4;
+            if (0xd800..=0xdbff).contains(&u) {
+                if bytes.get(i..i + 2) != Some(&b"\\u"[..]) {
+                    return Err("fleet.json has an unpaired Unicode surrogate".into());
+                }
+                i += 2;
+                let low = hex4(&bytes[i..]).ok_or("fleet.json has an invalid Unicode escape")?;
+                i += 4;
+                if !(0xdc00..=0xdfff).contains(&low) {
+                    return Err("fleet.json has an unpaired Unicode surrogate".into());
+                }
+            } else if (0xdc00..=0xdfff).contains(&u) {
+                return Err("fleet.json has an unpaired Unicode surrogate".into());
+            }
+        } else if !b"\"\\/bfnrt".contains(&e) {
+            return Err("fleet.json has an invalid escape".into());
+        }
+    }
+    parse(text).map_err(|_| "fleet.json is malformed; it was kept unchanged".into())
+}
+
+/// Validate a parsed registry before enrollment can rely on it or rewrite it.
+pub fn validate_registry(json: &J) -> Result<Fleet, String> {
+    fn unique_objects(j: &J) -> bool {
+        match j {
+            J::Obj(fields) => {
+                let mut seen = std::collections::HashSet::new();
+                fields
+                    .iter()
+                    .all(|(key, value)| seen.insert(key) && unique_objects(value))
+            }
+            J::Arr(items) => items.iter().all(unique_objects),
+            _ => true,
+        }
+    }
+    fn fields_ok(j: &J, allowed: &[&str]) -> bool {
+        let J::Obj(fields) = j else {
+            return false;
+        };
+        let mut seen = std::collections::HashSet::new();
+        fields
+            .iter()
+            .all(|(k, _)| allowed.contains(&k.as_str()) && seen.insert(k))
+    }
+    if !unique_objects(json)
+        || !fields_ok(
+            json,
+            &["version", "self", "allow", "blob_cap_gib", "machines"],
+        )
+        || !matches!(json.get("machines"), Some(J::Arr(_)))
+        || !matches!(json.get("self"), Some(J::Str(s)) if !s.is_empty() && clean_name(s) == s.as_str())
+    {
+        return Err("fleet.json has unfamiliar or invalid fields; it was kept unchanged".into());
+    }
+    if json
+        .get("allow")
+        .is_some_and(|v| !matches!(v, J::Arr(a) if a.iter().all(|x| matches!(x,J::Str(_)))))
+    {
+        return Err("fleet.json has an invalid allow list; it was kept unchanged".into());
+    }
+    if json
+        .get("version")
+        .is_some_and(|_| json.f64("version") != Some(1.0))
+        || json.get("blob_cap_gib").is_some_and(|_| {
+            json.f64("blob_cap_gib")
+                .is_none_or(|n| !n.is_finite() || n < 0.0 || n > (u64::MAX / GIB) as f64)
+        })
+    {
+        return Err("fleet.json has invalid version or capacity; it was kept unchanged".into());
+    }
+    let allowed = [
+        "name",
+        "addr",
+        "port",
+        "role",
+        "enabled",
+        "last_seen",
+        "id",
+        "probe",
+        "health",
+        "ssh",
+        "tools",
+    ];
+    let mut names = std::collections::HashSet::new();
+    let mut addresses = std::collections::HashSet::new();
+    for item in json.arr("machines") {
+        let Some(member) = Machine::from_j(item) else {
+            return Err("fleet.json has an invalid member; it was kept unchanged".into());
+        };
+        if !fields_ok(item, &allowed)
+            || clean_name(&member.name) != member.name
+            || (!member.id.is_empty()
+                && (member.id.len() != 64 || !member.id.bytes().all(|b| b.is_ascii_hexdigit())))
+            || !names.insert(member.name.to_ascii_lowercase())
+            || !addresses.insert(member.addr.to_ascii_lowercase())
+            || item
+                .get("enabled")
+                .is_some_and(|v| !matches!(v, J::Bool(_)))
+            || ["role", "id"]
+                .iter()
+                .any(|k| item.get(k).is_some_and(|v| !matches!(v, J::Str(_))))
+            || item.get("port").is_some_and(|_| {
+                item.f64("port")
+                    .is_none_or(|n| !(1.0..=65535.0).contains(&n) || n.fract() != 0.0)
+            })
+            || item.get("last_seen").is_some_and(|_| {
+                item.f64("last_seen")
+                    .is_none_or(|n| !(0.0..=9007199254740991.0).contains(&n) || n.fract() != 0.0)
+            })
+        {
+            return Err(
+                "fleet.json has an invalid or unfamiliar member; it was kept unchanged".into(),
+            );
+        }
+    }
+    Ok(Fleet::from_j(json))
+}
+
 /// The fleet key: 32 bytes, made by `fleet init`.
 pub fn read_key(p: &Paths) -> Option<[u8; 32]> {
     std::fs::read(p.file("fleet.key"))
@@ -340,6 +617,28 @@ pub fn config_set(
     present: bool,
     now: u64,
 ) -> Result<String, String> {
+    config_set_inner(p, pinned, m, present, None, now)
+}
+
+/// Drop the old engine fallback only when no other active peer still owns it.
+pub fn config_set_after_address_change(
+    p: &Paths,
+    pinned: Option<PathBuf>,
+    m: &Machine,
+    previous: &Machine,
+    now: u64,
+) -> Result<String, String> {
+    config_set_inner(p, pinned, m, true, Some(previous), now)
+}
+
+fn config_set_inner(
+    p: &Paths,
+    pinned: Option<PathBuf>,
+    m: &Machine,
+    present: bool,
+    previous: Option<&Machine>,
+    now: u64,
+) -> Result<String, String> {
     if !m.engine() && present {
         return Ok(String::new());
     }
@@ -350,6 +649,25 @@ pub fn config_set(
     let ctx = p.ctx();
     let (cfg, old) = propose::load_settings(&path)?;
     let mut list = cfg.strs("ollama_fallbacks");
+    let previous_url = previous
+        .filter(|old| old.engine() && old.addr != m.addr)
+        .map(|old| engine_url(&old.engine_url()))
+        .transpose()?;
+    let previous_shared = previous
+        .filter(|old| old.engine() && old.addr != m.addr)
+        .is_some_and(|old| {
+            load(p).machines.iter().any(|peer| {
+                peer.name != old.name
+                    && peer.enabled
+                    && peer.engine()
+                    && peer.engine_url() == old.engine_url()
+            })
+        });
+    if let Some(previous_url) = previous_url.as_ref() {
+        if !previous_shared {
+            list.retain(|u| u != previous_url);
+        }
+    }
     list.retain(|u| *u != url);
     let old_hosts = match cfg.get("hosts") {
         Some(J::Obj(h)) => h.clone(),

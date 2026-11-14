@@ -232,7 +232,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_local_command_runs_in_the_work_folder_and_its_words_go_to_the_log() {
-        let dir = std::env::temp_dir().join(format!("tempo-woodshed-exec-{}", std::process::id()));
+        let dir = super::super::takes::TestDir::new("woodshed-exec");
         let t = Target {
             at: Where::Local,
             dir: dir.to_string_lossy().into_owned(),

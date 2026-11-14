@@ -222,15 +222,8 @@ pub mod tests {
     use super::*;
     use crate::bank::catalog::embedded;
 
-    pub fn tmp(tag: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "tempo-crate-{tag}-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    pub fn tmp(tag: &str) -> crate::woodshed::takes::TestDir {
+        crate::woodshed::takes::TestDir::new(&format!("crate-{tag}"))
     }
 
     pub fn ctx_in(home: &Path) -> Ctx {

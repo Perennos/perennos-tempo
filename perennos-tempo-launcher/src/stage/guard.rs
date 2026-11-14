@@ -515,7 +515,7 @@ pub mod tests {
         }
     }
 
-    pub fn node_dir(files: &[(&str, &str)]) -> PathBuf {
+    pub fn node_dir(files: &[(&str, &str)]) -> crate::woodshed::takes::TestDir {
         let d = tmp("node");
         for (n, b) in files {
             let p = d.join(n);

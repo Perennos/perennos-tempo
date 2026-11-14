@@ -2026,8 +2026,17 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(25000);
+        for _ in 0..5000 {
+            let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if port > u16::MAX as u32 {
+                break;
+            }
+            if std::net::TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+                return port as u16;
+            }
+        }
+        panic!("no unique local test port was available");
     }
 
     /// `go`, with the start-Ollama callback chosen by the test.

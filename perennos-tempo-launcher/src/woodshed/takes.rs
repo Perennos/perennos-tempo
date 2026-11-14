@@ -188,26 +188,128 @@ pub fn example_of(ctx: &Ctx, t: &Take) -> Option<Example> {
 }
 
 #[cfg(test)]
-pub fn test_ctx(tag: &str) -> Ctx {
-    let d = std::env::temp_dir().join(format!(
-        "tempo-woodshed-{tag}-{}-{}",
-        std::process::id(),
-        crate::unix_now()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    Ctx {
-        home: d.clone(),
+pub struct TestDir(std::path::PathBuf);
+
+#[cfg(test)]
+impl TestDir {
+    fn create(path: std::path::PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+
+    pub fn new(tag: &str) -> Self {
+        assert!(tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        for _ in 0..128 {
+            let path = std::env::temp_dir().join(format!(
+                "tempo-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match Self::create(path) {
+                Ok(dir) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("cannot create test directory: {e}"),
+            }
+        }
+        panic!("could not create an exclusive test directory after 128 collisions");
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl AsRef<std::path::Path> for TestDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                if std::thread::panicking() {
+                    eprintln!(
+                        "could not remove owned test directory {}: {e}",
+                        self.0.display()
+                    );
+                } else {
+                    panic!(
+                        "could not remove owned test directory {}: {e}",
+                        self.0.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub struct TestCtx {
+    ctx: Ctx,
+    _dir: TestDir,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestCtx {
+    type Target = Ctx;
+    fn deref(&self) -> &Ctx {
+        &self.ctx
+    }
+}
+
+#[cfg(test)]
+pub fn test_ctx(tag: &str) -> TestCtx {
+    let d = TestDir::new(&format!("woodshed-{tag}"));
+    let ctx = Ctx {
+        home: d.to_path_buf(),
         agent_data: d.join("agent"),
         vault: d.join("vault"),
         bin_dirs: vec![],
         browser: false,
         opened: Default::default(),
-    }
+    };
+    TestCtx { ctx, _dir: d }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_directories_are_exclusive_and_cleaned_on_drop_and_unwind() {
+        let survivor = TestDir::new("woodshed-owner");
+        let existing = survivor.join("preexisting");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::write(existing.join("sentinel"), "untouched").unwrap();
+        let error = TestDir::create(existing.clone()).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(existing.join("sentinel")).unwrap(),
+            "untouched"
+        );
+        let mut removed = std::path::PathBuf::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let dir = TestDir::new("woodshed-owner");
+            assert_ne!(dir.as_ref(), survivor.as_ref());
+            removed = dir.to_path_buf();
+            std::fs::write(dir.join("owned"), "x").unwrap();
+            panic!("exercise unwind cleanup");
+        }));
+        assert!(!removed.exists());
+        assert!(survivor.is_dir());
+        let path = survivor.to_path_buf();
+        drop(survivor);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn a_line_with_only_an_id_is_still_a_take() {

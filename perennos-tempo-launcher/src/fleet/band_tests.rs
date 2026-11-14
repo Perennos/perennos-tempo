@@ -1,7 +1,6 @@
 //! Joining and tools, on in-process nodes that talk over this computer's own network.
 
-use super::msg::Node;
-use super::tests::{link, paths, rig, Rig};
+use super::tests::{link, open_node, paths, rig, Rig};
 use super::tools::{self, CallHandler, CallRunner, RunOut};
 use super::*;
 use std::io::{Read, Write};
@@ -82,7 +81,7 @@ fn a_computer_joins_with_the_code_and_both_sides_pin_each_other() {
     assert_eq!(j.role, "engine");
 
     // and they can talk, signed, both ways (the new computer listens too)
-    let fresh = Node::open(&new, j.key).unwrap();
+    let fresh = open_node(&new, j.key).unwrap();
     let port = free_port();
     let _h = serve::listen(&fresh, &[SocketAddr::from(([127, 0, 0, 1], port))]).unwrap();
     store::update(&main.paths, |f| f.machines[0].port = port).unwrap();
@@ -264,7 +263,7 @@ fn an_impostor_with_the_fleet_key_is_not_let_in() {
         f.machines.push(m);
     })
     .unwrap();
-    let inode = Node::open(&imp, KEY).unwrap();
+    let inode = open_node(&imp, KEY).unwrap();
     let to_main = store::load(&imp).machines.remove(0);
     assert!(inode.send(&to_main, "note", b"let me in").is_err() || inode.queued(None) == 1);
     assert!(
@@ -272,7 +271,7 @@ fn an_impostor_with_the_fleet_key_is_not_let_in() {
         "the message was not accepted"
     );
     // the real one, with its own identity, is
-    let real = Node::open(&new, j.key).unwrap();
+    let real = open_node(&new, j.key).unwrap();
     store::update(&new, |f| f.machines[0].port = main.port).unwrap();
     let m = store::load(&new).machines.remove(0);
     assert_eq!(real.send(&m, "note", b"it is me"), Ok(true));
@@ -761,6 +760,8 @@ fn join_runs_what_a_new_computer_needs_in_order() {
     })
     .unwrap();
     crypto::write_private(&p.file("fleet.key"), &KEY).unwrap();
+    let before = store::load(&p);
+    let key_before = store::read_key(&p);
     let mut did: Vec<String> = vec![];
     let mut out = Vec::new();
     configure_self(&ctx, "client", &mut out, &mut |why, argv, _| {
@@ -771,11 +772,21 @@ fn join_runs_what_a_new_computer_needs_in_order() {
         true
     });
     let said = String::from_utf8(out).unwrap();
-    // a client does not serve models, but it sets Tempo up and keeps the messenger going
-    assert_eq!(did.len(), 1, "{did:?}");
     assert!(
-        did[0].starts_with("setup:") && did[0].ends_with("--yes"),
-        "{did:?}"
+        did.is_empty(),
+        "join must not run model/setup commands: {did:?}"
     );
-    assert!(said.contains("messenger is running"), "{said}");
+    assert_eq!(
+        store::load(&p),
+        before,
+        "the existing fleet link was preserved"
+    );
+    assert_eq!(
+        store::read_key(&p),
+        key_before,
+        "the fleet key was preserved"
+    );
+    assert!(said.contains("Ollama, models and sign-in settings were left as they are"));
+    assert!(said.contains("The fleet messenger start was requested"));
+    assert!(said.contains("Check received health on your main computer"));
 }

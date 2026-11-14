@@ -277,7 +277,7 @@ mod tests {
         }
     }
 
-    fn world(tag: &str) -> Ctx {
+    fn world(tag: &str) -> super::super::takes::TestCtx {
         let ctx = test_ctx(tag);
         let d = ctx.agent_data.join("runs/2026-11-07");
         std::fs::create_dir_all(&d).unwrap();
