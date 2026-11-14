@@ -61,9 +61,9 @@ pub fn setup_page(p: &Plan, apply_command: &str) -> String {
     format!(
         r#"{top}<p class="tt-kicker">Setup plan</p>
 <h1>Set up Perennos Tempo for <em>this computer</em></h1>
-<p>Tempo looked at this computer and your goals ({goals}) and chose the models below. Nothing has been fetched. {installed} of the chosen models are already installed.</p>
+<p>Perennos Tempo checked this computer against your goals ({goals}) and picked the models below. Nothing has been downloaded. {installed} of these models are already installed.</p>
 <h2>This computer</h2><ul>{machine}</ul>
-<h2>What Tempo chose, and why</h2><ul>{picks}</ul>
+<h2>What Perennos Tempo picked, and why</h2><ul>{picks}</ul>
 {ollama}<h2>What would be fetched</h2>{fetch}{refused}
 <h2>To go ahead</h2>
 <p>Open a terminal and run this. It asks before it fetches anything:</p>
@@ -71,7 +71,7 @@ pub fn setup_page(p: &Plan, apply_command: &str) -> String {
 <p>Run it again whenever you like; it only changes what is missing. <code>tempo-launch setup</code> on its own shows this plan again.</p>
 <h2>Optional: d1</h2>
 <p>d1 can route and judge work on this computer. It is not included unless you add <code>--with-d1</code>. {d1}</p>
-<p class="small">Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
+<p class="small">Perennos's own UMBRA models are never downloaded; Perennos Tempo uses them only when they are already on this computer.</p>
 {end}"#,
         top = brand::page_top("Set up Perennos Tempo", true, true),
         end = brand::PAGE_END,

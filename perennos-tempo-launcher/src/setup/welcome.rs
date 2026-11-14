@@ -6,7 +6,7 @@
 use super::json::J;
 use super::plan::{Plan, Run};
 use super::probe::Machine;
-use super::propose::{APPLY_COMMAND, OLLAMA_DEFAULT_PORT};
+use super::propose::OLLAMA_DEFAULT_PORT;
 use crate::conductor::templates;
 use crate::{brand, html_escape};
 use std::path::Path;
@@ -36,7 +36,7 @@ pub fn verdict(p: &Plan) -> String {
             f.gb.map_or("size unknown".into(), |g| format!("{g:.1} GB")),
             on(f.run)
         ),
-        _ => "Tempo could not find a model that fits this computer yet. The scan below says why; a second computer with more memory can run the models for it (see below).".into(),
+        _ => "Perennos Tempo could not find a model that fits this computer yet. The scan below shows why. A second computer with more memory can run models for it.".into(),
     }
 }
 
@@ -117,42 +117,44 @@ pub fn welcome_page_with_update(
         .collect();
     format!(
         r#"{top}<p class="tt-kicker">01 — First run</p>
-<h1>What's your <em>tempo</em>?</h1>
-<p class="lede">Welcome to Perennos Tempo. It has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
+<h1>What's your tempo?</h1>
+<p class="lede">Let's set up Perennos Tempo.</p>
+<p>Perennos Tempo just had a look around this computer. Nothing was downloaded, changed or sent. Pick one computer or several, then run the command that fits. This page is the map; your terminal drives.</p>
 {updates}
 
 <h2>What this computer can run</h2>
 <p class="verdict">{verdict}</p>
 <ul>{fits}</ul>
 {note}
-<p><strong>What Tempo found</strong></p>
+<p><strong>What Perennos Tempo found</strong></p>
 <ul>{scan}</ul>
 
 <h2>Is this your only computer?</h2>
-<p>This page cannot take a click, so each answer shows the exact command. Run the one that fits, in a terminal.</p>
+<p>This page shows the steps; your terminal runs them. Copy the command you need into a terminal and press Enter.</p>
 <div class="choices">
 <div class="card">
 <h3>Just this computer</h3>
-<p>Tempo fetches the models above and sets itself up here. It asks y/N before it downloads anything.</p>
+<p>Run the command below to set up this computer. Perennos Tempo asks before downloading anything.</p>
 {single}
 <p class="step">Run it again whenever you like: it only changes what is missing.</p>
 </div>
 <div class="card">
 <h3>Several computers (a home server, a laptop, a GPU box...)</h3>
-<p>Each computer runs its own Tempo. A computer with a big graphics card can serve the models to the others. Only addresses on your own network or tailnet are accepted, never the public internet.</p>
+<p>Each computer runs its own copy of Perennos Tempo. One can serve models to the others. Use a private-network or tailnet address; public addresses are refused.</p>
 <p class="step">On each computer, once:</p>
 {single}
-<p class="step">On the computer that will serve models (the engine), use Ollama from ollama.com (Tempo's own copy answers only its own computer) and let it listen on the engine's tailnet or home-network address, then restart Ollama:</p>
+<p class="step">On the computer serving models, install Ollama and set it to listen on its private-network or tailnet address. Restart Ollama after changing the address. Its default setup serves only its own computer.</p>
 {engine}
-<p class="step">On the computer you sit at (the main one), add the engine. Tempo checks the address is private and contacts nothing:</p>
+<p class="step">On the computer you sit at, add the engine. Perennos Tempo checks that the address is private; it does not connect yet:</p>
 {link}
-<p class="step">Tempo uses the main computer's own Ollama first and moves to the next address when it cannot be reached. To make the engine the first choice instead, ask your AI below to propose it.</p>
+<p class="step">Perennos Tempo tries the Ollama on this computer first, then the next address if it cannot connect. To choose the other engine first, ask your AI below to suggest that setting.</p>
 </div>
 </div>
 
 {ollama_tip}
 <h2>Let your AI help you set up</h2>
-<p>Add Tempo's setup helper to the AI you already use. It can read the scan and the plan above, talk you through the choice in step 2, and write a <em>proposal</em> for your settings. It cannot change anything: you apply a proposal yourself with <code>{apply_cmd}</code>, which shows what would change and asks y/N.</p>
+<p>The AI helper is optional. Read what it shares below before you connect it.</p>
+<p>An AI you already use can read this scan and suggest settings. It cannot change them. Review the proposal, then apply it yourself with the command shown.</p>
 <h3>Claude Desktop</h3>
 <p>Open <code>claude_desktop_config.json</code> (Windows: <code>%APPDATA%\Claude\</code>; Mac: <code>~/Library/Application Support/Claude/</code>), add this inside the file (keep any servers already there), and restart Claude Desktop:</p>
 {desktop}
@@ -168,18 +170,18 @@ pub fn welcome_page_with_update(
 
 <h2>What connecting an AI shares</h2>
 <div class="share">
-<p><strong>Only the scan facts and the plan.</strong> The helper answers with this computer's system, CPU and graphics card class, memory, free disk, whether Ollama is there, the models Tempo recommends, and which Tempo apps are running. It never sends files, notes or chats, and its answers hold no user name, folder name, computer name or address.</p>
-<p>It is opt-in: nothing connects unless you add the entry to your AI yourself, and Tempo never calls out to any AI on its own. Once you do, what the helper answers becomes part of your conversation with that AI, so it reaches that AI's provider like anything else you type there. To stop, remove the entry from the AI's settings.</p>
+<p>The setup helper shares system, CPU/GPU class, memory, free disk, Ollama status, suggested models and running apps with the AI provider. It does not read files, notes or chats. Its reply becomes part of your conversation with that provider.</p>
+<p>Connections start only when you add the helper to your AI. Its replies become part of that conversation and reach the AI provider. Remove the helper from your AI settings to stop.</p>
 </div>
 
 <h2>Let the Conductor set up a band for your work</h2>
-<p>The <em>Tempo Conductor</em> ties you to your workflows and to your engines. A <em>band</em> is the team it sets up for your own workflow, all on this computer: for a social media account, say, a researcher, a writer, an editor and a scheduler. Each one shows up in Room as a teammate you can talk to like a person (<code>@writer</code>), and when you raise the baton a flow walks them one after another and files what they make as linked notes in your Vault. The Conductor also knows every engine you have (this computer's Ollama and each one you added with <code>tempo-launch link</code>) and cues each member on the one that suits the part: the writers on your strongest engine, the sorters on a quick one. They only talk and write drafts: they never post, send, buy or delete anything.</p>
+<p>The Conductor turns a workflow into a small band: a researcher, a writer, an editor, whoever the job needs. Raise the baton and they work in order, saving drafts as linked notes in your Vault. They never post, send, buy or delete. That stays your call.</p>
 <p>See your engines first:</p>
 {band_engines}
 <p>Pick a template:</p>
 <ul>{bands}</ul>
 {band_template}
-<p>Or say what you do, in your own words. The model on this computer fits the closest template to it; Tempo shows you the band in plain words and asks y/N before it sets anything up:</p>
+<p>Or describe what you do. The model on this computer picks the closest template, then Perennos Tempo shows you the team in plain words and asks y/N before setup:</p>
 {band_describe}
 <p>Then run a flow, and see the engines, bands, last runs and apps on one page:</p>
 {band_run}
@@ -188,7 +190,7 @@ pub fn welcome_page_with_update(
 {fleet}
 
 {crate_section}
-<p class="small">The longer plan, with sizes and licences, is in <code>setup.html</code> in the Tempo folder (<code>tempo-launch setup</code> shows it in the terminal). This page can be opened again with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded: Tempo only uses them where they are already on this computer.</p>
+<p class="small">For model sizes and licences, run <code>tempo-launch setup</code>. Reopen this page with <code>tempo-launch welcome</code>. Perennos's own UMBRA models are never downloaded; Perennos Tempo uses them only when they are already on this computer.</p>
 {end}"#,
         top = brand::page_top("Welcome to Perennos Tempo", true, true),
         end = brand::PAGE_END,
@@ -210,7 +212,6 @@ pub fn welcome_page_with_update(
         link = pre(&format!(
             "tempo-launch link http://<engine address>:{OLLAMA_DEFAULT_PORT}"
         )),
-        apply_cmd = html_escape(APPLY_COMMAND),
         desktop = pre(desktop_entry(exe).trim_end()),
         code = pre(&code_command(exe)),
         command = pre(&format!("{} mcp", command_path(exe))),

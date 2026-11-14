@@ -114,7 +114,7 @@ fn engine_card(e: &Engine) -> String {
     let models = if !e.up {
         String::new()
     } else if e.models.is_empty() {
-        "<p class=\"small\">No models yet.</p>".to_string()
+        "<p class=\"small\">No models found yet. Run <code>tempo-launch setup</code> and it will show what fits this computer.</p>".to_string()
     } else {
         format!(
             "<ul class=\"models\">{}</ul>",
@@ -281,7 +281,7 @@ pub fn render_with(
         bands.iter().map(|v| band_block(v, engines)).collect()
     };
     let runs_html = if bands.iter().all(|v| v.runs.is_empty()) {
-        "<p class=\"empty\">No runs yet. The Conductor is waiting with the baton up: start one with the command under a flow above.</p>".to_string()
+        "<p class=\"empty\">No runs yet. The baton is up: pick a flow above and run its command. Each finished step is saved as it goes.</p>".to_string()
     } else {
         bands
             .iter()

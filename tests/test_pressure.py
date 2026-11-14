@@ -32,7 +32,7 @@ class Pressure(unittest.TestCase):
         fake_proc(self.proc, 103, "tiny", 10)
         self.ram = self.root / "ramdisk"
         (self.ram / "job-old").mkdir(parents=True)
-        (self.ram / "job-old" / "cache.bin").write_bytes(b"x" * 4096)
+        (self.ram / "job-old" / "cache.bin").write_bytes(b"x" * (64 * 1024))
         old = time.time() - 31 * 3600
         os.utime(self.ram / "job-old" / "cache.bin", (old, old))
         os.utime(self.ram / "job-old", (old, old))

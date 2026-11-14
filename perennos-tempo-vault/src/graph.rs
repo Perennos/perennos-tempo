@@ -416,8 +416,8 @@ impl Tree {
     fn finish(&mut self, at: usize) {
         let m = self.cells[at].mass;
         if m > 0.0 {
-            for d in 0..3 {
-                self.cells[at].com[d] /= m;
+            for channel in &mut self.cells[at].com {
+                *channel /= m;
             }
         }
         for k in self.cells[at].kids {

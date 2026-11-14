@@ -30,33 +30,32 @@ Perennos Tempo installer for Linux and macOS
 
 usage: install.sh [options]
 
-Where from (the default is --from-source inside a checkout, or the folder you unpacked a release into):
+Choose a source (the default is --from-source inside a checkout, or the folder where you unpacked a release):
   --from-source [REPO]      build the programs with cargo (cargo build --release --locked) from REPO
-  --from-release FILE|URL   install a release tarball (.tar.gz); its SHA-256 is checked first and a
-                            mismatch stops everything
+  --from-release FILE|URL   install a .tar.gz release; its SHA-256 must match or install stops
   --sha256 HEX              the expected SHA-256 of the tarball (else FILE.sha256 next to it)
 
 What:
   --edition full|source-available
-                            full (the default when the private crates are present) adds the Tempo Field
+                            full (the default when the private crates are present) adds Perennos Tempo Field
                             and the tempo command with VECTIS to the source-available edition
-  --with-mcp                also build the Tempo MCP server (perennos-tempo; needs pkg-config and
+  --with-mcp                also build the Perennos Tempo MCP server (perennos-tempo; needs pkg-config and
                             libssl-dev on Debian and Ubuntu)
-  --prefix DIR              put the programs in DIR (default: ~/.local/bin)
-  --no-desktop              no menu entries / app bundle
+  --prefix DIR              install the programs in DIR (default: ~/.local/bin)
+  --no-desktop              skip menu entries and the app bundle
 
 Extras:
   --add-to-path             add one marked line to your shell's startup file
-  --autostart               start the apps at sign-in (systemd user unit or autostart entry; LaunchAgent on macOS)
-  --learn                   hourly learning from your vault (tempo-launch schedule)
-  --setup                   show which models fit this computer (tempo-launch setup), then ask
-                            before fetching them and setting up the agent (--yes skips the question)
+  --autostart               start Perennos Tempo at sign-in (systemd user unit, autostart entry or LaunchAgent)
+  --learn                   let Perennos Tempo learn from your Vault each hour (tempo-launch schedule)
+  --setup                   show which models fit, then ask before downloading them and setting up the agent
+                            (--yes skips that question)
 
 Other:
-  --uninstall               move everything this installer installed to <tempo home>/trash/<date>/uninstall/
-                            (use the same --prefix as when installing; your vault and data are never touched)
-  --dry-run                 show what would happen, change nothing
-  -y, --yes                 do not ask
+  --uninstall               move this install's files to <Perennos Tempo home>/trash/<date>/uninstall/
+                            (use the same --prefix as before; your Vault and data stay put)
+  --dry-run                 show the plan; change nothing
+  -y, --yes                 answer yes to setup prompts
   --build-to DIR            build the programs into DIR/bin and stop (used by build-release.sh)
   -h, --help                this text
 EOF
@@ -269,11 +268,11 @@ refresh_desktop_caches() {
 do_uninstall() {
   set_home
   step "Uninstalling Perennos Tempo"
-  [ -f "$MANIFEST" ] || die "nothing to uninstall: no install record at $MANIFEST (if you used --prefix, pass it again)"
+  [ -f "$MANIFEST" ] || die "No install record was found at $MANIFEST. If you installed with a custom prefix, rerun the uninstall with the same \`--prefix\`."
   read_manifest
   info "installed: version $OLD_VERSION, $OLD_EDITION edition, programs in $OLD_PREFIX"
   info "this moves exactly the files in $MANIFEST to $TRASH/uninstall/"
-  info "your vault and the Tempo data in $TEMPO_DIR are not touched"
+  info "your Vault and Perennos Tempo data in $TEMPO_DIR are not touched"
   [ "$DRY" = 1 ] || confirm
   stop_old_integrations
   if [ "$DRY" != 1 ] && [ -x "$OLD_PREFIX/tempo-launch" ]; then
@@ -289,7 +288,7 @@ do_uninstall() {
   step "Done"
   if [ "$DRY" = 1 ]; then info "dry run: nothing was changed"; else
     info "everything Perennos Tempo installed is in $TRASH/uninstall/ (move it back to undo)"
-    info "kept as it was: your vault, and the Tempo data in $TEMPO_DIR"
+    info "kept as it was: your Vault and Perennos Tempo data in $TEMPO_DIR"
   fi
 }
 
@@ -324,9 +323,9 @@ fetch_release() { # sets BUNDLE after checking the SHA-256
   step "Fetching the release"
   case $REL_ARG in
     https://*)
-      have curl || die "curl is needed to download $REL_ARG"
+      have curl || die "curl is needed to download a release. Install curl or pass a local archive with --from-release FILE."
       file=$SCRATCH/$(basename "$REL_ARG")
-      curl -fsSL -o "$file" "$REL_ARG" || die "could not download $REL_ARG"
+      curl -fsSL -o "$file" "$REL_ARG" || die "The release could not be downloaded. Check the file path or URL and your connection, then try the install again."
       if [ -z "$SHA_ARG" ]; then
         curl -fsSL -o "$file.sha256" "$REL_ARG.sha256" 2>/dev/null || true
       fi ;;
@@ -337,11 +336,11 @@ fetch_release() { # sets BUNDLE after checking the SHA-256
   if [ -z "$expect" ] && [ -f "$file.sha256" ]; then
     expect=$(sed -n 's/^\([0-9a-fA-F]\{64\}\).*/\1/p' "$file.sha256" | head -n 1)
   fi
-  [ -n "$expect" ] || die "no checksum: give --sha256 HEX, or put $(basename "$file").sha256 next to the file. Not installing something I cannot verify."
+  [ -n "$expect" ] || die "No checksum found. Provide the release SHA-256 with --sha256 HEX or a .sha256 file, then retry; nothing was installed."
   actual=$(sha_of "$file")
   expect=$(printf '%s' "$expect" | tr 'A-F' 'a-f')
   if [ "$actual" != "$expect" ]; then
-    die "SHA-256 does not match, refusing to install. expected $expect, the file is $actual"
+    die "The SHA-256 check failed, so this release was not installed. Download a fresh copy and check its published checksum."
   fi
   ok "SHA-256 matches ($actual)"
   tarname=$(basename "$file")
@@ -462,9 +461,9 @@ check_prereqs() {
   if [ "$WITH_MCP" = 1 ]; then
     if ! have pkg-config || ! pkg-config --exists openssl 2>/dev/null; then
       SKIP_KEYS="$SKIP_KEYS""mcp "
-      warn "pkg-config and the OpenSSL headers are missing, so the Tempo MCP server (perennos-tempo) is skipped; the rest goes on."
+      warn "pkg-config and the OpenSSL headers are missing, so the Perennos Tempo MCP server (perennos-tempo) is skipped; the rest goes on."
       info "fix: $(pkg_fix ssl)"
-      NOTES+=("Tempo MCP server skipped: run $(pkg_fix ssl), then install.sh --with-mcp again.")
+      NOTES+=("Perennos Tempo MCP server skipped: run $(pkg_fix ssl), then install.sh --with-mcp again.")
     else ok "pkg-config and OpenSSL headers"; fi
   fi
 }
@@ -755,7 +754,7 @@ set_home
 if [ "$MANIFEST" != "$OLD_MANIFEST" ]; then
   save_manifest
   dest=$(trash_move "$OLD_MANIFEST" "moved-record")
-  info "tempo-launch says Tempo's home is $TEMPO_DIR; the install record moved there (old copy: $dest)"
+  info "tempo-launch reports Perennos Tempo's home is $TEMPO_DIR; the install record moved there (old copy: $dest)"
 fi
 [ "$ADD_PATH" = 1 ] && do_path
 [ "$AUTOSTART" = 1 ] && do_autostart
@@ -767,7 +766,7 @@ step "Done: Perennos Tempo $VERSION ($EDITION edition)"
 info "installed  ${#INSTALLED[@]} items; the list is $MANIFEST"
 info "programs   $PREFIX"
 if [ "$DESKTOP" = 1 ]; then
-  if [ "$PLATFORM" = mac ]; then info "app        $HOME/Applications/Perennos Tempo.app"; else info "menu       Perennos Tempo, Tempo Vault, Tempo Room$(have_bin tempo-dashboard && echo ', Tempo Field') in your applications menu"; fi
+  if [ "$PLATFORM" = mac ]; then info "app        $HOME/Applications/Perennos Tempo.app"; else info "menu       Perennos Tempo, Perennos Tempo Vault, Perennos Tempo Room$(have_bin tempo-dashboard && echo ', Perennos Tempo Field') in your applications menu"; fi
 fi
 info "legal      $DATA_HOME/perennos-tempo/legal"
 if [ "${#SKIPPED[@]}" -gt 0 ]; then

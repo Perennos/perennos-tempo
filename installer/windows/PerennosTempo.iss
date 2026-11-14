@@ -57,6 +57,7 @@
 #endif
 
 [Setup]
+UsePreviousTasks=no
 ; never change it: it is how Windows knows a new version is this app
 AppId={{{#AppIdGuid}}
 AppName={#AppName}
@@ -124,29 +125,31 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 [Messages]
 SetupWindowTitle={#AppName} Setup
 WelcomeLabel1=Welcome to Perennos Tempo
-WelcomeLabel2=This installs [name/ver]: the local agent, and the apps it connects to as its tools on its own.%n%nEverything runs on this computer. Nothing is sent anywhere unless you connect it yourself, and uninstalling never touches your notes.%n%nIt takes about a minute.
+WelcomeLabel2=Perennos Tempo runs on this computer, for you. Model downloads and outside AI connections are optional.%n%nUninstalling never touches your notes.
 FinishedHeadingLabel=Perennos Tempo is installed
 ClickFinish=Click Finish to close Setup.
-SelectComponentsLabel2=Choose what to install. You can come back and change this at any time: your notes and settings stay as they are.
+ConfirmUninstall=Remove %1 and its apps? Your notes stay put.
+UninstalledAll=%1 is uninstalled. Your notes are still here, right where you left them.
+SelectComponentsLabel2=Choose what to install. You can change most choices later; your Vault stays where it is.
 
 [Types]
 Name: "full"; Description: "Everything (recommended)"
-Name: "compact"; Description: "The agent and Tempo Vault"
+Name: "compact"; Description: "The agent and Perennos Tempo Vault"
 Name: "custom"; Description: "Let me choose"; Flags: iscustom
 
 [Components]
-Name: "agent"; Description: "Tempo Agent: the local AI agent, with these apps as its tools"; Types: full compact custom; Flags: fixed
+Name: "agent"; Description: "Perennos Tempo Agent: a local AI agent and the apps it connects to"; Types: full compact custom; Flags: fixed
 #if HaveVault
-Name: "vault"; Description: "Tempo Vault: your notes as Markdown, Obsidian-compatible, learning every hour"; Types: full compact
+Name: "vault"; Description: "Your notes as Markdown, compatible with Obsidian"; Types: full compact
 #endif
 #if HaveStudio
-Name: "studio"; Description: "Tempo Studio: mixing and mastering, with REAPER when you ask for it"; Types: full
+Name: "studio"; Description: "Perennos Tempo Studio: mixing and mastering, with REAPER when you ask for it"; Types: full
 #endif
 #if HaveRoom
-Name: "room"; Description: "Tempo Room: private chat rooms where Tempo answers when you write @tempo"; Types: full
+Name: "room"; Description: "Perennos Tempo Room: private chat rooms; write @tempo to talk to Perennos Tempo"; Types: full
 #endif
 #if HaveField
-Name: "field"; Description: "Tempo Field: the Perennos Tempo dashboard"; Types: full
+Name: "field"; Description: "Perennos Tempo Field: the dashboard for your apps"; Types: full
 #endif
 #if HaveCli
 Name: "cli"; Description: "The tempo command for terminals"; Types: full
@@ -155,16 +158,16 @@ Name: "cli"; Description: "The tempo command for terminals"; Types: full
 [Tasks]
 Name: "desktopicon"; Description: "Put Perennos Tempo on the desktop"; GroupDescription: "Shortcuts:"; Flags: unchecked
 #if HaveVault
-Name: "openvault"; Description: "Add ""Open as Tempo Vault"" to folders in File Explorer"; GroupDescription: "Shortcuts:"; Components: vault
+Name: "openvault"; Description: "Add ""Open as Perennos Tempo Vault"" to folders in File Explorer"; GroupDescription: "Shortcuts:"; Components: vault
 #endif
 Name: "addtopath"; Description: "Add the tempo programs to PATH, for terminals"; GroupDescription: "Shortcuts:"
 #if HaveVault
-Name: "learn"; Description: "Let Tempo learn from your vault every hour (on this computer, no window)"; GroupDescription: "Perennos Tempo:"; Components: vault
+Name: "learn"; Description: "Perennos Tempo reads your Vault in the background each hour and learns from it."; GroupDescription: "Perennos Tempo:"; Components: vault; Flags: unchecked
 #endif
 ; Ollama is the engine Tempo runs models with. The box is ticked for the person when no Ollama is on
 ; the computer (see CurPageChanged below) and left unticked when one is there. 1471164488 bytes is the
 ; Windows x86_64 entry in perennos-tempo-launcher\catalog\runtime.json (about 1.4 GB).
-Name: "getollama"; Description: "Download Ollama, the engine Tempo runs models with (about 1.4 GB, checked against a pinned SHA-256)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
+Name: "getollama"; Description: "Install Ollama to run local models (about 1.4 GB; checked before launch)."; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
 Name: "setupmodels"; Description: "Download models that fit this computer now (several gigabytes, needs Ollama, looks up model names in Ollama's registry)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
 Name: "startup"; Description: "Start Perennos Tempo in the background when I sign in"; GroupDescription: "Perennos Tempo:"; Flags: unchecked
 
@@ -213,14 +216,14 @@ Type: files; Name: "{app}\bin\tempo.exe"; Components: not cli
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{#Launch}"; WorkingDir: "{app}"; IconFilename: "{app}\tempo.ico"; Comment: "Open Perennos Tempo"
 #if HaveVault
-Name: "{group}\Tempo Vault"; Filename: "{#Launch}"; Parameters: "vault"; WorkingDir: "{app}"; IconFilename: "{app}\tempo-vault.ico"; Comment: "Your notes"; Components: vault
+Name: "{group}\Perennos Tempo Vault"; Filename: "{#Launch}"; Parameters: "vault"; WorkingDir: "{app}"; IconFilename: "{app}\tempo-vault.ico"; Comment: "Your notes"; Components: vault
 #endif
 #if HaveStudio
 ; no Studio icon is staged (the art makes tempo, vault and room icons only); Studio's mark is Tempo's orange P, so tempo.ico
-Name: "{group}\Tempo Studio"; Filename: "{#Launch}"; Parameters: "studio"; WorkingDir: "{app}"; IconFilename: "{app}\tempo.ico"; Comment: "Mixing and mastering, through Tempo"; Components: studio
+Name: "{group}\Perennos Tempo Studio"; Filename: "{#Launch}"; Parameters: "studio"; WorkingDir: "{app}"; IconFilename: "{app}\tempo.ico"; Comment: "Mixing and mastering, through Perennos Tempo"; Components: studio
 #endif
 #if HaveRoom
-Name: "{group}\Tempo Room"; Filename: "{#Launch}"; Parameters: "room"; WorkingDir: "{app}"; IconFilename: "{app}\tempo-room.ico"; Comment: "Your chat rooms"; Components: room
+Name: "{group}\Perennos Tempo Room"; Filename: "{#Launch}"; Parameters: "room"; WorkingDir: "{app}"; IconFilename: "{app}\tempo-room.ico"; Comment: "Your chat rooms"; Components: room
 #endif
 Name: "{autodesktop}\{#AppName}"; Filename: "{#Launch}"; WorkingDir: "{app}"; IconFilename: "{app}\tempo.ico"; Comment: "Open Perennos Tempo"; Tasks: desktopicon
 
@@ -236,10 +239,10 @@ Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "TEMPO_VAULT"; 
 Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "TEMPO_AGENT_DATA"; ValueData: "{code:TempoAgentData}"; Flags: uninsdeletevalue; Check: UserEnvMissing('TEMPO_AGENT_DATA')
 #if HaveVault
 ; File Explorer: "Open as Tempo Vault" on a folder, and inside one
-Root: HKA; Subkey: "Software\Classes\Directory\shell\PerennosTempoVault"; ValueType: string; ValueName: ""; ValueData: "Open as Tempo Vault"; Tasks: openvault; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\PerennosTempoVault"; ValueType: string; ValueName: ""; ValueData: "Open as Perennos Tempo Vault"; Tasks: openvault; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Directory\shell\PerennosTempoVault"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\tempo-vault.ico"""; Tasks: openvault
 Root: HKA; Subkey: "Software\Classes\Directory\shell\PerennosTempoVault\command"; ValueType: string; ValueName: ""; ValueData: """{#Launch}"" vault ""%V"""; Tasks: openvault
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\PerennosTempoVault"; ValueType: string; ValueName: ""; ValueData: "Open as Tempo Vault"; Tasks: openvault; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\PerennosTempoVault"; ValueType: string; ValueName: ""; ValueData: "Open as Perennos Tempo Vault"; Tasks: openvault; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\PerennosTempoVault"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\tempo-vault.ico"""; Tasks: openvault
 Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\PerennosTempoVault\command"; ValueType: string; ValueName: ""; ValueData: """{#Launch}"" vault ""%V"""; Tasks: openvault
 #endif
@@ -697,11 +700,11 @@ begin
     RemoveFromPath(ExpandConstant('{app}\bin'));
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
   begin
-    S := 'Perennos Tempo has been removed.' + #13#10#13#10 + 'These are still on this computer, as they are yours:' + #13#10;
+    S := 'Perennos Tempo is off this computer.' + #13#10#13#10 + 'These stayed here because they are yours:' + #13#10;
     if KeptVault <> '' then
       S := S + '  your notes: ' + KeptVault + #13#10;
-    S := S + '  Tempo''s memory and logs: ' + TempoHome + #13#10#13#10 +
-      'Delete them yourself if you no longer want them.';
+    S := S + '  Perennos Tempo''s memory and logs: ' + TempoHome + #13#10#13#10 +
+      'Move them to a trash folder if you no longer need them.';
     MsgBox(S, mbInformation, MB_OK);
   end;
 end;
