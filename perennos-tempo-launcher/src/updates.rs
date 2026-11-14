@@ -143,6 +143,16 @@ pub fn read_cache(home: &Path) -> Cache {
         })
 }
 
+#[cfg(test)]
+fn save_cache(home: &Path, cache: &Cache) -> io::Result<()> {
+    let path = home.join(CACHE_FILE);
+    let previous = read_cache_bytes(&path)?;
+    if let Some(bytes) = previous.as_deref() {
+        validate_cache_bytes(bytes)?;
+    }
+    save_cache_expected(&path, cache, previous.as_deref())
+}
+
 fn save_cache_expected(path: &Path, cache: &Cache, expected: Option<&[u8]>) -> io::Result<()> {
     apply_json_atomic(
         path,
