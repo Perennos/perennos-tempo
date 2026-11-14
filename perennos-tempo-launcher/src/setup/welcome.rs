@@ -82,6 +82,17 @@ pub fn welcome_page(m: &Machine, p: &Plan, exe: &Path) -> String {
 
 /// `welcome_page`, with the fleet heading for the number of machines this person really has.
 pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str) -> String {
+    welcome_page_with_update(m, p, exe, fleet_heading, "")
+}
+
+/// `welcome_page_with`, with the locally cached release status.
+pub fn welcome_page_with_update(
+    m: &Machine,
+    p: &Plan,
+    exe: &Path,
+    fleet_heading: &str,
+    update_note: &str,
+) -> String {
     let li = |items: Vec<String>| -> String {
         items
             .into_iter()
@@ -108,6 +119,7 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
         r#"{top}<p class="tt-kicker">01 — First run</p>
 <h1>What's your <em>tempo</em>?</h1>
 <p class="lede">Welcome to Perennos Tempo. It has just looked at this computer. Below: what it found, how to say whether this is your only computer or one of several, and how to let your own AI (Claude, or another) help you finish the setup. Nothing has been fetched, changed or sent anywhere.</p>
+{updates}
 
 <h2>What this computer can run</h2>
 <p class="verdict">{verdict}</p>
@@ -211,5 +223,6 @@ pub fn welcome_page_with(m: &Machine, p: &Plan, exe: &Path, fleet_heading: &str)
         band_run = pre("tempo-launch conductor run social-media weekly-plan\ntempo-launch conductor page"),
         band_engines = pre("tempo-launch conductor engines"),
         fleet = fleet_block(fleet_heading),
+        updates = update_note,
     )
 }

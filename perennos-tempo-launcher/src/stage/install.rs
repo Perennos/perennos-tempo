@@ -1016,7 +1016,17 @@ pub mod tests {
         (code, String::from_utf8(out).unwrap())
     }
 
-    fn setup(tag: &str, with_node: bool, node_py: &str) -> (Ctx, PathBuf, Catalog, FakePm) {
+    fn setup(
+        tag: &str,
+        with_node: bool,
+        node_py: &str,
+    ) -> (
+        Ctx,
+        PathBuf,
+        Catalog,
+        FakePm,
+        crate::woodshed::takes::TestDir,
+    ) {
         let d = tmp(tag);
         let ctx = ctx_in(&d.join("home"));
         std::fs::create_dir_all(&ctx.home).unwrap();
@@ -1032,12 +1042,12 @@ pub mod tests {
                 ("requirements.txt".into(), "numpy\nkornia\n".into()),
             ],
         };
-        (ctx, comfy, cat, pm)
+        (ctx, comfy, cat, pm, d)
     }
 
     #[test]
     fn add_asks_first_shows_sizes_and_fetches_with_hashes() {
-        let (ctx, comfy, cat, pm) = setup("add-ok", false, "");
+        let (ctx, comfy, cat, pm, _dir) = setup("add-ok", false, "");
         let sc = FakeSoundcheck(Ok(vec![]));
         // no: nothing happens
         let (code, out) = run_add(&ctx, &pm, &sc, &cat, AddOpts::default(), &["n"]);
@@ -1120,7 +1130,7 @@ pub mod tests {
     {
         let tok = crate::stage::hf::tests::fake_token();
         let t = crate::stage::hf::Token::new(&tok).unwrap();
-        let (ctx, comfy, cat, pm) = setup("add-gated", false, "");
+        let (ctx, comfy, cat, pm, _dir) = setup("add-gated", false, "");
         // `--yes` covers the plan, not the licence: the second question gets "n"
         let (code, out) = run_add_with_token(
             &ctx,
@@ -1149,7 +1159,7 @@ pub mod tests {
         // the token never reaches the output, whatever the answer
         assert!(!out.contains(&tok));
         // a fresh home, and this time the owner says yes to the licence question
-        let (ctx, comfy, cat, pm) = setup("add-gated-yes", false, "");
+        let (ctx, comfy, cat, pm, _dir) = setup("add-gated-yes", false, "");
         let (code, out) = run_add_with_token(
             &ctx,
             &pm,
@@ -1200,7 +1210,7 @@ pub mod tests {
 
     #[test]
     fn without_a_token_a_gated_model_is_left_for_the_owner_and_the_licence_is_still_shown() {
-        let (ctx, _comfy, cat, pm) = setup("add-gated-none", false, "");
+        let (ctx, _comfy, cat, pm, _dir) = setup("add-gated-none", false, "");
         let sc = FakeSoundcheck(Ok(vec![]));
         let (code, out) = run_add(
             &ctx,
@@ -1225,7 +1235,7 @@ pub mod tests {
 
     #[test]
     fn a_workflow_file_with_the_wrong_hash_is_refused_and_trashed() {
-        let (ctx, comfy, mut cat, pm) = setup("add-badhash", false, "");
+        let (ctx, comfy, mut cat, pm, _dir) = setup("add-badhash", false, "");
         cat.workflows[0].file_sha256 = "0".repeat(64);
         let sc = FakeSoundcheck(Ok(vec![]));
         let (code, out) = run_add(
@@ -1251,7 +1261,7 @@ pub mod tests {
 
     #[test]
     fn a_model_with_the_wrong_hash_is_refused_and_never_put_in_place() {
-        let (ctx, comfy, mut cat, pm) = setup("add-badmodel", false, "");
+        let (ctx, comfy, mut cat, pm, _dir) = setup("add-badmodel", false, "");
         cat.workflows[0].models[0].sha256 = Some("f".repeat(64));
         let sc = FakeSoundcheck(Ok(vec![]));
         let (_, out) = run_add(
@@ -1274,7 +1284,7 @@ pub mod tests {
     fn a_high_finding_blocks_until_the_owner_types_yes_and_yes_flag_does_not_cover_it() {
         let bad = "def run(x):\n    return eval(x)\n";
         // --yes: refused, the fetched copy goes to the trash
-        let (ctx, comfy, cat, pm) = setup("add-high-yes", true, bad);
+        let (ctx, comfy, cat, pm, _dir) = setup("add-high-yes", true, bad);
         let sc = FakeSoundcheck(Err(
             "the Tempo agent is not installed here, so Soundcheck did not run".into(),
         ));
@@ -1296,7 +1306,7 @@ pub mod tests {
         );
         assert!(!comfy.join("custom_nodes/ComfyUI-Thing").exists());
         // a plain "y" is not "yes"
-        let (ctx, comfy, cat, pm) = setup("add-high-y", true, bad);
+        let (ctx, comfy, cat, pm, _dir) = setup("add-high-y", true, bad);
         let (code, out) = run_add(&ctx, &pm, &sc, &cat, AddOpts::default(), &["y", "y"]);
         assert_eq!(code, 1, "{out}");
         assert!(
@@ -1305,7 +1315,7 @@ pub mod tests {
         );
         assert!(!comfy.join("custom_nodes/ComfyUI-Thing").exists());
         // typed yes: it goes in, with its tree hash, and pip is never run
-        let (ctx2, comfy2, cat2, pm2) = setup("add-high-typed", true, bad);
+        let (ctx2, comfy2, cat2, pm2, _dir) = setup("add-high-typed", true, bad);
         let (code, out) = run_add(&ctx2, &pm2, &sc, &cat2, AddOpts::default(), &["y", "yes"]);
         assert_eq!(code, 0, "{out}");
         assert!(comfy2.join("custom_nodes/ComfyUI-Thing/nodes.py").is_file());
@@ -1329,7 +1339,7 @@ pub mod tests {
     #[test]
     fn a_node_that_calls_a_cloud_api_is_refused_unless_the_owner_allowed_it() {
         let cloud = "import requests\nKEY = 'x'\ndef go():\n    return requests.post('https://api.example.com/run', headers={'Authorization': 'Bearer ' + KEY})\n";
-        let (ctx, comfy, cat, pm) = setup("add-cloud", true, cloud);
+        let (ctx, comfy, cat, pm, _dir) = setup("add-cloud", true, cloud);
         let sc = FakeSoundcheck(Ok(vec![]));
         let (code, out) = run_add(
             &ctx,
@@ -1360,7 +1370,7 @@ pub mod tests {
 
     #[test]
     fn a_pack_the_owner_already_has_is_left_alone() {
-        let (ctx, comfy, cat, pm) = setup("add-have", true, "def f():\n    return 1\n");
+        let (ctx, comfy, cat, pm, _dir) = setup("add-have", true, "def f():\n    return 1\n");
         std::fs::create_dir_all(comfy.join("custom_nodes/ComfyUI-Thing")).unwrap();
         std::fs::write(comfy.join("custom_nodes/ComfyUI-Thing/mine.py"), "x = 1\n").unwrap();
         let sc = FakeSoundcheck(Ok(vec![]));
@@ -1396,7 +1406,7 @@ pub mod tests {
     #[test]
     fn a_graph_with_a_paid_node_is_refused_before_anything_else() {
         let body = inpaint_graph().replace("\"9\":{\"class_type\":\"SaveImage\"", "\"2\":{\"class_type\":\"KlingTextToVideoNode\",\"inputs\":{}},\"9\":{\"class_type\":\"SaveImage\"");
-        let (ctx, _, cat, pm) = setup("add-paidgraph", false, "");
+        let (ctx, _, cat, pm, _dir) = setup("add-paidgraph", false, "");
         let (cat, shelf) = {
             let (mut c, s) = tiny(body.as_bytes(), false);
             c.workflows[0].models.clear();
@@ -1429,7 +1439,7 @@ pub mod tests {
 
     #[test]
     fn remove_goes_to_the_trash_and_keeps_models() {
-        let (ctx, comfy, cat, pm) = setup("remove", true, "def f():\n    return 1\n");
+        let (ctx, comfy, cat, pm, _dir) = setup("remove", true, "def f():\n    return 1\n");
         let sc = FakeSoundcheck(Ok(vec![]));
         let (code, out) = run_add(
             &ctx,

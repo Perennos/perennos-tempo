@@ -7,14 +7,16 @@
 
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod bank;
 pub mod brand;
+pub mod company;
 pub mod conductor;
 pub mod fleet;
 pub mod home;
@@ -22,6 +24,7 @@ pub mod retune;
 pub mod setup;
 pub mod stage;
 pub mod tempo_home;
+pub mod updates;
 pub mod woodshed;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -77,6 +80,8 @@ usage: tempo-launch [command]
                     after a y/N that shows the sizes. Speech stays on this computer.
   welcome           the first-run page: what the scan found, one computer or several, and how to
                     let your AI help (opened by itself the first time, then `tempo-launch welcome`)
+  updates [--check | --enable | --disable | --open]
+                    check the official stable release; checks are off until you turn them on
   link URL          add another computer's Ollama (a tailnet or home-network address) to the
                     agent's ollama_fallbacks; nothing is contacted
   mcp [--scan]      a stdio MCP server for your AI (Claude Desktop, Claude Code, ...): read the scan,
@@ -355,11 +360,14 @@ impl Ctx {
             && !Path::new(target)
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir));
+        let loopback = loopback_url(target);
+        let official_release = updates::is_official_release_url(target);
         // or exactly the address of an entry in remote.json that passed its checks
         let remote = !own_file
-            && !loopback_url(target)
+            && !loopback
+            && !official_release
             && load_remote(&self.home).0.iter().any(|r| r.url == target);
-        if !(loopback_url(target) || own_file || remote) {
+        if !(loopback || own_file || remote || official_release) {
             return Err("refused: tempo-launch only opens its own pages".into());
         }
         self.opened.borrow_mut().push(target.to_string());
@@ -408,6 +416,253 @@ fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
         std::process::id()
     ));
     fs::write(&tmp, data).and_then(|()| fs::rename(&tmp, path))
+}
+
+static APPLY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// An OS lock survives process crashes without treating an old lock file as proof of a live owner.
+pub(crate) struct FileLock {
+    _file: File,
+}
+
+impl FileLock {
+    pub(crate) fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::symlink_metadata(path) {
+            Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "lock path is not a regular file",
+                ));
+            }
+            #[cfg(windows)]
+            Ok(meta) => {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & 0x400 != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "lock path is a reparse point",
+                    ));
+                }
+            }
+            #[cfg(not(windows))]
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    pub(crate) fn acquire(path: &Path, timeout: Duration) -> io::Result<Self> {
+        let start = Instant::now();
+        loop {
+            if let Some(lock) = Self::try_acquire(path)? {
+                return Ok(lock);
+            }
+            if start.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "state file is busy; try again",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Validate, bind to the bytes just read, durably stage, revalidate, then atomically replace JSON.
+pub(crate) fn apply_json_atomic(
+    path: &Path,
+    expected_previous: Option<&[u8]>,
+    next: &[u8],
+    last_good: Option<&Path>,
+    validate: impl Fn(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    validate(next)?;
+    validate_replace_path(path)?;
+    let previous = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if previous.as_deref() != expected_previous {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "state changed before the update could be applied",
+        ));
+    }
+    if let (Some(backup), Some(bytes)) = (last_good, previous.as_deref()) {
+        validate(bytes)?;
+        write_validated_atomic(backup, bytes, &validate)?;
+    }
+    write_validated_atomic(path, next, &validate)?;
+    if previous.is_none() {
+        if let Some(backup) = last_good {
+            if let Err(error) = write_validated_atomic(backup, next, &validate) {
+                eprintln!(
+                    "The state file was saved, but its recovery copy could not be initialized: {error}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_validated_atomic(
+    path: &Path,
+    bytes: &[u8],
+    validate: &impl Fn(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    validate_replace_path(path)?;
+    let prior_permissions = match fs::symlink_metadata(path) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("state"))
+        .to_string_lossy();
+    let (temp_path, mut file) = (0..64)
+        .find_map(|_| {
+            let sequence = APPLY_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temp =
+                path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => Some(Ok((temp, file))),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not reserve a temp file",
+            )
+        })?;
+    let mut cleanup = TempApplyFile(Some(temp_path.clone()));
+    if let Some(permissions) = prior_permissions {
+        file.set_permissions(permissions)?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut staged = Vec::with_capacity(bytes.len());
+    file.read_to_end(&mut staged)?;
+    if staged != bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged state did not match the requested update",
+        ));
+    }
+    validate(&staged)?;
+    #[cfg(test)]
+    if std::env::var("S155_ABORT_AFTER_JSON_STAGE").as_deref() == Ok("1") {
+        std::process::abort();
+    }
+    atomic_rename(&temp_path, path)?;
+    sync_parent(path)?;
+    cleanup.0 = None;
+    Ok(())
+}
+
+fn atomic_rename(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        retry_access_denied(|| fs::rename(from, to))
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn retry_access_denied(rename: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let mut rename = rename;
+    let mut attempts = 0;
+    loop {
+        match rename() {
+            Err(error) if error.raw_os_error() == Some(5) && attempts < 2 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn validate_replace_path(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "state path is not a regular file",
+        )),
+        #[cfg(windows)]
+        Ok(meta) => {
+            use std::os::windows::fs::MetadataExt;
+            if meta.file_attributes() & 0x400 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "state path is a reparse point",
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+struct TempApplyFile(Option<PathBuf>);
+
+impl Drop for TempApplyFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -947,8 +1202,29 @@ pub fn signed(body: &str, signs: &[&str]) -> bool {
     signs.iter().any(|s| flat.contains(s))
 }
 
+// Test-local override: only the owning test thread can suppress and count health probes.
+#[cfg(test)]
+thread_local! {
+    #[cfg_attr(
+        all(windows, target_env = "gnu"),
+        expect(clippy::missing_const_for_thread_local, reason = "initializer is already const; reproduced with Clippy 0.1.99 on Windows GNU")
+    )]
+    static STATUS_FAKE_PROBES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// The app's health answer on `port`, if the app is what answers there.
 pub fn answers(app: &App, port: u16) -> Option<String> {
+    #[cfg(test)]
+    if STATUS_FAKE_PROBES.with(|state| {
+        if let Some(count) = state.get() {
+            state.set(Some(count + 1));
+            true
+        } else {
+            false
+        }
+    }) {
+        return None;
+    }
     // the agent checks its model hosts before it answers
     let t = Duration::from_secs(if app.id == "agent" { 15 } else { 3 });
     match http_get(port, app.health, t) {
@@ -1974,6 +2250,8 @@ pub enum Cmd {
     Setup(setup::apply::Opts),
     /// `welcome`: write and open the first-run page.
     Welcome,
+    /// Cached update status and an explicit, bounded check of the official release.
+    Updates(updates::Action),
     /// `link URL`: add another computer's Ollama to the agent's `ollama_fallbacks`.
     Link(String),
     /// `mcp`: the setup helper as an MCP server on stdio; `--scan` prints the scan facts.
@@ -2118,6 +2396,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
             only(&[])?;
             Cmd::Welcome
         }
+        "updates" => Cmd::Updates(updates::parse_args(&rest)?),
         "link" => match rest.as_slice() {
             [u] if !u.starts_with("--") => Cmd::Link(u.to_string()),
             _ => return Err("link takes one address, like http://192.168.0.20:11434".into()),
@@ -2155,7 +2434,24 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    run_cmd(&Ctx::from_env(), cmd)
+    let ctx = Ctx::from_env();
+    #[cfg(not(test))]
+    if matches!(
+        &cmd,
+        Cmd::Home
+            | Cmd::Field
+            | Cmd::Vault(_)
+            | Cmd::Room
+            | Cmd::Agent
+            | Cmd::Studio
+            | Cmd::Start
+            | Cmd::Welcome
+            | Cmd::Fleet(fleet::FleetCmd::Page)
+            | Cmd::Fleet(fleet::FleetCmd::Serve { .. })
+    ) {
+        updates::schedule_auto_check(&ctx);
+    }
+    run_cmd(&ctx, cmd)
 }
 
 pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
@@ -2187,6 +2483,7 @@ pub fn run_cmd(ctx: &Ctx, cmd: Cmd) -> i32 {
                 .map(|_| 0)
                 .map_err(|e| Problem::other("The welcome page could not be opened", e))
         }
+        Cmd::Updates(action) => Ok(updates::run(ctx, action)),
         Cmd::Link(url) => Ok(setup::propose::link(
             ctx,
             setup::propose::real_pinned(),
@@ -2478,7 +2775,8 @@ fn start(ctx: &Ctx) -> i32 {
 
 fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
     // the first time, before any settings exist: the plan for this computer, as a page, once
-    if let Some(page) = setup::first_start(ctx, &setup::probe::RealHost, ollama_port) {
+    let first_run = setup::first_start(ctx, &setup::probe::RealHost, ollama_port);
+    if let Some(page) = first_run.as_ref() {
         ctx.note(&format!("setup: plan written to {}", page.display()));
     }
     // Tempo's own Ollama, when it has one and none answers, before the agent: the agent's models
@@ -2511,6 +2809,21 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
         }
     }
     fleet::autostart(ctx);
+    #[cfg(not(test))]
+    if first_run.is_some() {
+        let mut child = Command::new(setup::own_exe());
+        child
+            .args(["fleet", "page"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match spawn_hidden(&mut child) {
+            Ok(_) => {
+                let _ = setup::mark_first_start_opened(ctx);
+            }
+            Err(e) => ctx.note(&format!("setup: first-run workbench could not start: {e}")),
+        }
+    }
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut failed = 0;
     for l in waiting {
@@ -2726,6 +3039,9 @@ pub fn status_with(ctx: &Ctx, json: bool, ollama_port: u16) -> String {
     }
     for w in &warnings {
         out.push_str(&format!("  {w}\n"));
+    }
+    for alert in fleet::serve::silence_status(&fleet::store::Paths::of(ctx)) {
+        out.push_str(&format!("  fleet alert  {alert}\n"));
     }
     out.push_str(&format!("  vault folder  {}\n", ctx.vault.display()));
     out.push_str(&format!("  logs          {}", ctx.logs_dir().display()));
@@ -3267,10 +3583,44 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::json::J;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn s164_atomic_rename_retries_access_denied_briefly() {
+        let mut attempts = 0;
+        retry_access_denied(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from_raw_os_error(5))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+
+        attempts = 0;
+        let error = retry_access_denied(|| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(5))
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+        assert_eq!(attempts, 3);
+
+        attempts = 0;
+        let error = retry_access_denied(|| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(13))
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(13));
+        assert_eq!(attempts, 1);
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -3583,6 +3933,7 @@ mod tests {
 
     #[test]
     fn the_usual_launches() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("launch");
         let ctx = ctx_in(&root);
         let a = launch_for(&ctx, AGENT);
@@ -3721,6 +4072,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn starts_hidden_waits_opens_and_stops() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let root = tmp("e2e");
         let ctx = ctx_in(&root);
@@ -3780,6 +4132,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_crash_while_starting_shows_its_last_words() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let root = tmp("crash");
         let ctx = ctx_in(&root);
@@ -4042,6 +4395,13 @@ mod tests {
 
     #[test]
     fn a_missing_or_broken_remote_file_is_no_apps_and_never_a_crash() {
+        struct ProbeGuard(Option<usize>);
+        impl Drop for ProbeGuard {
+            fn drop(&mut self) {
+                STATUS_FAKE_PROBES.with(|state| state.set(self.0));
+            }
+        }
+        let _guard = ProbeGuard(STATUS_FAKE_PROBES.with(|state| state.replace(Some(0))));
         let root = tmp("remote-file");
         let ctx = ctx_in(&root);
         assert_eq!(load_remote(&ctx.home), (vec![], vec![]), "missing file");
@@ -4079,6 +4439,10 @@ mod tests {
         assert_eq!(apps[0].sign, "\"app\":\"tempo-vault\"");
         assert_eq!(warns.len(), 2, "{warns:?}");
         assert!(warns[0].contains("evil") && warns[0].contains("not a tailnet or private"));
+        assert_eq!(
+            STATUS_FAKE_PROBES.with(|state| state.get()),
+            Some(13 * (APPS.len() + 1))
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4616,7 +4980,7 @@ mod tests {
     }
 
     #[test]
-    fn first_start_opens_the_welcome_page_once_and_fetches_nothing() {
+    fn first_start_prepares_welcome_once_and_fetches_nothing() {
         use setup::probe::tests::Fake;
         let root = tmp("firststart");
         let ctx = ctx_in(&root);
@@ -4661,15 +5025,13 @@ mod tests {
         ] {
             assert!(!html.contains(bad), "{bad}");
         }
-        // the plan page is there too, and the welcome page was the one opened
+        // The plan page is there; start() opens the hidden Fleet workbench later.
         let plan_html = fs::read_to_string(ctx.home.join("setup.html")).unwrap();
         assert!(plan_html.contains("USD 10 million") && plan_html.contains("--with-d1"));
         assert!(plan_html.contains("never downloaded"));
-        assert_eq!(ctx.opened.borrow().len(), 1);
-        assert!(ctx.opened.borrow()[0].ends_with("welcome.html"));
-        // the second start: nothing more
+        assert!(ctx.opened.borrow().is_empty());
+        assert!(setup::mark_first_start_opened(&ctx).is_ok());
         assert!(setup::first_start(&ctx, &host, 1).is_none());
-        assert_eq!(ctx.opened.borrow().len(), 1);
         // a plan page the installer wrote with `setup --page` is kept as it is
         let root3 = tmp("firststart3");
         let ctx3 = ctx_in(&root3);
@@ -4689,20 +5051,21 @@ mod tests {
         let written = fs::read_to_string(ctx3.home.join("setup.html")).unwrap();
         assert!(ctx3.opened.borrow().is_empty());
         assert!(setup::first_start(&ctx3, &host, 1).is_some());
-        assert_eq!(ctx3.opened.borrow().len(), 1);
+        assert!(ctx3.opened.borrow().is_empty());
         assert_eq!(
             fs::read_to_string(ctx3.home.join("setup.html")).unwrap(),
             written
         );
+        assert!(setup::mark_first_start_opened(&ctx3).is_ok());
         assert!(setup::first_start(&ctx3, &host, 1).is_none());
         let _ = fs::remove_dir_all(root3);
-        // with settings already there it never runs at all
+        // Existing model settings do not suppress the first-run company setup.
         let root2 = tmp("firststart2");
         let ctx2 = ctx_in(&root2);
         fs::create_dir_all(&ctx2.agent_data).unwrap();
         fs::write(ctx2.agent_data.join("config.json"), "{}").unwrap();
-        assert!(setup::first_start(&ctx2, &host, 1).is_none());
-        assert!(!ctx2.home.join("welcome.html").exists());
+        assert!(setup::first_start(&ctx2, &host, 1).is_some());
+        assert!(ctx2.home.join("welcome.html").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(root2);
     }
@@ -4807,6 +5170,10 @@ mod tests {
         }
     }
 
+    /// Vault startup tests share the app's reserved port range; take turns so an unrelated fake
+    /// server cannot claim a port between the availability check and launch.
+    static VAULT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The fake agent (and the check that none is there) uses the agent's real port, so the tests
     /// that do take turns.
     static AGENT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4861,11 +5228,17 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(20000);
+        for _ in 0..5000 {
+            let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if port > u16::MAX as u32 {
+                break;
+            }
+            if TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+                return port as u16;
+            }
+        }
+        panic!("no unique local test port was available");
     }
 
     #[test]
@@ -5275,5 +5648,49 @@ mod tests {
         );
         // nothing to start without a record
         assert_eq!(ensure_owned_ollama(&ctx, port, false).unwrap(), None);
+    }
+
+    #[test]
+    fn status_shows_peer_silence_in_plain_text_without_changing_json_shape() {
+        let root = tmp("fleet-silence-status");
+        let ctx = ctx_in(&root);
+        let paths = fleet::store::Paths::of(&ctx);
+        let now = fleet::store::now_s();
+        fleet::store::update(&paths, |fleet| {
+            let mut machine = fleet::store::Machine::new("worker", "10.0.0.8", "worker");
+            machine.last_seen = now - 12 * 60;
+            machine.joined_at = machine.last_seen;
+            fleet.machines.push(machine);
+        })
+        .unwrap();
+        fs::write(
+            ctx.home.join("fleet-messenger.json"),
+            J::Obj(vec![
+                ("pid".into(), J::n(42.0)),
+                ("started_at".into(), J::n((now - 24 * 60) as f64)),
+                ("last_loop".into(), J::n((now - 12 * 60) as f64)),
+                ("loop_interval_s".into(), J::n(10.0)),
+                ("peer_count".into(), J::n(0.0)),
+                ("last_delivery_attempt".into(), J::Null),
+                ("last_delivery_ok".into(), J::Null),
+                ("last_delivery_error".into(), J::Null),
+            ])
+            .pretty(),
+        )
+        .unwrap();
+
+        let plain = status_with(&ctx, false, free_port());
+        assert!(
+            plain.contains("fleet alert  Worker hasn't checked in for 12 minutes."),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("The fleet messenger hasn't checked in for 12 minutes."),
+            "{plain}"
+        );
+        let json = status_with(&ctx, true, free_port());
+        assert!(json.contains("\"apps\":[") && json.contains("\"remote\":["));
+        assert!(!json.contains("fleet alert") && !json.contains("fleet_alerts"));
+        let _ = fs::remove_dir_all(root);
     }
 }

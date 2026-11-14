@@ -103,6 +103,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item installer/windows/build/out/PerennosTempo-Setup-*.exe dist/
+          Copy-Item installer/windows/build/out/perennos-tempo-controls-*.tar.gz* dist/
           Get-ChildItem dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -131,6 +132,7 @@ jobs:
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir got
           mkdir -p dist
           find got -type f ! -name '*.sha256' -exec mv {} dist/ \;
+          find got -type f -name 'perennos-tempo-controls-*.tar.gz.sha256' -exec mv {} dist/ \;
           ls -la dist
       - name: SHA256SUMS.txt
         run: |
@@ -145,11 +147,22 @@ jobs:
           VERSION: ${{ needs.versions.outputs.version }}
         run: |
           set -eu
+          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            asset="perennos-tempo-controls-$VERSION-$target.tar.gz"
+            [ -f "dist/$asset" ] || { echo "missing controls archive: $asset"; exit 1; }
+            [ -f "dist/$asset.sha256" ] || { echo "missing controls checksum: $asset.sha256"; exit 1; }
+            (cd dist && sha256sum -c "$asset.sha256")
+          done
+          control_count=$(find dist -maxdepth 1 -type f -name 'perennos-tempo-controls-*.tar.gz' | wc -l)
+          [ "$control_count" -eq 3 ] || { echo "expected three controls archives, found $control_count"; exit 1; }
           quick_table=$(awk '/^\| Computer \| File \|$/{found=1; next} found && /^\|/{print; next} found{exit}' README.md)
           count=0
           expected=()
           for f in dist/*; do
             name=${f#dist/}
+            case "$name" in
+              perennos-tempo-controls-*.tar.gz|perennos-tempo-controls-*.tar.gz.sha256) continue ;;
+            esac
             [ "$name" = "SHA256SUMS.txt" ] && continue
             case "$name" in
               *"$VERSION"*) ;;

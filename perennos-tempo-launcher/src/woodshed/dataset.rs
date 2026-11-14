@@ -567,7 +567,10 @@ mod tests {
     }
 
     /// A run log with `n` winning takes for `band`, authored as given, plus the take lines.
-    fn world(tag: &str, rows: &[(&str, &str, &str, bool, &str)]) -> (Ctx, Vec<Take>) {
+    fn world(
+        tag: &str,
+        rows: &[(&str, &str, &str, bool, &str)],
+    ) -> (super::super::takes::TestCtx, Vec<Take>) {
         let ctx = test_ctx(tag);
         let d = ctx.agent_data.join("runs/2026-11-07");
         std::fs::create_dir_all(&d).unwrap();

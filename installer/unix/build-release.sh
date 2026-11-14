@@ -79,6 +79,13 @@ for f in "$TOP"/bin/*; do
   CRATES+=("$(crate_dir "$c")")
 done
 python3 -I "$ROOT/installer/windows/notices.py" "$TOP/legal/THIRD-PARTY-NOTICES.txt" "$TARGET" "${CRATES[@]}"
+python3 -I "$ROOT/installer/control_bundle.py" \
+  --version "$VERSION" --target "$TARGET" \
+  --launcher "$TOP/bin/tempo-launch" --agent "$TOP/bin/tempo-local-agent" \
+  --license "$TOP/legal/LICENSE-PolyForm-Shield-1.0.0.txt" \
+  --notice "$TOP/legal/NOTICE.txt" \
+  --third-party-notices "$TOP/legal/THIRD-PARTY-NOTICES.txt" \
+  --out-dir "$OUT"
 
 cat > "$TOP/README.txt" <<EOT
 Perennos Tempo $VERSION, $EDITION edition, for $TARGET

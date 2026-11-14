@@ -61,11 +61,6 @@ fn parts(r: &Rig) -> usize {
 
 #[test]
 fn a_big_blob_crosses_intact_past_the_old_64_mib_limit() {
-    // `fleet invite` starts `<this program> fleet serve` and in a test that is the test program,
-    // which runs every test with "fleet" in its name: that copy has no need of the slow one
-    if std::env::args().any(|a| a == "serve") {
-        return;
-    }
     let (a, b, mb) = pair("big");
     // 65 MiB and a bit: more than the 64 MiB the call channel took, and not a whole number of pieces
     let size = (65 << 20) + 12_345;
@@ -107,6 +102,101 @@ fn a_big_blob_crosses_intact_past_the_old_64_mib_limit() {
     )
     .unwrap();
     assert_eq!(l.path, got[0]);
+}
+
+#[test]
+fn invite_does_not_start_the_test_harness_as_the_messenger() {
+    assert!(super::ensure_invite_messenger(0));
+}
+
+#[test]
+fn add_updates_an_existing_address_without_losing_its_pinned_state() {
+    let r = rig("address-add", KEY);
+    let mut machine = Machine::new("worker", "10.0.0.1", "agent");
+    machine.enabled = false;
+    machine.port = 8123;
+    machine.id = "ab".repeat(32);
+    machine.health = J::Bool(true);
+    machine.ssh = J::Bool(true);
+    machine.tools = J::Bool(true);
+    store::update(&r.paths, |f| {
+        f.machines.clear();
+        f.machines.push(machine.clone());
+    })
+    .unwrap();
+
+    let mut out = Vec::new();
+    assert_eq!(
+        super::add(
+            &r.paths,
+            None,
+            "10.0.0.2",
+            Some("engine"),
+            Some("worker"),
+            &mut out,
+        ),
+        0
+    );
+    let got = store::load(&r.paths).machines.remove(0);
+    assert_eq!(got.addr, "10.0.0.2");
+    assert!(got.enabled);
+    assert_eq!(got.role, "engine");
+    assert_eq!(got.port, machine.port);
+    assert_eq!(got.id, machine.id);
+    assert_eq!(got.health, machine.health);
+    assert_eq!(got.ssh, machine.ssh);
+    assert_eq!(got.tools, machine.tools);
+}
+
+#[test]
+fn install_key_updates_only_valid_peer_addresses_and_keeps_existing_fields() {
+    let r = rig("address-key", KEY);
+    let mut machine = Machine::new("worker", "10.0.0.3", "agent");
+    machine.enabled = false;
+    machine.port = 8124;
+    machine.id = "cd".repeat(32);
+    machine.health = J::Bool(true);
+    machine.ssh = J::Bool(true);
+    machine.tools = J::Bool(true);
+    store::update(&r.paths, |f| {
+        f.machines.clear();
+        f.machines.push(machine.clone());
+    })
+    .unwrap();
+
+    let key = "07".repeat(32);
+    let updated_id = "ef".repeat(32);
+    let peers = [format!("worker=10.0.0.4#{updated_id}")];
+    let mut out = Vec::new();
+    assert_eq!(
+        super::install_key(&r.paths, None, &peers, &key, &mut out),
+        0
+    );
+    let got = store::load(&r.paths).machines.remove(0);
+    assert_eq!(got.addr, "10.0.0.4");
+    assert_eq!(got.role, machine.role);
+    assert_eq!(got.enabled, machine.enabled);
+    assert_eq!(got.port, machine.port);
+    assert_eq!(got.id, updated_id);
+    assert_eq!(got.health, machine.health);
+    assert_eq!(got.ssh, machine.ssh);
+    assert_eq!(got.tools, machine.tools);
+
+    let bad_id = "12".repeat(32);
+    let invalid_peers = [format!("worker=example.com#{bad_id}")];
+    assert_eq!(
+        super::install_key(&r.paths, None, &invalid_peers, &key, &mut out),
+        0
+    );
+    let got = store::load(&r.paths).machines.remove(0);
+    assert_eq!(got.addr, "10.0.0.4");
+    assert_eq!(got.id, updated_id);
+    let explicit_port = [format!("worker=10.0.0.4:9123#{updated_id}")];
+    assert_eq!(
+        super::install_key(&r.paths, None, &explicit_port, &key, &mut out),
+        0
+    );
+    assert_eq!(store::load(&r.paths).machines[0].port, 9123);
 }
 
 #[test]

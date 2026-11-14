@@ -312,6 +312,14 @@ Every message is written to a SQLite outbox (`<home>/fleet.db`, WAL) before anyt
 
 `fleet send NAME "text"`, `fleet inbox` and `fleet ping NAME` (a round trip in microseconds on the open connection) are the command line. `GET /fleet.json` on the messenger's port answers this computer only (the Host header must name 127.0.0.1 or localhost, so a web page cannot read it); `GET /hello` answers any private address with the computer's name and whether a code is waiting, nothing else.
 
+### Silence alerts
+
+Every ten seconds, Perennos Tempo checks the computers in your fleet. If a computer stops checking in for ten minutes, or the messenger stops reaching any peer for ten minutes, `tempo-launch status` shows an alert. `fleet serve --quiet` still saves each alert and recovery to `<home>/logs/fleet-silence.log`.
+
+If enabled peers are set up but this computer has no messenger check-in, status says this computer's status is unknown. A running messenger waits at least ten seconds after it first notices the gap before logging an alert. Each messenger watches its own peers. If this computer stops checking in, another computer with the phone relay configured can alert you. If every messenger is down, phone delivery pauses; the local alert log stays on disk.
+
+To send these alerts to your phone, set `TEMPO_ALERT_RELAY_URL` in the environment that starts each messenger that should send alerts. It must point to a private IP over plain HTTP. Perennos Tempo connects directly, with no proxy or redirects. Alerts stay on this computer and retry after 5, 10, 20, 40, 80, 160, then 300 seconds until the relay accepts them. `tempo-launch status` shows alerts still waiting. Up to 32 alerts can wait; if more arrive, the local log still records each state change and Perennos Tempo reports that the phone alert could not be saved. A successful response means the relay accepted the alert, not that your phone displayed it.
+
 ### Tools anywhere
 
 Each computer offers its tools to the band, and only the ones its own owner allowed. With nothing allowed, a computer offers nothing. On the computer that owns the tool: `tempo-launch fleet allow comfy_image`, `fleet allow stage` (this computer plays Stage's workflows for the fleet, [STAGE.md](STAGE.md)), `fleet allow mcp:SERVER/TOOL` or `fleet allow mcp:SERVER/*` (and `fleet deny ...` takes one back). `tempo-launch fleet cap GIB` sets the biggest file that may cross between computers (4 GiB unless you say so). What is offered rides on the heartbeat: ComfyUI (when it answers on 127.0.0.1:8188 or at the agent's `comfy_url`, with its checkpoints and the memory of its card), and the allowed MCP tools (names, descriptions and parameters).

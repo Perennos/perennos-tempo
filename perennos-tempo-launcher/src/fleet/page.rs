@@ -143,9 +143,10 @@ pub fn write(ctx: &Ctx) -> Result<PathBuf, String> {
     let p = Paths::of(ctx);
     let file = ctx.home.join("fleet.html");
     let html = format!(
-        "{top}<h1>{heading}</h1>\n<p class=\"lede\">Your own computers, and what each is doing right now.</p>\n{sec}\n<h2>Change the fleet</h2>\n<pre>tempo-launch fleet scan\ntempo-launch fleet add &lt;address or name&gt;\ntempo-launch fleet remove &lt;name&gt;\ntempo-launch fleet ping &lt;name&gt;</pre>\n{end}",
+        "{top}<h1>{heading}</h1>\n<p class=\"lede\">Your own computers, and what each is doing right now.</p>\n{updates}\n{sec}\n<h2>Change the fleet</h2>\n<pre>tempo-launch fleet scan\ntempo-launch fleet add &lt;address or name&gt;\ntempo-launch fleet remove &lt;name&gt;\ntempo-launch fleet ping &lt;name&gt;</pre>\n{end}",
         top = brand::page_top("Tempo Fleet", true, true),
         heading = html_escape(&super::heading(store::load(&p).count())),
+        updates = crate::updates::notice_html(&ctx.home),
         sec = section(&p, false),
         end = brand::PAGE_END,
     );

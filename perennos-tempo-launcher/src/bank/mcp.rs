@@ -2158,7 +2158,7 @@ mod tests {
         assert!(e.contains("boom"), "{e}");
         // output is held to its size
         let j = Job {
-            argv: strs(&["/bin/sh", "-c", "head -c 100000 /dev/zero | tr '\\0' a"]),
+            argv: strs(&["/bin/sh", "-c", "exec head -c 100000 /dev/zero"]),
             stdin: None,
             timeout: Duration::from_secs(5),
             ret: Ret::Text(1000),
