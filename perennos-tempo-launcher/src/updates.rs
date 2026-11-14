@@ -12,10 +12,10 @@ pub const RELEASES_URL: &str = "https://github.com/Perennos/perennos-tempo/relea
 pub const CACHE_FILE: &str = "updates.json";
 const LOCK_FILE: &str = "updates.lock";
 const TTL_S: u64 = 24 * 60 * 60;
-const ERR_FETCH: &str = "The release check could not reach GitHub.";
-const ERR_RELEASE: &str = "GitHub did not return an official stable release.";
-const ERR_OLDER: &str = "GitHub returned a release older than the one already known.";
-const ERR_CACHE: &str = "The saved update status could not be read.";
+const ERR_FETCH: &str = "The update check couldn't reach GitHub. Check your connection, then run `tempo-launch updates --check` again.";
+const ERR_RELEASE: &str = "GitHub returned no official stable release. Check again later.";
+const ERR_OLDER: &str = "GitHub returned an older release than the one saved here. No update was offered. Check again later.";
+const ERR_CACHE: &str = "Perennos Tempo could not read its saved update status. Run `tempo-launch updates --check` to refresh it.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -280,8 +280,14 @@ pub fn check_with(
     automatic: bool,
 ) -> Result<Cache, String> {
     let _lock = FileLock::try_acquire(&home.join(LOCK_FILE))
-        .map_err(|e| format!("could not lock the update cache: {e}"))?
-        .ok_or_else(|| "an update check is already running".to_string())?;
+        .map_err(|e| {
+            format!(
+                "Could not lock the update cache ({e}). Close any other update check, then try again."
+            )
+        })?
+        .ok_or_else(|| {
+            "Another update check is running. Let it finish, then try again.".to_string()
+        })?;
     let (mut cache, previous) = read_cache_checked(home)?;
     if automatic && (!cache.enabled || !cache.due(now)) {
         return Ok(cache);
@@ -304,12 +310,22 @@ pub fn check_with(
 
 pub fn set_enabled(home: &Path, enabled: bool) -> Result<Cache, String> {
     let _lock = FileLock::try_acquire(&home.join(LOCK_FILE))
-        .map_err(|e| format!("could not lock the update cache: {e}"))?
-        .ok_or_else(|| "an update check is already running".to_string())?;
+        .map_err(|e| {
+            format!(
+                "Could not lock the update cache ({e}). Close any other update check, then try again."
+            )
+        })?
+        .ok_or_else(|| {
+            "Another update check is running. Let it finish, then try again.".to_string()
+        })?;
     let (mut cache, previous) = read_cache_checked(home)?;
     cache.enabled = enabled;
     save_cache_expected(&home.join(CACHE_FILE), &cache, previous.as_deref())
-        .map_err(|e| format!("could not save update settings: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "Could not save update settings ({e}). Check that the Perennos Tempo home folder is writable, then try again."
+            )
+        })?;
     Ok(cache)
 }
 

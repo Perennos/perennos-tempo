@@ -90,15 +90,15 @@ python3 -I "$ROOT/installer/control_bundle.py" \
 cat > "$TOP/README.txt" <<EOT
 Perennos Tempo $VERSION, $EDITION edition, for $TARGET
 
-Install (no administrator needed, nothing is paid for):
+Install (no administrator needed):
   ./install.sh                          programs into ~/.local/bin, menu entries, icons
   ./install.sh --add-to-path --learn    also put them on your PATH and learn from your vault hourly
   ./install.sh --help                   every option
-  ./install.sh --uninstall              moves what it installed to <tempo home>/trash/<date>/ (your vault is never touched)
+  ./install.sh --uninstall              moves its files to <Perennos Tempo home>/trash/<date>/ (your Vault stays in place)
 
 Start: pick Perennos Tempo in the applications menu (macOS: ~/Applications), or run tempo-launch.
 
-Licences are in legal/: PolyForm Shield 1.0.0 for the open parts$([ "$EDITION" = full ] && echo ", the proprietary notice for the Tempo Field and the tempo command with VECTIS"), and the third-party notices.
+Licences are in legal/: PolyForm Shield 1.0.0 for the open parts$([ "$EDITION" = full ] && echo ", the proprietary notice for Perennos Tempo Field and the tempo command with VECTIS"), and the third-party notices.
 
 macOS without a paid Apple Developer ID: install.sh removes the quarantine flag from what it installs and signs it ad hoc
 (codesign -s -). If macOS still refuses an app the first time, right-click it, choose Open, then Open.

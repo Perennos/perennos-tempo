@@ -5001,7 +5001,10 @@ mod tests {
         assert!(html.contains("8 GB RAM, no GPU: qwen3:4b (2.5 GB)"));
         assert!(html.contains("claude mcp add tempo-setup --"));
         assert!(html.contains("claude_desktop_config.json") && html.contains("mcpServers"));
-        assert!(html.contains("only the scan facts") || html.contains("Only the scan facts"));
+        assert!(
+            html.contains("The setup helper shares system, CPU/GPU class, memory, free disk")
+                && html.contains("It does not read files, notes or chats.")
+        );
         // Tempo Conductor: every template, the describe example, and the AI's two band tools
         assert!(html.contains("Let the Conductor set up a band for your work"));
         assert!(html.contains("tempo-launch conductor engines"));

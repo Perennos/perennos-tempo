@@ -399,31 +399,37 @@ pub fn run_flow_cast(
             .iter()
             .find(|c| &c.handle == handle)
             .map_or("", |c| c.url.as_str());
-        let (answer, engine) =
-            match chat.say_for(&band.name, handle, url, model, &with_guard(&m.role), &ask) {
-                Ok(a) => (redact(a.text.trim()), a.engine),
-                Err(e) => {
-                    let why = format!("{} could not answer ({e})", m.name);
-                    let _ = write_atomic(
-                        &index,
-                        index_note(
-                            band,
-                            flow,
-                            &at.link_base,
-                            &folder,
-                            &date,
-                            &done,
-                            Some(&why),
-                            cast,
-                        )
-                        .as_bytes(),
-                    );
-                    return Err(format!(
-                        "{why}. What was done so far is in {}",
+        let (answer, engine) = match chat.say_for(
+            &band.name,
+            handle,
+            url,
+            model,
+            &with_guard(&m.role),
+            &ask,
+        ) {
+            Ok(a) => (redact(a.text.trim()), a.engine),
+            Err(e) => {
+                let why = format!("{} could not answer ({e})", m.name);
+                let _ = write_atomic(
+                    &index,
+                    index_note(
+                        band,
+                        flow,
+                        &at.link_base,
+                        &folder,
+                        &date,
+                        &done,
+                        Some(&why),
+                        cast,
+                    )
+                    .as_bytes(),
+                );
+                return Err(format!(
+                        "{why}. Check the engine and model, then retry the flow. Work completed so far is in {}",
                         dir.display()
                     ));
-                }
-            };
+            }
+        };
         let step = Step {
             n,
             handle: handle.clone(),

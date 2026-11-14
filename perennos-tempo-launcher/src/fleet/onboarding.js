@@ -18,7 +18,7 @@ async function api(action, fields = {}) {
   });
   if (!response.ok) {
     if (response.status === 403) throw new Error('Open Fleet from Perennos Tempo on this computer to continue.');
-    const body = await response.json(); throw new Error(body.error || 'The operation could not start.');
+    const body = await response.json(); throw new Error(body.error || 'This action did not start. Reopen Fleet from Perennos Tempo and try again.');
   }
   return response.json();
 }
@@ -28,7 +28,7 @@ async function readState() {
   });
   if (!response.ok) {
     if (response.status === 403) throw new Error('Open Fleet from Perennos Tempo on this computer to continue.');
-    throw new Error('The workbench state could not be read.');
+    throw new Error('Fleet could not load its setup state. Reload it from Perennos Tempo to try again.');
   }
   return response.json();
 }
