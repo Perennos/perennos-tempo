@@ -97,6 +97,21 @@ fn parse_hooks(v: &Value, default_timeout: f64) -> Result<Hooks, String> {
     Ok(h)
 }
 
+fn valid_fleet_job_fetch_prefix(prefix: &str) -> bool {
+    let rest = prefix
+        .strip_prefix("http://")
+        .or_else(|| prefix.strip_prefix("https://"));
+    let Some(rest) = rest else { return false };
+    let Some((host, path)) = rest.split_once('/') else { return false };
+    let path = path.split('?').next().unwrap_or(path);
+    !host.is_empty()
+        && !host.contains('@')
+        && (prefix.ends_with('/') || prefix.ends_with('?') || prefix.ends_with('='))
+        && !prefix.chars().any(|c| c.is_whitespace() || c == '#' || c == '\\')
+        && !path.contains('%')
+        && !path.split('/').any(|part| part == "." || part == "..")
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub ollama_url: String,
@@ -176,6 +191,10 @@ pub struct Config {
     pub mcp_hints: BTreeMap<String, String>,
     pub mcp_start_timeout_s: f64,
     pub mcp_call_timeout_s: f64,
+    /// Read-only retrieval tools available to signed fleet jobs. Empty is text-only.
+    pub fleet_job_tools: Vec<String>,
+    /// Exact URL prefixes for fleet-job reads; path prefixes must end at a boundary.
+    pub fleet_job_fetch_prefixes: Vec<String>,
     pub comfy_url: String,
     pub comfy_output_dir: Option<String>,
     pub comfy_start_cmd: Option<String>,
@@ -315,6 +334,8 @@ impl Config {
             mcp_hints: BTreeMap::new(),
             mcp_start_timeout_s: 90.0,
             mcp_call_timeout_s: 600.0,
+            fleet_job_tools: vec![],
+            fleet_job_fetch_prefixes: vec![],
             comfy_url: "http://127.0.0.1:8188".into(),
             comfy_output_dir: None,
             comfy_start_cmd: None,
@@ -331,6 +352,18 @@ impl Config {
         self.write_roots = vec![self.data_dir.to_string_lossy().into_owned()];
         self.trash_dir = self.data_dir.join("trash");
         self.command_cwd = self.data_dir.clone();
+    }
+
+    pub fn fleet_job_fetch_allowed(&self, url: &str) -> bool {
+        let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+        self.fleet_job_tools.iter().any(|tool| tool == "fetch_url")
+            && !url.contains('@')
+            && !url.contains('#')
+            && !url.contains('\\')
+            && self.fleet_job_fetch_prefixes.iter().any(|prefix| {
+                url.starts_with(prefix)
+                    && !path.contains('%')
+            })
     }
 
     pub fn from_json(v: &Value, data_dir_env: Option<String>) -> Result<Config, String> {
@@ -533,6 +566,18 @@ impl Config {
         };
         c.mcp_confirm.extend(pairs("mcp_confirm"));
         c.mcp_trust.extend(pairs("mcp_trust"));
+        if let Some(x) = strs(v, "fleet_job_tools") {
+            if x.iter().any(|tool| tool != "fetch_url") {
+                return Err("fleet_job_tools currently permits only fetch_url".into());
+            }
+            c.fleet_job_tools = x;
+        }
+        if let Some(x) = strs(v, "fleet_job_fetch_prefixes") {
+            if x.iter().any(|prefix| !valid_fleet_job_fetch_prefix(prefix)) {
+                return Err("fleet_job_fetch_prefixes must be exact http(s) URL prefixes ending at /, ? or =".into());
+            }
+            c.fleet_job_fetch_prefixes = x;
+        }
         if let Some(m) = v.get("mcp_hints").and_then(|x| x.as_object()) {
             for (k, r) in m {
                 if let Some(r) = r.as_str() {
@@ -739,6 +784,8 @@ mod tests {
         );
         assert_eq!(c.embed_model, "embeddinggemma");
         assert_eq!(c.max_steps, 40);
+        assert!(c.fleet_job_tools.is_empty());
+        assert!(c.fleet_job_fetch_prefixes.is_empty());
         let c = Config::defaults(Some("/x/data".into()));
         assert_eq!(c.data_dir, PathBuf::from("/x/data"));
     }
@@ -804,6 +851,28 @@ mod tests {
         assert!(c.all_hosts().contains_key("local"));
         assert_eq!(c.mcp_confirm, [("s".to_string(), "t".to_string())]);
         assert!(Config::from_json(&json!([1]), None).is_err());
+    }
+
+    #[test]
+    fn fleet_job_tools_are_default_empty_and_url_scoped() {
+        let c = Config::from_json(
+            &json!({
+                "fleet_job_tools": ["fetch_url"],
+                "fleet_job_fetch_prefixes": ["http://127.0.0.1:18727/api/"]
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(c.fleet_job_fetch_allowed("http://127.0.0.1:18727/api/status"));
+        assert!(!c.fleet_job_fetch_allowed("http://127.0.0.1:18727/admin"));
+        assert!(!c.fleet_job_fetch_allowed("http://127.0.0.1:18727/api/%2f..%2fsecret"));
+        assert!(!c.fleet_job_fetch_allowed("http://127.0.0.1:18727/api/%252e%252e/secret"));
+        assert!(Config::from_json(&json!({"fleet_job_tools": ["write_file"]}), None).is_err());
+        assert!(Config::from_json(
+            &json!({"fleet_job_fetch_prefixes": ["http://user@host/api/"]}),
+            None
+        )
+        .is_err());
     }
 
     #[test]
