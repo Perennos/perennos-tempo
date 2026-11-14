@@ -15,6 +15,7 @@ pub mod msg;
 pub mod onboarding;
 pub mod page;
 pub mod pair;
+pub mod relay;
 pub mod route;
 pub mod scan;
 pub mod serve;

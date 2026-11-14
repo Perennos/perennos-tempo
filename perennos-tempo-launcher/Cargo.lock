@@ -445,6 +445,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "perennos-dead-air-silence-core"
+version = "0.1.0"
+source = "git+https://github.com/Perennos/dead-air.git?rev=cbf0f63b6cce3757a7fa7ce4dfdea37749eed28e#cbf0f63b6cce3757a7fa7ce4dfdea37749eed28e"
+
+[[package]]
 name = "perennos-tempo-launcher"
 version = "2.1.0"
 dependencies = [
@@ -452,6 +457,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom",
  "ml-kem",
+ "perennos-dead-air-silence-core",
  "rand_core 0.10.1",
  "rusqlite",
  "spake2",

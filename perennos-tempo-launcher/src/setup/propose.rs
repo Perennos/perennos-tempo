@@ -5,9 +5,10 @@
 
 use super::apply::{agent_settings_path, pinned_agent_settings};
 use super::json::{parse, J};
-use crate::{file_stamp, parse_remote_url, stamp, write_atomic, Ctx};
+use crate::{apply_json_atomic, file_stamp, parse_remote_url, stamp, write_atomic, Ctx, FileLock};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where an AI's proposal waits, inside the Tempo home.
 pub const PROPOSAL_FILE: &str = "proposed-settings.json";
@@ -167,26 +168,68 @@ pub fn proposal_waiting(ctx: &Ctx) -> bool {
 }
 
 /// Copy a file into `<home>/trash/<date>/` (under its own name), so nothing is lost.
-fn keep_old(home: &Path, path: &Path, text: &str, now: u64) -> Result<PathBuf, String> {
-    let fs = file_stamp(now);
-    let dir = home.join("trash").join(&fs[..8]);
+static SETTINGS_BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn keep_old(home: &Path, path: &Path, text: &str, now: u64) -> Result<PathBuf, String> {
+    let stamp = file_stamp(now);
+    let dir = home.join("trash").join(&stamp[..8]);
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the trash folder: {e}"))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config.json".into());
-    let mut dest = dir.join(&name);
-    if dest.exists() {
-        let stem = name.strip_suffix(".json").unwrap_or(&name);
-        dest = dir.join(format!("{stem}-{}.json", &fs[9..]));
+    let stem = name.strip_suffix(".json").unwrap_or(&name);
+    for attempt in 0..64 {
+        let dest = if attempt == 0 {
+            dir.join(&name)
+        } else {
+            let sequence = SETTINGS_BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            dir.join(format!(
+                "{stem}-{stamp}-{}-{sequence}.json",
+                std::process::id()
+            ))
+        };
+        if dest.exists() {
+            continue;
+        }
+        match apply_json_atomic(&dest, None, text.as_bytes(), None, validate_settings_bytes) {
+            Ok(()) => return Ok(dest),
+            Err(_) if dest.exists() => continue,
+            Err(error) => return Err(format!("could not save the old settings: {error}")),
+        }
     }
-    std::fs::write(&dest, text).map_err(|e| format!("could not save the old settings: {e}"))?;
-    Ok(dest)
+    Err("could not reserve a unique settings backup name".into())
 }
 
 /// The settings file as an object (empty when there is none), and its text.
 pub(crate) fn load_settings(path: &Path) -> Result<(J, Option<String>), String> {
-    let old = std::fs::read_to_string(path).ok();
+    let old = match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{} could not be inspected: {e}", path.display())),
+        Ok(meta)
+            if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 1024 * 1024 =>
+        {
+            return Err(format!(
+                "{} is not a bounded regular file, so it was left alone",
+                path.display()
+            ))
+        }
+        Ok(meta) => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & 0x400 != 0 {
+                    return Err(format!(
+                        "{} is a reparse point, so it was left alone",
+                        path.display()
+                    ));
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = meta;
+            Some(read_settings_text(path)?)
+        }
+    };
     match &old {
         Some(t) => match parse(t) {
             Ok(j @ J::Obj(_)) => Ok((j, old)),
@@ -199,6 +242,23 @@ pub(crate) fn load_settings(path: &Path) -> Result<(J, Option<String>), String> 
     }
 }
 
+fn read_settings_text(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| format!("{} could not be read: {e}", path.display()))?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(format!(
+            "{} exceeded its read limit, so it was left alone",
+            path.display()
+        ));
+    }
+    String::from_utf8(bytes).map_err(|e| format!("{} is not valid UTF-8: {e}", path.display()))
+}
+
 /// Put `values` into the settings file; the old file goes to the trash first.
 pub(crate) fn store(
     ctx: &Ctx,
@@ -208,6 +268,25 @@ pub(crate) fn store(
     values: &[(String, J)],
     now: u64,
 ) -> Result<Option<PathBuf>, String> {
+    let _lock = FileLock::acquire(&settings_lock_path(path), std::time::Duration::from_secs(5))
+        .map_err(|e| format!("could not lock {}: {e}", path.display()))?;
+    let expected = old.as_deref().map(str::as_bytes);
+    let current = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "{} could not be read before it changed: {e}",
+                path.display()
+            ))
+        }
+    };
+    if current.as_deref() != expected {
+        return Err(format!(
+            "{} changed while Tempo was preparing it; review the setting and try again",
+            path.display()
+        ));
+    }
     for (k, v) in values {
         cfg.set(k, v.clone());
     }
@@ -215,9 +294,45 @@ pub(crate) fn store(
         Some(t) => Some(keep_old(&ctx.home, path, t, now)?),
         None => None,
     };
-    write_atomic(path, cfg.pretty().as_bytes())
-        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    apply_json_atomic(
+        path,
+        expected,
+        cfg.pretty().as_bytes(),
+        None,
+        validate_settings_bytes,
+    )
+    .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     Ok(trashed)
+}
+
+pub(crate) fn settings_lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config.json"))
+        .to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+pub(crate) fn validate_settings_bytes(bytes: &[u8]) -> std::io::Result<()> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let json = parse(text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let J::Obj(fields) = json else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "settings must be a JSON object",
+        ));
+    };
+    let mut keys = std::collections::HashSet::new();
+    if fields.iter().any(|(key, _)| !keys.insert(key)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "settings contain duplicate keys",
+        ));
+    }
+    Ok(())
 }
 
 fn short(j: &J) -> String {

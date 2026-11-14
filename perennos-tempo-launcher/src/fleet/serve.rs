@@ -6,10 +6,11 @@
 //! pairing, which starts with `PAIR`.
 
 use super::msg::{lock, Node};
-use super::store::{self, now_s, Fleet, Paths};
+use super::store::{self, now_s, Fleet, Machine, Paths};
 use crate::setup::json::{parse, J};
-use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
+use perennos_dead_air_silence_core::{transition, Transition};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,10 @@ use std::time::{Duration, Instant};
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
 /// A machine that has not spoken for this long (three heartbeats missed) is shown as away.
 pub const AWAY_S: u64 = 35;
+pub const SILENCE_ALARM_MS: u64 = 10 * 60 * 1000;
+pub(super) const SILENCE_LOG: &str = "fleet-silence.log";
+const MESSENGER_HEARTBEAT: &str = "fleet-messenger.json";
+const ALARM_MISSED_INTERVALS: u64 = 60;
 
 // ---- what this computer says about itself
 
@@ -140,7 +145,7 @@ pub fn on_heartbeat(node: &Node, from: &str, body: &[u8]) {
     let Some(j) = std::str::from_utf8(body).ok().and_then(|t| parse(t).ok()) else {
         return;
     };
-    let _ = store::update(&node.paths, |f| {
+    if let Err(error) = store::update(&node.paths, |f| {
         if let Some(m) = f.machines.iter_mut().find(|m| m.name == from) {
             m.last_seen = now_s();
             // the offer rides on every sixth heartbeat: between those the last one stands
@@ -155,7 +160,593 @@ pub fn on_heartbeat(node: &Node, from: &str, body: &[u8]) {
             }
             m.health = h;
         }
-    });
+    }) {
+        eprintln!("fleet: heartbeat update failed: {error}");
+    }
+}
+
+fn machine_signal_ms(machine: &Machine) -> Option<u64> {
+    let seconds = if machine.last_seen > 0 {
+        machine.last_seen
+    } else {
+        machine.joined_at
+    };
+    (seconds > 0).then(|| seconds.saturating_mul(1000))
+}
+
+fn clock_label(seconds: u64) -> String {
+    let minute_of_day = (seconds % 86_400) / 60;
+    format!("{:02}:{:02} UTC", minute_of_day / 60, minute_of_day % 60)
+}
+
+fn display_name(name: &str) -> String {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SilenceLevel {
+    Healthy,
+    Alert,
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+struct SilenceObservation {
+    level: SilenceLevel,
+    message: Option<String>,
+}
+
+fn peer_observation(machine: &Machine, now_ms: u64) -> SilenceObservation {
+    if machine.last_seen == 0 && machine.joined_at == 0 {
+        return healthy_observation();
+    }
+    let signal_ms = machine_signal_ms(machine);
+    match transition(now_ms, signal_ms, SILENCE_ALARM_MS, false) {
+        Transition::Healthy | Transition::Recovered => SilenceObservation {
+            level: SilenceLevel::Healthy,
+            message: None,
+        },
+        Transition::Unknown => SilenceObservation {
+            level: SilenceLevel::Unknown,
+            message: Some(format!(
+                "I can't read a valid check-in time for {}. Its status is unknown.",
+                display_name(&machine.name)
+            )),
+        },
+        Transition::Alert | Transition::Quiet => {
+            let Some(signal_ms) = signal_ms else {
+                return SilenceObservation {
+                    level: SilenceLevel::Unknown,
+                    message: Some(format!(
+                        "I can't read a valid check-in time for {}. Its status is unknown.",
+                        display_name(&machine.name)
+                    )),
+                };
+            };
+            let age_minutes = now_ms.saturating_sub(signal_ms) / 60_000;
+            let last_seen = if machine.last_seen > 0 {
+                format!("Last seen {}.", clock_label(machine.last_seen))
+            } else {
+                "Last seen: never.".to_string()
+            };
+            SilenceObservation {
+                level: SilenceLevel::Alert,
+                message: Some(format!(
+                    "{} hasn't checked in for {age_minutes} minutes. {last_seen} I'm retrying; nothing for you to do yet.",
+                    display_name(&machine.name)
+                )),
+            }
+        }
+    }
+}
+
+/// Current plain-language silence alerts for `tempo-launch status`.
+pub fn silence_status(paths: &Paths) -> Vec<String> {
+    let now_ms = store::now_ms();
+    let (mut alerts, messenger_expected) = match store::load_checked(paths) {
+        Ok(fleet) => {
+            let mut alerts = Vec::new();
+            let mut messenger_expected = false;
+            for machine in fleet.machines.iter().filter(|machine| machine.enabled) {
+                messenger_expected = true;
+                if let Some(message) = peer_observation(machine, now_ms).message {
+                    alerts.push(message);
+                }
+            }
+            (alerts, messenger_expected)
+        }
+        Err(error) => (vec![error], false),
+    };
+    if let Some(message) = messenger_observation_at(paths, now_ms, messenger_expected)
+        .0
+        .message
+    {
+        alerts.push(message);
+    }
+    if let Some(message) = super::relay::pending_message(paths) {
+        alerts.push(message);
+    }
+    alerts
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MessengerHealth {
+    pid: u32,
+    started_at: u64,
+    last_loop: u64,
+    loop_interval_s: u64,
+    peer_count: u64,
+    last_delivery_attempt: Option<u64>,
+    last_delivery_ok: Option<u64>,
+    last_delivery_error: Option<u64>,
+}
+
+impl MessengerHealth {
+    fn new(at: u64) -> Self {
+        Self {
+            pid: std::process::id(),
+            started_at: at,
+            last_loop: at,
+            loop_interval_s: HEARTBEAT.as_secs(),
+            peer_count: 0,
+            last_delivery_attempt: None,
+            last_delivery_ok: None,
+            last_delivery_error: None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct SilenceMonitor {
+    peers: HashMap<String, SilenceLevel>,
+    peer_alerts_since_ms: Option<u64>,
+    messenger: Option<SilenceLevel>,
+    missing_messenger_since_ms: Option<u64>,
+    fleet_unknown: bool,
+}
+
+fn messenger_json(health: &MessengerHealth) -> Vec<u8> {
+    let number = |value: Option<u64>| value.map_or(J::Null, |n| J::n(n as f64));
+    J::Obj(vec![
+        ("pid".into(), J::n(health.pid as f64)),
+        ("started_at".into(), J::n(health.started_at as f64)),
+        ("last_loop".into(), J::n(health.last_loop as f64)),
+        (
+            "loop_interval_s".into(),
+            J::n(health.loop_interval_s as f64),
+        ),
+        ("peer_count".into(), J::n(health.peer_count as f64)),
+        (
+            "last_delivery_attempt".into(),
+            number(health.last_delivery_attempt),
+        ),
+        ("last_delivery_ok".into(), number(health.last_delivery_ok)),
+        (
+            "last_delivery_error".into(),
+            number(health.last_delivery_error),
+        ),
+    ])
+    .pretty()
+    .into_bytes()
+}
+
+fn json_u64(json: &J, key: &str) -> std::io::Result<u64> {
+    json.f64(key)
+        .filter(|value| {
+            value.is_finite()
+                && (0.0..=9_007_199_254_740_991.0).contains(value)
+                && value.fract() == 0.0
+        })
+        .map(|value| value as u64)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "heartbeat number is invalid",
+            )
+        })
+}
+
+fn json_optional_u64(json: &J, key: &str) -> std::io::Result<Option<u64>> {
+    match json.get(key) {
+        Some(J::Null) => Ok(None),
+        Some(_) => json_u64(json, key).map(Some),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "heartbeat field is missing",
+        )),
+    }
+}
+
+fn validate_messenger_json(bytes: &[u8]) -> std::io::Result<MessengerHealth> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let json = parse(text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let J::Obj(fields) = &json else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "heartbeat must be an object",
+        ));
+    };
+    const KEYS: [&str; 8] = [
+        "pid",
+        "started_at",
+        "last_loop",
+        "loop_interval_s",
+        "peer_count",
+        "last_delivery_attempt",
+        "last_delivery_ok",
+        "last_delivery_error",
+    ];
+    if fields.len() != KEYS.len() || fields.iter().any(|(key, _)| !KEYS.contains(&key.as_str())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "heartbeat has an unfamiliar schema",
+        ));
+    }
+    let health = MessengerHealth {
+        pid: u32::try_from(json_u64(&json, "pid")?).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "heartbeat process id is invalid",
+            )
+        })?,
+        started_at: json_u64(&json, "started_at")?,
+        last_loop: json_u64(&json, "last_loop")?,
+        loop_interval_s: json_u64(&json, "loop_interval_s")?,
+        peer_count: json_u64(&json, "peer_count")?,
+        last_delivery_attempt: json_optional_u64(&json, "last_delivery_attempt")?,
+        last_delivery_ok: json_optional_u64(&json, "last_delivery_ok")?,
+        last_delivery_error: json_optional_u64(&json, "last_delivery_error")?,
+    };
+    if health.pid == 0
+        || health.started_at == 0
+        || health.last_loop < health.started_at
+        || !(1..=300).contains(&health.loop_interval_s)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "heartbeat values are invalid",
+        ));
+    }
+    Ok(health)
+}
+
+fn read_messenger_bytes(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 4096 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "messenger check-in is not a bounded regular file",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "messenger check-in is a reparse point",
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "messenger check-in exceeded its read limit",
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+fn update_messenger_heartbeat(paths: &Paths, health: &MessengerHealth) -> std::io::Result<()> {
+    let path = paths.file(MESSENGER_HEARTBEAT);
+    let previous = match read_messenger_bytes(&path)? {
+        Some(bytes) => {
+            if validate_messenger_json(&bytes).is_err() && !is_legacy_messenger_json(&bytes) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "messenger check-in has an unfamiliar schema",
+                ));
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
+    crate::apply_json_atomic(
+        &path,
+        previous.as_deref(),
+        &messenger_json(health),
+        None,
+        |bytes| validate_messenger_json(bytes).map(|_| ()),
+    )
+}
+
+fn is_legacy_messenger_json(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Ok(json) = parse(text) else {
+        return false;
+    };
+    matches!(&json, J::Obj(fields) if fields.len() == 1 && fields[0].0 == "at")
+        && json_u64(&json, "at").is_ok_and(|at| at > 0)
+}
+
+fn messenger_observation(health: &MessengerHealth, now_ms: u64) -> SilenceObservation {
+    let threshold_ms = health
+        .loop_interval_s
+        .saturating_mul(1000)
+        .saturating_mul(ALARM_MISSED_INTERVALS);
+    match transition(
+        now_ms,
+        Some(health.last_loop.saturating_mul(1000)),
+        threshold_ms,
+        false,
+    ) {
+        Transition::Alert | Transition::Quiet => {
+            let age_minutes = now_ms.saturating_sub(health.last_loop.saturating_mul(1000)) / 60_000;
+            return SilenceObservation {
+                level: SilenceLevel::Alert,
+                message: Some(format!(
+                    "The fleet messenger hasn't checked in for {age_minutes} minutes. Last seen {}.",
+                    clock_label(health.last_loop)
+                )),
+            };
+        }
+        Transition::Unknown => {
+            return SilenceObservation {
+                level: SilenceLevel::Unknown,
+                message: Some(
+                    "The fleet messenger check-in time is invalid, so its health is unknown."
+                        .into(),
+                ),
+            };
+        }
+        Transition::Healthy | Transition::Recovered => {}
+    }
+    if health.peer_count == 0 {
+        return SilenceObservation {
+            level: SilenceLevel::Healthy,
+            message: None,
+        };
+    }
+    let delivery_at = health.last_delivery_ok.unwrap_or(health.started_at);
+    match transition(
+        now_ms,
+        Some(delivery_at.saturating_mul(1000)),
+        threshold_ms,
+        false,
+    ) {
+        Transition::Healthy | Transition::Recovered => SilenceObservation {
+            level: SilenceLevel::Healthy,
+            message: None,
+        },
+        Transition::Alert | Transition::Quiet => {
+            let age_minutes = now_ms.saturating_sub(delivery_at.saturating_mul(1000)) / 60_000;
+            SilenceObservation {
+                level: SilenceLevel::Alert,
+                message: Some(format!(
+                    "The fleet messenger is running but hasn't reached a peer for {age_minutes} minutes. I'm retrying; nothing for you to do yet."
+                )),
+            }
+        }
+        Transition::Unknown => SilenceObservation {
+            level: SilenceLevel::Unknown,
+            message: Some(
+                "The fleet messenger delivery time is invalid, so its health is unknown.".into(),
+            ),
+        },
+    }
+}
+
+fn messenger_observation_at(
+    paths: &Paths,
+    now_ms: u64,
+    messenger_expected: bool,
+) -> (SilenceObservation, bool) {
+    let bytes = match read_messenger_bytes(&paths.file(MESSENGER_HEARTBEAT)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) if messenger_expected => {
+            return (
+                SilenceObservation {
+                    level: SilenceLevel::Unknown,
+                    message: Some(
+                        "The fleet messenger hasn't checked in yet, so this computer's status is unknown."
+                            .into(),
+                    ),
+                },
+                true,
+            );
+        }
+        Ok(None) => return (healthy_observation(), false),
+        Err(_) => {
+            return (
+                SilenceObservation {
+                    level: SilenceLevel::Unknown,
+                    message: Some(
+                        "I can't read the fleet messenger check-in, so its status is unknown."
+                            .into(),
+                    ),
+                },
+                false,
+            );
+        }
+    };
+    let health = match validate_messenger_json(&bytes) {
+        Ok(health) => health,
+        Err(_) => {
+            return (
+                SilenceObservation {
+                    level: SilenceLevel::Unknown,
+                    message: Some(
+                        "I can't read the fleet messenger check-in, so its status is unknown."
+                            .into(),
+                    ),
+                },
+                false,
+            );
+        }
+    };
+    (messenger_observation(&health, now_ms), false)
+}
+
+fn healthy_observation() -> SilenceObservation {
+    SilenceObservation {
+        level: SilenceLevel::Healthy,
+        message: None,
+    }
+}
+
+fn log_silence_change(paths: &Paths, message: &str) {
+    let queued = super::relay::queue_alert(paths, message);
+    let line = format!("{} {message}", crate::stamp(now_s()));
+    let log = paths.file("logs").join(SILENCE_LOG);
+    let result = (|| {
+        std::fs::create_dir_all(log.parent().expect("log has parent"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)?;
+        writeln!(file, "{line}")?;
+        file.sync_data()
+    })();
+    if let Err(error) = result {
+        eprintln!("Could not save the fleet alert to the local log: {error}. Check that Perennos Tempo can write to its home folder.");
+    }
+    eprintln!("{message}");
+    if queued {
+        super::relay::send_pending_once(paths);
+    }
+}
+
+pub(super) fn monitor_silence(paths: &Paths, state: &mut SilenceMonitor, now_ms: u64) {
+    let peer_alerts_since_ms = *state.peer_alerts_since_ms.get_or_insert(now_ms);
+    let peer_alerts_ready =
+        now_ms.saturating_sub(peer_alerts_since_ms) >= HEARTBEAT.as_millis() as u64;
+    let fleet = match store::load_checked(paths) {
+        Ok(fleet) => {
+            if state.fleet_unknown {
+                log_silence_change(
+                    paths,
+                    "The fleet configuration is readable again; node monitoring resumed.",
+                );
+                state.fleet_unknown = false;
+            }
+            fleet
+        }
+        Err(_) => {
+            if !state.fleet_unknown {
+                log_silence_change(
+                    paths,
+                    "The fleet setup can't be read, so this computer's status is unknown.",
+                );
+                state.fleet_unknown = true;
+            }
+            return;
+        }
+    };
+    let mut current_peers = HashSet::new();
+    for machine in fleet.machines.iter().filter(|machine| machine.enabled) {
+        current_peers.insert(machine.name.clone());
+        let observation = peer_observation(machine, now_ms);
+        let previous = state
+            .peers
+            .get(&machine.name)
+            .copied()
+            .unwrap_or(SilenceLevel::Healthy);
+        if !peer_alerts_ready
+            && matches!(
+                observation.level,
+                SilenceLevel::Alert | SilenceLevel::Unknown
+            )
+        {
+            continue;
+        }
+        if observation.level == previous {
+            continue;
+        }
+        match observation.level {
+            SilenceLevel::Alert | SilenceLevel::Unknown => {
+                if let Some(message) = observation.message {
+                    log_silence_change(paths, &message);
+                }
+            }
+            SilenceLevel::Healthy if previous == SilenceLevel::Alert => log_silence_change(
+                paths,
+                &format!(
+                    "{} has checked in again. The silence alert is clear.",
+                    machine.name
+                ),
+            ),
+            SilenceLevel::Healthy if previous == SilenceLevel::Unknown => log_silence_change(
+                paths,
+                &format!(
+                    "{} has a valid check-in time again. Its status is known.",
+                    machine.name
+                ),
+            ),
+            SilenceLevel::Healthy => {}
+        }
+        state.peers.insert(machine.name.clone(), observation.level);
+    }
+    for name in state
+        .peers
+        .keys()
+        .filter(|name| !current_peers.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let previous = state.peers.remove(&name).unwrap_or(SilenceLevel::Healthy);
+        if previous != SilenceLevel::Healthy {
+            log_silence_change(
+                paths,
+                &format!("Stopped watching {name} because it is no longer enabled."),
+            );
+        }
+    }
+
+    let messenger_expected = fleet.machines.iter().any(|machine| machine.enabled);
+    let (messenger, missing_checkin) = messenger_observation_at(paths, now_ms, messenger_expected);
+    if missing_checkin {
+        let since = *state.missing_messenger_since_ms.get_or_insert(now_ms);
+        if now_ms.saturating_sub(since) < HEARTBEAT.as_millis() as u64 {
+            return;
+        }
+    } else {
+        state.missing_messenger_since_ms = None;
+    }
+    let previous = state.messenger;
+    if previous != Some(messenger.level) {
+        match messenger.level {
+            SilenceLevel::Alert | SilenceLevel::Unknown => {
+                if let Some(message) = messenger.message {
+                    log_silence_change(paths, &message);
+                }
+            }
+            SilenceLevel::Healthy if previous == Some(SilenceLevel::Alert) => log_silence_change(
+                paths,
+                "The fleet messenger has reached a peer again. Its silence alert is clear.",
+            ),
+            SilenceLevel::Healthy if previous == Some(SilenceLevel::Unknown) => log_silence_change(
+                paths,
+                "The fleet messenger check-in is readable again. Its status is known.",
+            ),
+            SilenceLevel::Healthy => {}
+        }
+        state.messenger = Some(messenger.level);
+    }
 }
 
 // ---- the page of facts the GUI and the fleet page read
@@ -529,8 +1120,10 @@ pub fn start(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
     let h = listen(node, addrs)?;
     let stop = h.stop.clone();
     let hb: Arc<Mutex<(u64, Vec<u8>)>> = Arc::new(Mutex::new((0, Vec::new())));
+    let messenger = Arc::new(Mutex::new(MessengerHealth::new(now_s())));
     {
-        let (node, stop, hb) = (node.clone(), stop.clone(), hb.clone());
+        let (node, stop, hb, messenger) =
+            (node.clone(), stop.clone(), hb.clone(), messenger.clone());
         spawn_fleet!(h.completion, move || {
             let mut tick = 0u64;
             while !stop.load(Ordering::SeqCst) {
@@ -544,6 +1137,14 @@ pub fn start(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
                     let mut g = lock(&hb);
                     *g = (g.0 + 1, body);
                 }
+                let snapshot = {
+                    let mut status = lock(&messenger);
+                    status.last_loop = now_s();
+                    status.clone()
+                };
+                if let Err(error) = update_messenger_heartbeat(&node.paths, &snapshot) {
+                    eprintln!("Fleet messenger check-in could not be saved: {error}");
+                }
                 let end = Instant::now() + HEARTBEAT;
                 while Instant::now() < end && !stop.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(100));
@@ -552,13 +1153,14 @@ pub fn start(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> {
         });
     }
     {
-        let (node, stop) = (node.clone(), stop.clone());
+        let (node, stop, messenger) = (node.clone(), stop.clone(), messenger.clone());
         #[cfg(test)]
         let senders = h.completion.clone();
         spawn_fleet!(h.completion, move || supervise(
             &node,
             &stop,
             &hb,
+            &messenger,
             #[cfg(test)]
             senders,
         ));
@@ -571,24 +1173,27 @@ fn supervise(
     node: &Arc<Node>,
     stop: &Arc<AtomicBool>,
     hb: &Arc<Mutex<(u64, Vec<u8>)>>,
+    messenger: &Arc<Mutex<MessengerHealth>>,
     #[cfg(test)] completion: Arc<Completion>,
 ) {
     let running: Arc<Mutex<HashSet<String>>> = Arc::default();
     let cell: Arc<Mutex<Fleet>> = Arc::default();
     while !stop.load(Ordering::SeqCst) {
         let fleet = store::load(&node.paths);
+        lock(messenger).peer_count = fleet.peers().filter(|m| m.name != node.me).count() as u64;
         for m in fleet.peers().filter(|m| m.name != node.me) {
             if lock(&running).insert(m.name.clone()) {
-                let (node, stop, hb, cell, running, name) = (
+                let (node, stop, hb, messenger, cell, running, name) = (
                     node.clone(),
                     stop.clone(),
                     hb.clone(),
+                    messenger.clone(),
                     cell.clone(),
                     running.clone(),
                     m.name.clone(),
                 );
                 spawn_fleet!(completion, move || {
-                    sender(&node, &stop, &hb, &cell, &name);
+                    sender(&node, &stop, &hb, &messenger, &cell, &name);
                     lock(&running).remove(&name);
                 });
             }
@@ -602,6 +1207,7 @@ fn sender(
     node: &Arc<Node>,
     stop: &AtomicBool,
     hb: &Mutex<(u64, Vec<u8>)>,
+    messenger: &Mutex<MessengerHealth>,
     cell: &Mutex<Fleet>,
     name: &str,
 ) {
@@ -610,11 +1216,30 @@ fn sender(
         let Some(m) = lock(cell).peers().find(|m| m.name == name).cloned() else {
             return;
         };
-        let _ = node.deliver(&m);
+        match node.deliver(&m) {
+            Ok(count) if count > 0 => {
+                let at = now_s();
+                let mut status = lock(messenger);
+                status.last_delivery_attempt = Some(at);
+                status.last_delivery_ok = Some(at);
+            }
+            Err(_) => {
+                let at = now_s();
+                let mut status = lock(messenger);
+                status.last_delivery_attempt = Some(at);
+                status.last_delivery_error = Some(at);
+            }
+            _ => {}
+        }
         let (seq, body) = lock(hb).clone();
         if seq != sent && !body.is_empty() {
             sent = seq;
-            let _ = node.ephemeral(&m, "heartbeat", &body);
+            let attempt = now_s();
+            lock(messenger).last_delivery_attempt = Some(attempt);
+            match node.ephemeral(&m, "heartbeat", &body) {
+                Ok(()) => lock(messenger).last_delivery_ok = Some(now_s()),
+                Err(_) => lock(messenger).last_delivery_error = Some(now_s()),
+            }
         }
         let g = lock(&node.kick.0);
         let _ = node.kick.1.wait_timeout(g, Duration::from_millis(50));
@@ -731,14 +1356,137 @@ pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
             list.join(", ")
         );
     }
+    let mut monitor = SilenceMonitor::default();
     loop {
-        std::thread::park();
+        monitor_silence(p, &mut monitor, store::now_ms());
+        super::relay::send_pending_once(p);
+        let delay = super::relay::next_retry_delay(p, now_s())
+            .map_or(HEARTBEAT, |delay| delay.min(HEARTBEAT));
+        std::thread::park_timeout(delay);
     }
 }
 
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    #[test]
+    fn s164_silence_alarm_stays_at_ten_minutes() {
+        assert_eq!(SILENCE_ALARM_MS, 10 * 60 * 1000);
+    }
+
+    #[test]
+    fn rust_alarm_uses_the_same_golden_traces_as_dead_air() {
+        for line in perennos_dead_air_silence_core::GOLDEN_TRACES.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 6, "invalid trace row: {line}");
+            let last = if fields[1] == "-" {
+                None
+            } else {
+                Some(fields[1].parse::<u64>().expect("last signal time"))
+            };
+            let now = fields[2].parse::<u64>().expect("current time");
+            let threshold = fields[3].parse::<u64>().expect("threshold");
+            let already_quiet = fields[4].parse::<bool>().expect("quiet flag");
+            assert_eq!(
+                transition(now, last, threshold, already_quiet).as_str(),
+                fields[5],
+                "trace {}",
+                fields[0]
+            );
+        }
+    }
+
+    #[test]
+    fn peer_alarm_starts_at_ten_minutes_and_names_last_seen_time() {
+        let mut machine = Machine::new("worker", "10.0.0.8", "worker");
+        machine.last_seen = 1_800_000_000;
+        machine.joined_at = machine.last_seen - 30;
+        let at_boundary = machine.last_seen * 1000 + SILENCE_ALARM_MS;
+        assert_eq!(
+            peer_observation(&machine, at_boundary - 1).level,
+            SilenceLevel::Healthy
+        );
+        assert_eq!(
+            peer_observation(&machine, at_boundary).message.as_deref(),
+            Some("Worker hasn't checked in for 10 minutes. Last seen 08:00 UTC. I'm retrying; nothing for you to do yet.")
+        );
+    }
+
+    fn messenger(
+        started_at: u64,
+        last_loop: u64,
+        peer_count: u64,
+        last_delivery_ok: Option<u64>,
+    ) -> MessengerHealth {
+        MessengerHealth {
+            pid: 42,
+            started_at,
+            last_loop,
+            loop_interval_s: 10,
+            peer_count,
+            last_delivery_attempt: last_delivery_ok,
+            last_delivery_ok,
+            last_delivery_error: None,
+        }
+    }
+
+    #[test]
+    fn messenger_detects_a_stale_work_loop_at_ten_minutes() {
+        let health = messenger(100, 100, 1, Some(100));
+        let observation = messenger_observation(&health, 700_000);
+        assert_eq!(observation.level, SilenceLevel::Alert);
+        assert_eq!(
+            observation.message.as_deref(),
+            Some("The fleet messenger hasn't checked in for 10 minutes. Last seen 00:01 UTC.")
+        );
+    }
+
+    #[test]
+    fn messenger_detects_fresh_loop_with_stale_delivery() {
+        let health = messenger(100, 700, 2, None);
+        let observation = messenger_observation(&health, 700_000);
+        assert_eq!(observation.level, SilenceLevel::Alert);
+        assert_eq!(observation.message.as_deref(), Some("The fleet messenger is running but hasn't reached a peer for 10 minutes. I'm retrying; nothing for you to do yet."));
+    }
+
+    #[test]
+    fn messenger_does_not_warn_without_enabled_peers() {
+        let health = messenger(100, 700, 0, None);
+        assert_eq!(
+            messenger_observation(&health, 700_000).level,
+            SilenceLevel::Healthy
+        );
+    }
+
+    #[test]
+    fn future_messenger_and_peer_timestamps_are_unknown() {
+        let health = messenger(101, 101, 1, Some(101));
+        assert_eq!(
+            messenger_observation(&health, 100_000).level,
+            SilenceLevel::Unknown
+        );
+        let mut machine = Machine::new("worker", "10.0.0.8", "worker");
+        machine.last_seen = 101;
+        machine.joined_at = 100;
+        assert_eq!(
+            peer_observation(&machine, 100_000).level,
+            SilenceLevel::Unknown
+        );
+    }
+
+    #[test]
+    fn messenger_checkin_has_a_bounded_exact_schema_and_reads_old_version_only_for_migration() {
+        let health = messenger(100, 110, 1, Some(105));
+        let bytes = messenger_json(&health);
+        assert_eq!(validate_messenger_json(&bytes).unwrap(), health);
+        assert!(is_legacy_messenger_json(br#"{"at":100}"#));
+        assert!(validate_messenger_json(br#"{"at":100}"#).is_err());
+        assert!(validate_messenger_json(br#"{"pid":1,"extra":1}"#).is_err());
+    }
 
     struct OnDrop(std::sync::mpsc::Sender<()>);
     impl Drop for OnDrop {
