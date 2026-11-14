@@ -99,6 +99,12 @@ pub struct Conv {
     pub on_event: Option<EventHook>,
     /// A guest conversation (a chat room, other people): no tools, no memory, no owner context.
     pub guest: bool,
+    /// A signed, bounded job from a pinned fleet peer. It stays guest-scoped and read-only.
+    pub fleet_job: bool,
+    /// Number of read-only tools called in this job turn.
+    pub fleet_tool_calls: usize,
+    /// Chained SHA-256 digest of tool names, arguments and bounded results.
+    pub fleet_tool_digest: String,
     /// Set once this conversation has read untrusted content; it stays set across turns.
     taint: std::sync::Mutex<Option<String>>,
     /// The folder commands run in and files are found from (`/cd`); None: the config's.
@@ -251,6 +257,9 @@ impl Conv {
             mcp_offered: vec![],
             on_event: None,
             guest: false,
+            fleet_job: false,
+            fleet_tool_calls: 0,
+            fleet_tool_digest: String::new(),
             taint: std::sync::Mutex::new(None),
             cwd: None,
             permission: cfg.permission,
@@ -271,7 +280,10 @@ impl Conv {
                 .map_err(|e| format!("conversation file {} is corrupt: {e}", c.path.display()))?;
             c.messages = d["messages"].as_array().cloned().unwrap_or_default();
             c.events = d["events"].as_array().cloned().unwrap_or_default();
-            c.guest = d["mode"] == "guest";
+            c.fleet_job = d["mode"] == "fleet_job";
+            c.guest = d["mode"] == "guest" || c.fleet_job;
+            c.fleet_tool_calls = d["fleet_tool_calls"].as_u64().unwrap_or(0) as usize;
+            c.fleet_tool_digest = d["fleet_tool_digest"].as_str().unwrap_or("").to_string();
             c.taint = std::sync::Mutex::new(d["untrusted"].as_str().map(str::to_string));
             c.cwd = d["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir());
             c.permission = d["permission"]
@@ -332,7 +344,7 @@ impl Conv {
         }
         if std::fs::write(
             &tmp,
-            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.guest { "guest" } else { "owner" }, "untrusted": self.taint(),
+            json!({"messages": self.messages, "events": self.events, "mcp_offered": self.mcp_offered, "mode": if self.fleet_job { "fleet_job" } else if self.guest { "guest" } else { "owner" }, "fleet_tool_calls": self.fleet_tool_calls, "fleet_tool_digest": self.fleet_tool_digest, "untrusted": self.taint(),
                 "cwd": self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()), "permission": self.permission.name(), "turns": self.turns, "think": self.think, "model": self.model, "role": self.role, "engine": self.engine, "format": self.format, "band": self.band, "part": self.part,
                 "usage": {"requests": self.usage.requests, "prompt_tok": self.usage.prompt_tok, "out_tok": self.usage.out_tok, "seconds": self.usage.seconds}}).to_string(),
         )
@@ -464,6 +476,23 @@ mod tests {
         assert_eq!(again.messages.len(), 1);
         assert_eq!(again.events.len(), 1);
         assert_eq!(again.taint().as_deref(), Some("room message"));
+    }
+
+    #[test]
+    fn fleet_job_reopens_as_guest_and_keeps_its_receipt() {
+        let c = cfg();
+        let mut cv = Conv::open(&c, Some("fleet-job")).unwrap();
+        cv.guest = true;
+        cv.fleet_job = true;
+        cv.permission = Permission::Plan;
+        cv.fleet_tool_calls = 2;
+        cv.fleet_tool_digest = "d".repeat(64);
+        cv.save();
+        let again = Conv::open(&c, Some("fleet-job")).unwrap();
+        assert!(again.guest && again.fleet_job);
+        assert_eq!(again.permission, Permission::Plan);
+        assert_eq!(again.fleet_tool_calls, 2);
+        assert_eq!(again.fleet_tool_digest, "d".repeat(64));
     }
 
     #[test]

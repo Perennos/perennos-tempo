@@ -2193,6 +2193,13 @@ impl Env {
     /// rest of the conversation. Hosts in `fetch_allow_hosts` never ask. Each redirect is checked
     /// the same way, so a page cannot send the agent on to a host nobody approved.
     fn host_ok(&self, conv: &Conv, url: &str) -> Result<(), String> {
+        if conv.fleet_job {
+            return if self.cfg.fleet_job_fetch_allowed(url) {
+                Ok(())
+            } else {
+                Err("refused: this destination is outside the fleet job's exact read-only URL prefixes".into())
+            };
+        }
         let host = host_of(url).ok_or("refused: no host in that address")?;
         // GUARD: once this turn read something untrusted, only a host the owner approved in this
         // conversation goes through; `fetch_allow_hosts` no longer skips the question
@@ -2265,7 +2272,7 @@ impl Env {
             util::get_checked(
                 u,
                 Duration::from_secs(20),
-                400_000,
+                if conv.fleet_job { 16 * 1024 } else { 400_000 },
                 &|hop| {
                     check_fetch_target(hop, allow)?;
                     self.host_ok(conv, hop)
