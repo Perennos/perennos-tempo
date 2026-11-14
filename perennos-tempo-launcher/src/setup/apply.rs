@@ -1846,7 +1846,7 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("config.json"), "{ not json").unwrap();
         let e = merge_config(&home, &data, &vals("x:1b"), 1).unwrap_err();
-        assert!(e.contains("left it alone"));
+        assert!(e.contains("left alone"));
         assert_eq!(
             std::fs::read_to_string(data.join("config.json")).unwrap(),
             "{ not json"

@@ -2077,7 +2077,7 @@ fn s155_status_reports_malformed_messenger_checkin_as_unknown() {
     let alerts = serve::silence_status(&p);
     assert!(alerts
         .iter()
-        .any(|message| message.contains("health is unknown")));
+        .any(|message| message.contains("status is unknown")));
 }
 
 #[test]

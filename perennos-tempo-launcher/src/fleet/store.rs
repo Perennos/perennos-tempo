@@ -324,6 +324,11 @@ pub fn update_checked<T>(
 }
 
 pub fn load_checked(p: &Paths) -> Result<Fleet, String> {
+    if read_fleet_bytes(&p.file("fleet.json"))?.is_none()
+        && read_fleet_bytes(&p.file("fleet.json.last-good"))?.is_none()
+    {
+        return Ok(empty_fleet());
+    }
     let _lock = FileLock::acquire(&p.file("fleet.json.lock"), Duration::from_secs(5))
         .map_err(|e| format!("could not lock fleet.json: {e}"))?;
     load_checked_locked(p)
@@ -636,7 +641,6 @@ pub fn validate_registry(json: &J) -> Result<Fleet, String> {
         "tools",
     ];
     let mut names = std::collections::HashSet::new();
-    let mut addresses = std::collections::HashSet::new();
     for item in json.arr("machines") {
         let Some(member) = Machine::from_j(item) else {
             return Err("fleet.json has an invalid member; it was kept unchanged".into());
@@ -646,7 +650,6 @@ pub fn validate_registry(json: &J) -> Result<Fleet, String> {
             || (!member.id.is_empty()
                 && (member.id.len() != 64 || !member.id.bytes().all(|b| b.is_ascii_hexdigit())))
             || !names.insert(member.name.to_ascii_lowercase())
-            || !addresses.insert(member.addr.to_ascii_lowercase())
             || item
                 .get("enabled")
                 .is_some_and(|v| !matches!(v, J::Bool(_)))
