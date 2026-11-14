@@ -929,7 +929,42 @@ pub fn is_read_only(cmd: &str) -> bool {
     })
 }
 
-/// Offline check: env TEMPO_OFFLINE, else a quick TCP connect to the probe address (cached 20 s).
+/// What the last real fetch learned about the internet: when, and whether it got through.
+static NET_SEEN: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+/// How long one observation, or one probe answer, is believed.
+const NET_FRESH: Duration = Duration::from_secs(20);
+#[cfg(test)]
+static PROBED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn note_net(up: bool) {
+    note_net_at(up, Instant::now());
+}
+
+fn note_net_at(up: bool, at: Instant) {
+    if let Ok(mut s) = NET_SEEN.lock() {
+        *s = Some((at, up));
+    }
+}
+
+/// Whether a fetch error means the network itself is not there (no name could be found, no answer in time),
+/// as opposed to a site that refused, a missing page or something the user denied.
+fn net_down_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    [
+        "failed to lookup",
+        "name or service not known",
+        "no such host",
+        "timed out",
+        "timeout",
+        "unreachable",
+    ]
+    .iter()
+    .any(|k| e.contains(k))
+}
+
+/// Online or offline? `TEMPO_OFFLINE` says offline. With `offline_probe` set (it is empty by default) a quick TCP connect to
+/// that address answers, cached 20 s. Empty: nothing is contacted to find out. A fetch that could not reach the network says
+/// offline for 20 seconds, after which the next fetch simply tries again.
 pub fn net_up(cfg: &Config) -> bool {
     if std::env::var("TEMPO_OFFLINE")
         .map(|v| !v.is_empty())
@@ -937,9 +972,15 @@ pub fn net_up(cfg: &Config) -> bool {
     {
         return false;
     }
+    if cfg.offline_probe.is_empty() {
+        return match NET_SEEN.lock().ok().and_then(|s| *s) {
+            Some((at, false)) => at.elapsed() >= NET_FRESH,
+            _ => true,
+        };
+    }
     if let Ok(c) = NET_CACHE.lock() {
         if let Some((_, t, v)) = c.iter().find(|(a, _, _)| *a == cfg.offline_probe) {
-            if t.elapsed() < Duration::from_secs(20) {
+            if t.elapsed() < NET_FRESH {
                 return *v;
             }
         }
@@ -953,6 +994,8 @@ pub fn net_up(cfg: &Config) -> bool {
 }
 
 fn probe(addr: &str) -> bool {
+    #[cfg(test)]
+    PROBED.lock().unwrap().push(addr.to_string());
     addr.to_socket_addrs()
         .ok()
         .and_then(|mut a| a.next())
@@ -2243,6 +2286,11 @@ impl Env {
             },
             None => get(url),
         };
+        match &got {
+            Ok(_) => note_net(true),
+            Err(e) if net_down_error(e) => note_net(false),
+            Err(_) => {}
+        }
         match (got, cached) {
             (Ok(f), Some(c)) if f.status == 304 => {
                 let kept = util::Fetched {
@@ -2642,6 +2690,65 @@ mod tests {
         let conv = Conv::open(&c, Some("t")).unwrap();
         let e = Env::new(c.clone(), confirm, McpHost::empty(&c));
         (e, conv, d)
+    }
+
+    #[test]
+    fn by_default_nothing_is_contacted_to_find_out_if_the_internet_is_up() {
+        let c = Config::defaults(Some(tmpdir("net").to_string_lossy().into_owned()));
+        assert_eq!(c.offline_probe, "");
+        for _ in 0..3 {
+            assert!(net_up(&c));
+        }
+        // other tests probe their own local addresses meanwhile; what must never appear is an address nobody asked for
+        let probed = PROBED.lock().unwrap().clone();
+        assert!(
+            probed.iter().all(|a| a.starts_with("127.0.0.1:")),
+            "{probed:?}"
+        );
+        let example = include_str!("../config.example.json");
+        assert!(example.contains("\"offline_probe\": \"\"") && !example.contains("1.1.1.1"));
+    }
+
+    #[test]
+    fn without_a_probe_a_failed_fetch_says_offline_for_twenty_seconds_then_tries_again() {
+        let c = Config::defaults(Some(tmpdir("net2").to_string_lossy().into_owned()));
+        note_net_at(false, Instant::now());
+        assert!(!net_up(&c));
+        note_net_at(false, Instant::now() - Duration::from_secs(60));
+        assert!(net_up(&c), "an old failure is not believed");
+        note_net(true);
+        assert!(net_up(&c));
+        *NET_SEEN.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn only_a_missing_network_counts_as_offline_not_a_refusing_site() {
+        for down in [
+            "io: failed to lookup address information: No such host is known.",
+            "timeout: global",
+            "io: connection timed out",
+            "Network is unreachable",
+        ] {
+            assert!(net_down_error(down), "{down}");
+        }
+        for up in [
+            "http status: 404",
+            "refused: private address",
+            "denied by user",
+            "io: connection refused",
+        ] {
+            assert!(!net_down_error(up), "{up}");
+        }
+    }
+
+    #[test]
+    fn a_probe_that_is_set_is_still_used_and_the_environment_still_wins() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut c = Config::defaults(Some(tmpdir("net3").to_string_lossy().into_owned()));
+        c.offline_probe = l.local_addr().unwrap().to_string();
+        assert!(net_up(&c));
+        c.offline_probe = "127.0.0.1:1".into();
+        assert!(!net_up(&c), "a probe nobody answers says offline");
     }
 
     fn run(e: &Env, c: &Conv, name: &str, a: Value) -> String {

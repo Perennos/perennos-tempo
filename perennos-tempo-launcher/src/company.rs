@@ -961,9 +961,9 @@ html,body{{overflow-x:clip}}
 @media(max-width:480px){{.tempo-tour-card li{{display:grid;gap:3px}}.tempo-tour-card .actions{{display:grid;grid-template-columns:1fr 1fr}}.tempo-tour-card button{{white-space:nowrap}}}}
 </style><dialog class="tempo-tour" id="conductor-first-run" aria-modal="true" aria-labelledby="conductor-tour-title" aria-describedby="conductor-tour-org" tabindex="-1">
 <div class="tempo-tour-card"><p class="tempo-tour-progress" id="conductor-tour-progress" aria-live="polite">1 of 3</p><h2 id="conductor-tour-title" tabindex="-1">Welcome to the Conductor</h2>
-<section class="tempo-tour-step" id="conductor-tour-org" data-tour-step="0"><h3>Your org chart</h3><p id="conductor-tour-copy">You lead. Your manager desk and approved colleagues appear on the org chart.</p><ul>{roster}</ul></section>
-<section class="tempo-tour-step" id="conductor-tour-map" data-tour-step="1" hidden><h3>Operations map</h3><p>Every known node is listed here. Pending nodes stay outside the company until you approve them.</p><ul>{nodes}</ul></section>
-<section class="tempo-tour-step" id="conductor-tour-standings" data-tour-step="2" hidden><h3>Employee of the Month</h3><p>No standings yet. The Conductor will show real results after the roster completes work.</p></section>
+<section class="tempo-tour-step" id="conductor-tour-org" data-tour-step="0"><h3 class="tempo-section-heading">Your org chart</h3><p id="conductor-tour-copy">You lead. Your manager desk and approved colleagues appear on the org chart.</p><ul>{roster}</ul></section>
+<section class="tempo-tour-step" id="conductor-tour-map" data-tour-step="1" hidden><h3 class="tempo-section-heading">Operations map</h3><p>Every known node is listed here. Pending nodes stay outside the company until you approve them.</p><ul>{nodes}</ul></section>
+<section class="tempo-tour-step" id="conductor-tour-standings" data-tour-step="2" hidden><h3 class="tempo-section-heading">Employee of the Month</h3><p>No standings yet. The Conductor will show real results after the roster completes work.</p></section>
 <div class="actions"><button type="button" id="conductor-tour-dismiss">Dismiss tour</button><div><button type="button" id="conductor-tour-back" disabled>Back</button> <button type="button" id="conductor-tour-next">Continue</button></div></div></div></dialog>"#
     )
 }

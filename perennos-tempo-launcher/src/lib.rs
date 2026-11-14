@@ -2867,6 +2867,25 @@ fn cron_word(exe: &Path) -> Result<String, String> {
     ))
 }
 
+/// True when the path runs through a cargo output folder (`target/{debug,release,deps}`),
+/// written with `/` or `\`.
+pub(crate) fn in_cargo_target(exe: &Path) -> bool {
+    let p = exe.to_string_lossy();
+    let parts: Vec<&str> = p.split(['/', '\\']).collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == "target" && matches!(w[1], "debug" | "release" | "deps"))
+}
+
+/// True for a cargo build output, and always under `cargo test`, where `current_exe()` is the
+/// test binary. Such a program must never be scheduled or spawned as a background task: the test
+/// harness reads the task's arguments as test filters and reruns itself without end.
+pub(crate) fn is_dev_build(exe: &Path) -> bool {
+    cfg!(test) || in_cargo_target(exe)
+}
+
+pub(crate) const DEV_BUILD_NOTE: &str = "this is a development build (a cargo target folder, or a test run); it is not scheduled or started as a background task";
+
 /// The program a scheduled task should run. Inside the Store package the real path is a versioned
 /// folder that changes with every update, so the task runs the package's command name instead:
 /// `%LOCALAPPDATA%\Microsoft\WindowsApps\tempo-launch.exe` (declared in the manifest).
@@ -3030,6 +3049,10 @@ fn schedule(ctx: &Ctx, remove: bool, print: bool, daily: bool) -> Result<i32, Pr
     let (what, args) = schedule_plan(&exe, daily).map_err(fail)?;
     if print {
         println!("{what}");
+        return Ok(0);
+    }
+    if is_dev_build(&exe) {
+        println!("{DEV_BUILD_NOTE}");
         return Ok(0);
     }
     if cfg!(windows) {
@@ -3625,6 +3648,7 @@ mod tests {
 
     #[test]
     fn the_usual_launches() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("launch");
         let ctx = ctx_in(&root);
         let a = launch_for(&ctx, AGENT);
@@ -3763,6 +3787,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn starts_hidden_waits_opens_and_stops() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let root = tmp("e2e");
         let ctx = ctx_in(&root);
@@ -3822,6 +3847,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_crash_while_starting_shows_its_last_words() {
+        let _turn = VAULT_PORT_TURN.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let root = tmp("crash");
         let ctx = ctx_in(&root);
@@ -4859,6 +4885,10 @@ mod tests {
         }
     }
 
+    /// Vault startup tests share the app's reserved port range; take turns so an unrelated fake
+    /// server cannot claim a port between the availability check and launch.
+    static VAULT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The fake agent (and the check that none is there) uses the agent's real port, so the tests
     /// that do take turns.
     static AGENT_PORT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4913,11 +4943,17 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(20000);
+        for _ in 0..5000 {
+            let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if port > u16::MAX as u32 {
+                break;
+            }
+            if TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+                return port as u16;
+            }
+        }
+        panic!("no unique local test port was available");
     }
 
     #[test]

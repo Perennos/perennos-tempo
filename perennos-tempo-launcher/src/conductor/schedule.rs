@@ -153,6 +153,9 @@ pub struct RealScheduler;
 
 impl Scheduler for RealScheduler {
     fn install(&self, band: &str, entries: &[Entry]) -> Result<(), String> {
+        if std::env::current_exe().map_or(cfg!(test), |e| crate::is_dev_build(&e)) {
+            return Err(crate::DEV_BUILD_NOTE.into());
+        }
         if cfg!(windows) {
             for e in entries {
                 let out = run_hidden(Command::new("schtasks").args(&e.task))
@@ -210,6 +213,19 @@ mod tests {
 
     fn exe() -> PathBuf {
         PathBuf::from("/opt/tempo/tempo-launch")
+    }
+
+    #[test]
+    fn a_dev_build_schedules_nothing() {
+        // under cargo test the running program is a dev build: no schtasks, no crontab
+        let e = Entry {
+            flow: "f".into(),
+            every: Every::Daily(3, 0),
+            cron: "0 * * * * x".into(),
+            task: vec!["/Create".into()],
+        };
+        let said = RealScheduler.install("band", &[e]).unwrap_err();
+        assert_eq!(said, crate::DEV_BUILD_NOTE);
     }
 
     #[test]

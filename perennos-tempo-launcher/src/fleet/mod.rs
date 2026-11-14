@@ -127,6 +127,7 @@ pub enum FleetCmd {
     },
     Serve {
         quiet: bool,
+        announce: bool,
     },
     Send {
         who: String,
@@ -219,11 +220,19 @@ pub fn parse_args(rest: &[&str]) -> Result<FleetCmd, String> {
             },
             _ => return Err("fleet setup takes a computer (and --yes)".into()),
         },
-        Some("serve") => match &rest[1..] {
-            [] => FleetCmd::Serve { quiet: false },
-            ["--quiet"] => FleetCmd::Serve { quiet: true },
-            _ => return Err("fleet serve takes only --quiet".into()),
-        },
+        Some("serve") => {
+            let flags = &rest[1..];
+            if flags
+                .iter()
+                .any(|f| !matches!(*f, "--quiet" | "--announce"))
+            {
+                return Err("fleet serve takes only --quiet and --announce".into());
+            }
+            FleetCmd::Serve {
+                quiet: flags.contains(&"--quiet"),
+                announce: flags.contains(&"--announce"),
+            }
+        }
         Some("send") => match rest {
             [_, who, text] => FleetCmd::Send {
                 who: who.to_string(),
@@ -570,7 +579,7 @@ pub fn enable(p: &Paths, pinned: Option<PathBuf>, who: &str, on: bool, out: &mut
 
 // ---- scan
 
-pub const SCAN_WORDS: &str = "What a scan does: it looks at the addresses on this computer's own home or office networks (the /24 around each of its addresses), the computers your tailnet lists, and mDNS. At each address it tries to connect, for a third of a second, to the ports of Ollama (11434), the Tempo agent (8765) and the Tempo fleet messenger (8770), at most 64 at a time; where something answers it reads one public page (the model list, or the health answer). It sends no password and no file, never looks at a public address, and changes nothing. Adding a computer to the fleet is a separate step, and yours.";
+pub const SCAN_WORDS: &str = "What a scan does: it looks at the addresses on this computer's own home or office networks (the /24 around each of its addresses), the computers your tailnet lists, and mDNS. At each address it tries to connect, for a third of a second, to the ports of Ollama (11434), the Tempo agent (8765) and the Tempo fleet messenger (8770), at most 64 at a time; where something answers it reads one open page, one that needs no password (the model list, or the health answer), from that same private address. It sends no password and no file, never looks at a public address, and changes nothing. Adding a computer to the fleet is a separate step, and yours.";
 
 pub fn scan_cmd(
     p: &Paths,
@@ -1255,14 +1264,19 @@ fn ensure_invite_messenger(port: u16) -> bool {
     #[cfg(not(test))]
     {
         if !hello_answers(port) {
-            // A test harness is not the fleet messenger, so only a real launch may start it.
-            let Ok(exe) = std::env::current_exe()
-                .and_then(|p| service::background_executable(&p).map_err(std::io::Error::other))
+            let Ok(current) = std::env::current_exe() else {
+                return false;
+            };
+            if crate::is_dev_build(&current) {
+                eprintln!("tempo-launch: fleet invite: {}", crate::DEV_BUILD_NOTE);
+                return false;
+            }
+            let Ok(exe) = service::background_executable(&current).map_err(std::io::Error::other)
             else {
                 return false;
             };
             let mut c = std::process::Command::new(exe);
-            c.args(["fleet", "serve", "--quiet"])
+            c.args(["fleet", "serve", "--quiet", "--announce"])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -1655,8 +1669,14 @@ pub fn autostart(ctx: &Ctx) {
         if store::read_key(&p).is_none() || store::load(&p).count() < 2 {
             return;
         }
-        let Ok(exe) = std::env::current_exe()
-            .and_then(|p| service::background_executable(&p).map_err(std::io::Error::other))
+        let Ok(current) = std::env::current_exe() else {
+            return;
+        };
+        if crate::is_dev_build(&current) {
+            ctx.note(&format!("fleet: {}", crate::DEV_BUILD_NOTE));
+            return;
+        }
+        let Ok(exe) = service::background_executable(&current).map_err(std::io::Error::other)
         else {
             return;
         };
@@ -1720,7 +1740,7 @@ pub fn run(ctx: &Ctx, cmd: FleetCmd) -> i32 {
         FleetCmd::Ssh { who, cmd } => ssh_cmd(&p, &who, &cmd, &mut out),
         FleetCmd::Check(w) => check_cmd(&p, &w, &mut out),
         FleetCmd::Setup { who, yes } => setup_cmd(&p, pinned, &who, yes, &mut ask, &mut out),
-        FleetCmd::Serve { quiet } => serve::run(&p, quiet),
+        FleetCmd::Serve { quiet, announce } => serve::run(&p, quiet, announce),
         FleetCmd::Send { who, text } => send_cmd(&p, &who, &text, &mut out),
         FleetCmd::Inbox => inbox_cmd(&p, &mut out),
         FleetCmd::Ping(w) => ping_cmd(&p, &w, &mut out),

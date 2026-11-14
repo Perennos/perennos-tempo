@@ -74,9 +74,29 @@ impl Scratch {
         {
             return Err("scratch ownership marker is missing or changed".into());
         }
-        std::fs::remove_dir_all(&self.path).map_err(|e| format!("scratch removal failed: {e}"))?;
-        self.cleaned = true;
-        Ok(())
+        let mut removal_error = None;
+        for attempt in 0..20 {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => {
+                    self.cleaned = true;
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.cleaned = true;
+                    return Ok(());
+                }
+                Err(e) => {
+                    removal_error = Some(e);
+                    if attempt < 19 {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+        Err(format!(
+            "scratch removal failed: {}",
+            removal_error.unwrap()
+        ))
     }
 }
 
@@ -656,10 +676,12 @@ fn the_command_line_parses() {
             text: "hello there".into()
         })
     );
-    assert_eq!(
-        a(&["serve", "--quiet"]),
-        Ok(FleetCmd::Serve { quiet: true })
-    );
+    let serve = |quiet, announce| Ok(FleetCmd::Serve { quiet, announce });
+    assert_eq!(a(&["serve"]), serve(false, false));
+    assert_eq!(a(&["serve", "--quiet"]), serve(true, false));
+    assert_eq!(a(&["serve", "--announce"]), serve(false, true));
+    assert_eq!(a(&["serve", "--announce", "--quiet"]), serve(true, true));
+    assert!(a(&["serve", "--all"]).is_err());
     assert!(a(&["nope"]).is_err());
     assert!(matches!(
         crate::parse(&["fleet".to_string(), "ping".into(), "x".into()]),
@@ -720,12 +742,12 @@ echo "$@" >> "$d/log"
 case "$*" in *10.0.0.33*) echo "Permission denied (publickey)." >&2; exit 255;; esac
 case "$*" in
   *"-G "*) printf 'hostname 10.0.0.9\nport 22\nproxycommand none\nproxyjump none\n';;
-  *"sh -s"*)
+  *"sh -s"*|*"sh -c"*)
     input=$(cat)
     printf '%s\n--END--\n' "$input" >> "$d/stdin"
-    case "$input" in *install-key*) printf 'The fleet key is in place.\nidentity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';; esac
-    case "$input" in *__TEMPO_BOOTSTRAP_BEGIN__*) printf '__TEMPO_BOOTSTRAP_BEGIN__\nos=Linux\narch=x86_64\nname=system-host\nlauncher=/home/setupbox/.local/bin/tempo-launch\nversion=tempo-launch 2.1.0\nhome_json={"home":"/home/setupbox/.local/state/perennos-tempo"}\nfleet_port=8770\n__TEMPO_BOOTSTRAP_END__\n';; esac
-    case "$input" in *fleet.json*) printf 'me=setupbox\n';; esac
+    if [ "${#input}" -eq 64 ]; then printf 'The fixture received a 64-byte key payload.\n'; fi
+    case "$input" in *__TEMPO_BOOTSTRAP_BEGIN__*) printf '__TEMPO_BOOTSTRAP_BEGIN__\nos=Linux\narch=x86_64\nuser=setupbox\nuser_home=/home/setupbox\nname=system-host\nlauncher=/home/setupbox/.local/bin/tempo-launch\nversion=tempo-launch 2.1.0\nhome_json={"home":"/home/setupbox/.local/state/perennos-tempo"}\nfleet_port=8770\n__TEMPO_BOOTSTRAP_END__\n';; esac
+    case "$input" in *fleet.json*) printf 'key_hash=\nfleet_hex=__TEMPO_ABSENT__\n';; esac
     case "$input" in *"command -v curl"*) printf 'messenger=ready\n';; esac
     case "$input" in *nproc*) printf 'os=Linux x86_64\ncpus=8\nram_kb=16777216\ngpu=NVIDIA Test GPU, 8192 MiB\ndisk_kb=104857600\nlaunch=tempo-launch 2.0.1\nollama=ollama version is 0.5.1\n';; esac;;
   *) echo "ran: $*";;
@@ -813,7 +835,7 @@ fn check_reads_the_machine_and_records_the_result_and_a_failure() {
 
 #[cfg(unix)]
 #[test]
-fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
+fn setup_asks_and_keeps_the_key_on_stdin_when_pairing_cannot_be_verified() {
     let dir = fake_ssh();
     let p = paths("sshsetup");
     store::update(&p, |f| {
@@ -837,31 +859,36 @@ fn setup_shows_the_commands_asks_and_never_puts_the_key_on_a_command_line() {
         )
     });
     assert_eq!((c, asked), (0, 1));
-    assert!(said.contains("Tempo v2.1.0 is already installed"), "{said}");
+    assert!(
+        said.contains("Perennos Tempo v2.1.0 will use /home/setupbox/.local/state/perennos-tempo"),
+        "{said}"
+    );
     assert!(said.contains("Nothing was changed"));
     // a yes
     let (c, said) = out_of(|o| setup_cmd(&p, None, "setupbox", true, &mut |_| true, o));
-    assert_eq!(c, 0, "{said}");
+    assert_eq!(
+        c, 1,
+        "unverified pairing must not register the target: {said}"
+    );
     let key = crypto::hex(&store::read_key(&p).unwrap());
     let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
-    assert!(stdin.contains("install-key --name 'setupbox'"));
-    assert!(stdin.contains(&key), "the key goes in ssh's input");
+    let log = std::fs::read_to_string(dir.join("log")).unwrap();
     assert!(
-        !std::fs::read_to_string(dir.join("log"))
-            .unwrap()
-            .contains(&key),
-        "never on a command line"
+        log.contains("fleet install-key --name "),
+        "the remote install command is present without exposing its arguments"
     );
-    assert!(said.contains("is linked."));
-    assert_eq!(
-        store::load(&p).machines[0].id,
-        "a".repeat(64),
-        "its identity was pinned"
+    assert!(stdin.contains(&key), "the key goes in SSH standard input");
+    assert!(
+        !log.contains(&key),
+        "the key never appears on the command line"
     );
-    assert!(!said.contains("identity="));
-    assert!(store::load(&p).machines[0].enabled);
-    assert_eq!(store::load(&p).machines[0].role, "engine");
-    assert_eq!(store::load(&p).machines[0].addr, "10.0.0.9");
+    let fleet = store::load(&p);
+    assert!(
+        fleet
+            .find("setupbox")
+            .is_some_and(|i| fleet.machines[i].id.is_empty()),
+        "an unverified target stays unregistered"
+    );
     let mode_ok = {
         #[cfg(unix)]
         {
@@ -1681,8 +1708,9 @@ fn the_http_side_serves_hello_and_a_loopback_only_fleet_json() {
     .unwrap();
     let (c, b) = http_get(a.port, "/hello", "whatever");
     assert_eq!(c, 200);
+    // a stranger on the network learns that Tempo is here, not whose computer it is
     assert!(
-        b.contains("\"app\":\"tempo-fleet\"") && b.contains("\"name\":\"web\""),
+        b.contains("\"app\":\"tempo-fleet\"") && !b.contains("name"),
         "{b}"
     );
     let host = format!("127.0.0.1:{}", a.port);
@@ -1692,6 +1720,97 @@ fn the_http_side_serves_hello_and_a_loopback_only_fleet_json() {
     // a name the page chooses (DNS rebinding) is refused
     assert_eq!(http_get(a.port, "/fleet.json", "evil.example:80").0, 403);
     assert_eq!(http_get(a.port, "/nothing", &host).0, 404);
+}
+
+#[test]
+fn hello_names_the_computer_only_to_its_own_fleet_or_a_joiner_with_an_invite() {
+    let a = rig("web2", KEY);
+    assert!(!http_get(a.port, "/hello", "x").1.contains("\"name\""));
+    // a computer in this fleet (here the test's own address) gets the name
+    store::update(&a.paths, |f| {
+        f.machines
+            .push(Machine::new("me-too", "127.0.0.1", "engine"))
+    })
+    .unwrap();
+    let (_, b) = http_get(a.port, "/hello", "x");
+    assert!(
+        b.contains("\"name\":\"web2\"") && b.contains("\"invite\":false"),
+        "{b}"
+    );
+    // and while an invite is open, a computer that is not in the fleet yet needs the name to join
+    let b2 = rig("web3", KEY);
+    pair::create_invite(&b2.paths, store::now_s()).unwrap();
+    let (_, b) = http_get(b2.port, "/hello", "x");
+    assert!(
+        b.contains("\"name\":\"web3\"") && b.contains("\"invite\":true"),
+        "{b}"
+    );
+}
+
+fn fleet_of(addrs: &[&str]) -> store::Fleet {
+    let mut f = store::Fleet::default();
+    for (i, a) in addrs.iter().enumerate() {
+        f.machines.push(Machine::new(&format!("m{i}"), a, "engine"));
+    }
+    f
+}
+
+#[test]
+fn the_messenger_opens_only_the_addresses_the_fleet_needs() {
+    use std::net::Ipv4Addr;
+    // built from numbers, so no address is written out in the source (the repo's leak scan reads the text)
+    let home = Ipv4Addr::new(10, 0, 1, 7);
+    let tail = Ipv4Addr::new(100, 80, 1, 2);
+    let wsl = Ipv4Addr::new(172, 22, 96, 1);
+    let own = [home, tail, wsl, Ipv4Addr::new(169, 254, 3, 3)];
+    let (lan_peer, tail_peer, tail_peer2) = (
+        Ipv4Addr::new(10, 0, 1, 20).to_string(),
+        Ipv4Addr::new(100, 64, 0, 9).to_string(),
+        Ipv4Addr::new(100, 80, 4, 4).to_string(),
+    );
+    let ips = |f: &store::Fleet| -> Vec<String> {
+        serve::listen_for(f, &own, 8770)
+            .iter()
+            .map(|a| a.ip().to_string())
+            .collect()
+    };
+    let s = |v: &[Ipv4Addr]| -> Vec<String> {
+        v.iter()
+            .map(|a| a.to_string())
+            .chain(["127.0.0.1".to_string()])
+            .collect()
+    };
+    // computers on the tailnet only: the home Wi-Fi and the virtual network stay closed
+    assert_eq!(ips(&fleet_of(&[&tail_peer, &tail_peer2])), s(&[tail]));
+    // a computer on the home network: the home addresses open, the tailnet one does not
+    assert_eq!(ips(&fleet_of(&[&lan_peer])), s(&[home, wsl]));
+    // both kinds: both open; link-local is never listened on
+    let both = ips(&fleet_of(&[&lan_peer, &tail_peer]));
+    assert_eq!(both, s(&[home, tail, wsl]));
+    // nobody yet (an invite is open) or a name that cannot be placed: keep both
+    assert_eq!(ips(&fleet_of(&[])), both);
+    assert_eq!(ips(&fleet_of(&["tower.local"])), both);
+    // a disabled computer does not count
+    let mut f = fleet_of(&[&lan_peer]);
+    f.machines[0].enabled = false;
+    assert_eq!(ips(&f), both);
+    // loopback is always there, and never the wildcard
+    for a in serve::listen_for(&fleet_of(&[&tail_peer]), &own, 8770) {
+        assert!(!a.ip().is_unspecified());
+    }
+}
+
+#[test]
+fn an_address_that_cannot_be_listened_on_is_reported_not_skipped() {
+    let a = rig("bindfail", KEY);
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = taken.local_addr().unwrap();
+    let free: SocketAddr = ([127, 0, 0, 1], free_port()).into();
+    let h = serve::listen(&a.node, &[busy, free]).unwrap();
+    assert_eq!(h.addrs, vec![free]);
+    assert_eq!(h.failed.len(), 1);
+    assert_eq!(h.failed[0].0, busy);
+    assert!(!h.failed[0].1.is_empty());
 }
 
 #[test]

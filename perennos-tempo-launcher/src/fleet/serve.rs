@@ -1,7 +1,7 @@
 //! `tempo-launch fleet serve`: the messenger's listener, its senders and its heartbeat.
 //!
 //! It listens only on this computer's private and tailnet addresses and on 127.0.0.1, never on
-//! 0.0.0.0. One port carries three things, told apart by the first bytes: signed frames, a plain
+//! 0.0.0.0. The one wildcard socket in the program, mDNS on UDP 5353, is off unless `--announce`. One port carries three things, told apart by the first bytes: signed frames, a plain
 //! HTTP (`/hello` to any private address; `/fleet.json` and `POST /call` to this computer only) and
 //! pairing, which starts with `PAIR`.
 
@@ -214,7 +214,7 @@ fn respond(s: &mut TcpStream, code: &str, body: &str) {
     );
 }
 
-/// A plain GET. `/hello` for a private address; `/fleet.json` for this computer only, and only
+/// A plain GET. `/hello` for a private address (the name only to this fleet or an inviting joiner); `/fleet.json` for this computer only, and only
 /// with a Host header that names it (a web page cannot reach it by a name it controls).
 fn header(head: &str, name: &str) -> Option<String> {
     head.lines().find_map(|l| {
@@ -275,16 +275,20 @@ fn http(node: &Arc<Node>, mut r: BufReader<TcpStream>, peer: SocketAddr, port: u
     }
     match path {
         "/hello" if crate::private_ip(peer.ip()) => {
-            let o = J::Obj(vec![
-                ("app".into(), J::s("tempo-fleet")),
-                ("name".into(), J::s(&node.me)),
-                ("v".into(), J::n(1.0)),
-                (
-                    "invite".into(),
-                    J::Bool(super::pair::invite_open(&node.paths)),
-                ),
-            ]);
-            respond(&mut s, "200 OK", &o.compact());
+            let invite = super::pair::invite_open(&node.paths);
+            // This computer's name is for its own fleet, and for a computer joining while an invite is open.
+            // Anyone else on the same network (a cafe's wifi, a shared tailnet) learns that Tempo is here, not who owns it.
+            let own = store::load(&node.paths)
+                .machines
+                .iter()
+                .any(|m| m.addr.parse::<IpAddr>().is_ok_and(|a| a == peer.ip()));
+            let mut o = vec![("app".to_string(), J::s("tempo-fleet"))];
+            if invite || own {
+                o.push(("name".into(), J::s(&node.me)));
+            }
+            o.push(("v".into(), J::n(1.0)));
+            o.push(("invite".into(), J::Bool(invite)));
+            respond(&mut s, "200 OK", &J::Obj(o).compact());
         }
         "/fleet.json" if local => {
             respond(&mut s, "200 OK", &view(&node.paths, Some(node)).compact())
@@ -450,6 +454,8 @@ macro_rules! spawn_fleet {
 
 pub struct Handle {
     pub addrs: Vec<SocketAddr>,
+    /// Addresses that could not be listened on, with why. Never skipped without a word.
+    pub failed: Vec<(SocketAddr, String)>,
     stop: Arc<AtomicBool>,
     #[cfg(test)]
     completion: Arc<Completion>,
@@ -483,24 +489,27 @@ pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> 
     super::tests::track_server(node, completion.clone())?;
     let _ = super::tools::local_token(&node.paths);
     let stop = Arc::new(AtomicBool::new(false));
-    let mut bound = Vec::new();
+    let (mut bound, mut failed) = (Vec::new(), Vec::new());
     for a in addrs {
-        if let Ok(l) = TcpListener::bind(a) {
-            bound.push(l.local_addr().map_err(|e| e.to_string())?);
-            let (node, stop) = (node.clone(), stop.clone());
-            #[cfg(test)]
-            let handlers = completion.clone();
-            spawn_fleet!(completion, move || {
-                for c in l.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        return;
+        match TcpListener::bind(a) {
+            Ok(l) => {
+                bound.push(l.local_addr().map_err(|e| e.to_string())?);
+                let (node, stop) = (node.clone(), stop.clone());
+                #[cfg(test)]
+                let handlers = completion.clone();
+                spawn_fleet!(completion, move || {
+                    for c in l.incoming() {
+                        if stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if let Ok(c) = c {
+                            let node = node.clone();
+                            spawn_fleet!(handlers, move || conn(&node, c));
+                        }
                     }
-                    if let Ok(c) = c {
-                        let node = node.clone();
-                        spawn_fleet!(handlers, move || conn(&node, c));
-                    }
-                }
-            });
+                });
+            }
+            Err(e) => failed.push((*a, e.to_string())),
         }
     }
     if bound.is_empty() {
@@ -508,6 +517,7 @@ pub fn listen(node: &Arc<Node>, addrs: &[SocketAddr]) -> Result<Handle, String> 
     }
     Ok(Handle {
         addrs: bound,
+        failed,
         stop,
         #[cfg(test)]
         completion,
@@ -622,8 +632,38 @@ pub fn listen_on(port: u16) -> Vec<SocketAddr> {
     v.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()
 }
 
+/// Where the messenger listens for this fleet: 127.0.0.1 always, and only the private or tailnet
+/// addresses of this computer that the fleet needs. A home or office address is opened only when a
+/// computer in the fleet is on one; a tailnet address only when one is on the tailnet. A fleet made
+/// of tailnet computers leaves the Wi-Fi and the virtual networks alone. With nobody in the fleet
+/// yet (an invite is open), or a computer whose address cannot be placed (a name), both are kept.
+pub fn listen_for(f: &Fleet, own: &[Ipv4Addr], port: u16) -> Vec<SocketAddr> {
+    let peers: Vec<&store::Machine> = f.machines.iter().filter(|m| m.enabled).collect();
+    let (mut lan, mut tail) = (peers.is_empty(), peers.is_empty());
+    for m in peers {
+        match m.addr.parse::<Ipv4Addr>() {
+            Ok(a) if super::scan::is_tailnet(a) => tail = true,
+            Ok(a) if super::scan::is_lan(a) => lan = true,
+            _ => (lan, tail) = (true, true),
+        }
+    }
+    let mut v: Vec<IpAddr> = super::scan::listen_addrs(own)
+        .into_iter()
+        .filter(|ip| {
+            if super::scan::is_tailnet(*ip) {
+                tail
+            } else {
+                lan
+            }
+        })
+        .map(IpAddr::V4)
+        .collect();
+    v.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    v.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()
+}
+
 /// `fleet serve`: listen until the program is ended.
-pub fn run(p: &Paths, quiet: bool) -> i32 {
+pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
     let Some(key) = store::read_key(p) else {
         eprintln!(
             "tempo-launch: fleet serve: there is no fleet key yet; run tempo-launch fleet init"
@@ -649,7 +689,11 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
         p.clone(),
         Arc::new(crate::stage::remote::RealRunner),
     )));
-    let addrs = listen_on(store::fleet_port());
+    let addrs = listen_for(
+        &store::load(p),
+        &super::scan::local_addrs(),
+        store::fleet_port(),
+    );
     let h = match start(&node, &addrs) {
         Ok(h) => h,
         Err(_) if quiet => return 0, // the messenger is already running
@@ -658,9 +702,20 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
             return 1;
         }
     };
+    for (a, why) in &h.failed {
+        eprintln!(
+            "fleet: could not listen on {a}: {why}{}",
+            if a.ip().is_loopback() {
+                " (the agent reaches the messenger through this address, so its fleet tools will not work until it is free)"
+            } else {
+                ""
+            }
+        );
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let own = super::scan::listen_addrs(&super::scan::local_addrs());
-    {
+    if announce {
+        // answering mDNS needs UDP 5353 on every interface, which is what makes a firewall ask: only when asked for
         let (name, port, stop) = (node.me.clone(), store::fleet_port(), stop.clone());
         spawn_fleet!(h.completion, move || {
             if let Err(e) = super::mdns::announce(&stop, &name, port, &own, &["v=1".to_string()]) {

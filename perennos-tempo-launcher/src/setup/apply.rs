@@ -872,6 +872,9 @@ fn bring_up_ollama(
     (false, 1, result("not-answering", Some(&owned.binary)))
 }
 
+/// Asked before anything is looked up in Ollama's registry (unless `--yes`: the installer's ticked box is that yes).
+pub const REGISTRY_ASK: &str = "\nPerennos Tempo can ask Ollama's registry (registry.ollama.ai) for model sizes so it knows what fits your computer, sending only the model names and nothing about you, your files, or this machine. Ask now? [y/N] ";
+
 /// Run `tempo-launch setup`. Returns the exit code.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -912,7 +915,9 @@ pub fn run(
     if o.ollama {
         return run_ollama_only(ctx, host, o, port, now, out, confirm, start_ollama);
     }
-    let c = match compute(ctx, host, o, true, port, now) {
+    // Nothing leaves this computer before a yes. `--page` and `--json` never look anything up; they plan from what is already known.
+    let live = !o.page && (o.yes || (!o.json && confirm(REGISTRY_ASK)));
+    let c = match compute(ctx, host, o, live, port, now) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("tempo-launch: setup: {e}");
@@ -1385,6 +1390,9 @@ mod tests {
             1_793_000_000,
             &mut out,
             &mut |q| {
+                if q == REGISTRY_ASK {
+                    return true; // the lookup is not what these tests are about
+                }
                 question = q.to_string();
                 yes
             },
@@ -1400,6 +1408,80 @@ mod tests {
 
     fn opts(a: &[&str]) -> Opts {
         parse_args(a).unwrap()
+    }
+
+    /// A fetcher that never answers and counts how often it was asked.
+    struct Asked(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::setup::registry::Fetch for Asked {
+        fn get(&self, _: &str, _: Option<&str>, _: bool) -> crate::setup::registry::Fetched {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::setup::registry::Fetched::Failed
+        }
+    }
+
+    /// Runs setup with the given flags, answering the registry question `answer`; returns (questions asked, lookups made, output).
+    fn setup_with_lookups(flags: &[&str], answer: bool) -> (Vec<String>, usize, String) {
+        let root = tmp("lookups");
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host = Fake {
+            fetcher: Some(Arc::new(Asked(count.clone()))),
+            ..pc(50)
+        };
+        let c = ctx(&root);
+        let (mut out, mut asked) = (Vec::new(), Vec::new());
+        run(
+            &c,
+            &host,
+            &opts(flags),
+            1,
+            1_793_000_000,
+            &mut out,
+            &mut |q| {
+                asked.push(q.to_string());
+                answer
+            },
+            &mut |_| false,
+        );
+        (
+            asked,
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            String::from_utf8_lossy(&out).into_owned(),
+        )
+    }
+
+    #[test]
+    fn a_plain_setup_asks_before_it_contacts_the_registry_and_says_what_is_sent() {
+        let (asked, lookups, out) = setup_with_lookups(&[], false);
+        assert_eq!(asked, vec![REGISTRY_ASK.to_string()]);
+        assert!(
+            REGISTRY_ASK.contains("registry.ollama.ai")
+                && REGISTRY_ASK.contains("only the model names")
+                && REGISTRY_ASK.contains("nothing about you")
+        );
+        assert_eq!(lookups, 0, "no is no: nothing was asked of the registry");
+        assert!(
+            out.contains("not been checked with the Ollama registry"),
+            "{out}"
+        );
+        let (_, lookups, _) = setup_with_lookups(&[], true);
+        assert!(lookups > 0, "after a yes it does look");
+    }
+
+    #[test]
+    fn yes_is_the_consent_the_installers_ticked_box_gives_so_it_does_not_ask_again() {
+        let (asked, lookups, _) = setup_with_lookups(&["--apply", "--yes"], false);
+        assert!(!asked.iter().any(|q| q == REGISTRY_ASK));
+        assert!(lookups > 0);
+    }
+
+    #[test]
+    fn the_page_and_json_forms_never_look_anything_up() {
+        for flags in [&["--page"][..], &["--json"][..]] {
+            let (asked, lookups, _) = setup_with_lookups(flags, true);
+            assert_eq!(lookups, 0, "{flags:?}");
+            assert!(!asked.iter().any(|q| q == REGISTRY_ASK), "{flags:?}");
+        }
     }
 
     #[test]
@@ -1944,8 +2026,17 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(25000);
+        for _ in 0..5000 {
+            let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if port > u16::MAX as u32 {
+                break;
+            }
+            if std::net::TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+                return port as u16;
+            }
+        }
+        panic!("no unique local test port was available");
     }
 
     /// `go`, with the start-Ollama callback chosen by the test.

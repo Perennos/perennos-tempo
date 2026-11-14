@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The Perennos Tempo installer art, drawn from code.
 
-The Perennos mark (the P with the signal dot, from assets/icon.svg in the products) as Windows icons,
-and the wizard images at every size Inno Setup asks for, so they stay sharp at every display
-scaling. Standard library only; the same files on every run.
+The Windows icons (the official Perennos insignia, art/perennos.ico) and the wizard images at every size
+Inno Setup asks for, so they stay sharp at every display scaling. Standard library only; the same files
+on every run. The insignia icon and the small wizard images are made once by make_insignia_icon.py.
 
 usage: python3 make_art.py OUT_DIR
 """
@@ -400,12 +400,12 @@ def main(out):
             f.write(data)
         made.append(name)
 
-    for name, accent in ACCENTS.items():
-        images = [(sz, draw_mark(sz, accent)) for sz in ICON_SIZES]
-        save(name + ".ico", ico_bytes(images))
-        if name == "tempo":
-            save("tempo-256.png", png_bytes(256, 256, images[-1][1]))
     here = os.path.dirname(os.path.abspath(__file__))
+    # the official Perennos insignia (make_insignia_icon.py draws perennos.ico from art/perennos-insignia.png), one icon for every app
+    with open(os.path.join(here, "perennos.ico"), "rb") as f:
+        official = f.read()
+    for name in ACCENTS:
+        save(name + ".ico", official)
     for pct, (w, h) in LARGE.items():
         # the README's lattice look, rendered from brand art sources kept privately (finish_wizard_art.py); drawn here if missing
         png = os.path.join(here, f"wizard-large-{pct}.png")
@@ -417,7 +417,13 @@ def main(out):
         else:
             save(f"wizard-large-{pct}.bmp", wizard_large(w, h))
     for pct, sz in SMALL.items():
-        save(f"wizard-small-{pct}.bmp", wizard_small(sz))
+        png = os.path.join(here, f"wizard-small-{pct}.png")
+        if not os.path.isfile(png):
+            sys.exit(f"{png} is missing; run make_insignia_icon.py")
+        pw, ph, rows = png_rows(png)
+        if (pw, ph) != (sz, sz):
+            sys.exit(f"{png} is {pw}x{ph}; Inno Setup's {pct}% size is {sz}x{sz}")
+        save(f"wizard-small-{pct}.bmp", bmp_from_rows(sz, sz, rows))
     print(f"{len(made)} files in {out}")
 
 

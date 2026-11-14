@@ -165,7 +165,7 @@ Name: "learn"; Description: "Let Tempo learn from your vault every hour (on this
 ; the computer (see CurPageChanged below) and left unticked when one is there. 1471164488 bytes is the
 ; Windows x86_64 entry in perennos-tempo-launcher\catalog\runtime.json (about 1.4 GB).
 Name: "getollama"; Description: "Download Ollama, the engine Tempo runs models with (about 1.4 GB, checked against a pinned SHA-256)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
-Name: "setupmodels"; Description: "Download models that fit this computer now (several gigabytes, needs Ollama)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
+Name: "setupmodels"; Description: "Download models that fit this computer now (several gigabytes, needs Ollama, looks up model names in Ollama's registry)"; GroupDescription: "Perennos Tempo:"; Components: agent; Flags: unchecked
 Name: "startup"; Description: "Start Perennos Tempo in the background when I sign in"; GroupDescription: "Perennos Tempo:"; Flags: unchecked
 
 [Files]

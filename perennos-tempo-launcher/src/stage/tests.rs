@@ -313,6 +313,7 @@ impl crate::fleet::stage::StageRunner for StudioRunner {
 pub struct Studio {
     pub a: crate::fleet::tests::Rig,
     pub b: crate::fleet::tests::Rig,
+    _dir: crate::woodshed::takes::TestDir,
     pub ctx_b: Ctx,
     pub world_b: Arc<FakeWorld>,
 }
@@ -328,7 +329,7 @@ impl Studio {
         }
         blob::attach(&a.node);
         blob::attach(&b.node);
-        let (ctx_b, _, _) = ready(&format!("{tag}-studio"));
+        let (ctx_b, _, dir_b) = ready(&format!("{tag}-studio"));
         let world_b = Arc::new(world(
             Some(fake.machine("this computer", true, gpu)),
             vec![],
@@ -344,6 +345,7 @@ impl Studio {
         Studio {
             a,
             b,
+            _dir: dir_b,
             ctx_b,
             world_b,
         }
@@ -654,7 +656,7 @@ fn again_keeps_the_seed_changes_a_pedal_and_says_what_comfyui_reused() {
     assert!(widget(&g.prompts[1], "11", "image") == widget(&g.prompts[0], "11", "image"));
     assert!(out.status.contains("reused 3 nodes"), "{}", out.status);
     // nothing to repeat for a workflow that never ran
-    let (ctx2, cat2, _) = ready("run-again-none");
+    let (ctx2, cat2, _dir) = ready("run-again-none");
     let e = play(&ctx2, &w, &cat2, "paint-edit-photo", &again).unwrap_err();
     assert!(e.contains("no earlier run"), "{e}");
 }
@@ -932,7 +934,8 @@ fn a_tool_call_plays_the_workflow_and_only_on_folders_the_owner_allowed() {
         J::n(12.0)
     );
     // a path outside the allowed folders
-    let outside = tmp("mcp-outside").join("x.png");
+    let outside_dir = tmp("mcp-outside");
+    let outside = outside_dir.join("x.png");
     std::fs::write(&outside, png()).unwrap();
     let r = call(&format!(
         r#"{{"image":"{}","mask":"{}","instruction":"x"}}"#,
@@ -1108,7 +1111,8 @@ fn go(
 fn list_show_and_check_say_what_there_is_and_where_it_fits() {
     use super::StageCmd as C;
     let cat = embedded();
-    let ctx = ctx_in(&tmp("cmd-list"));
+    let _dir = tmp("cmd-list");
+    let ctx = ctx_in(&_dir);
     let w = world(None, vec![]);
     let (code, out) = go(&ctx, &cat, &w, C::List, &[]);
     assert_eq!(code, 0);
@@ -1164,7 +1168,7 @@ fn list_show_and_check_say_what_there_is_and_where_it_fits() {
 #[test]
 fn enable_needs_a_ready_workflow_and_cloud_asks_first() {
     use super::StageCmd as C;
-    let (ctx, cat, _) = ready("cmd-enable");
+    let (ctx, cat, _dir) = ready("cmd-enable");
     let w = world(None, vec![]);
     let (code, out) = go(&ctx, &cat, &w, C::Disable("paint-edit-photo".into()), &[]);
     assert_eq!(code, 0, "{out}");
@@ -1217,7 +1221,7 @@ fn enable_needs_a_ready_workflow_and_cloud_asks_first() {
 
 #[test]
 fn the_fleet_heartbeat_can_say_which_workflows_are_ready() {
-    let (ctx, _, _) = ready("ready-ids");
+    let (ctx, _, _dir) = ready("ready-ids");
     // the shipped catalogue's hash is not the test graph's, so nothing is ready there
     assert!(super::ready_ids(&ctx).is_empty());
     assert!(super::any_on(&ctx));
@@ -1349,7 +1353,7 @@ fn a_computer_without_the_models_can_still_play_on_the_studio() {
 
 // ---- words to a run
 
-fn re_angle_home(tag: &str) -> (Ctx, Catalog) {
+fn re_angle_home(tag: &str) -> (Ctx, Catalog, crate::woodshed::takes::TestDir) {
     let d = tmp(tag);
     let ctx = ctx_in(&d.join("home"));
     std::fs::create_dir_all(&ctx.home).unwrap();
@@ -1364,12 +1368,12 @@ fn re_angle_home(tag: &str) -> (Ctx, Catalog) {
     );
     st.set_last_workflow("re-angle-video");
     st.save(&ctx).unwrap();
-    (ctx, embedded())
+    (ctx, embedded(), d)
 }
 
 #[test]
 fn words_become_a_plan_with_the_machine_the_estimate_and_what_was_left_out() {
-    let (ctx, cat) = re_angle_home("cue-plan");
+    let (ctx, cat, _dir) = re_angle_home("cue-plan");
     let fake = FakeComfy::start(24.0);
     let w = world(Some(fake.machine("this computer", true, 24.0)), vec![]);
     let (p, cue) =
@@ -1419,7 +1423,7 @@ fn words_become_a_plan_with_the_machine_the_estimate_and_what_was_left_out() {
 
 #[test]
 fn words_with_no_earlier_run_or_no_pedal_say_what_to_do() {
-    let (ctx, cat) = re_angle_home("cue-nothing");
+    let (ctx, cat, _dir) = re_angle_home("cue-nothing");
     let fake = FakeComfy::start(24.0);
     let w = world(Some(fake.machine("this computer", true, 24.0)), vec![]);
     let e = super::cue::plan(&ctx, &w, &cat, "relight the photo with noir")
@@ -1443,7 +1447,8 @@ fn words_with_no_earlier_run_or_no_pedal_say_what_to_do() {
         .map(|_| ())
         .unwrap_err();
     assert!(e.contains("golden hour"), "{e}");
-    let fresh = ctx_in(&tmp("cue-fresh").join("home"));
+    let fresh_dir = tmp("cue-fresh");
+    let fresh = ctx_in(&fresh_dir.join("home"));
     let e = super::cue::plan(&fresh, &w, &cat, "golden hour")
         .map(|_| ())
         .unwrap_err();

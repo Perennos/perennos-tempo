@@ -144,6 +144,8 @@ pub struct Config {
     pub hooks: Hooks,
     /// How long a hook may run when it does not say (`timeout_s`), in seconds.
     pub hook_timeout_s: f64,
+    /// `host:port` to connect to for the online check. Empty (the default): the agent contacts nobody to find out; a fetch that
+    /// could not reach the network says offline for a few seconds (`tools::net_up`).
     pub offline_probe: String,
     /// Host names `fetch_url` may reach even though they are on this computer or its network
     /// (everything private, loopback or link-local, such as the cloud metadata address, is refused).
@@ -291,7 +293,7 @@ impl Config {
             command_timeout_s: 60.0,
             hooks: Hooks::default(),
             hook_timeout_s: 30.0,
-            offline_probe: "1.1.1.1:443".into(),
+            offline_probe: String::new(),
             fetch_allow_private: vec![],
             fetch_allow_hosts: vec![],
             fetch_cache_max: 500,

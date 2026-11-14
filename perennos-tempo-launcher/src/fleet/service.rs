@@ -3,6 +3,7 @@
 //! has to start it every few minutes; it is installed when the fleet has more than one machine.
 //! On a Mac, `tempo-launch start` (what sign-in runs) starts it.
 
+use crate::{is_dev_build, DEV_BUILD_NOTE};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -50,12 +51,8 @@ pub fn entry(exe: &Path) -> Result<String, String> {
 
 /// Put the entry in (or take it out). Returns what was done, in words.
 pub fn install(exe: &Path, remove: bool) -> Result<String, String> {
-    if cfg!(test) {
-        let e = entry(exe)?;
-        return Ok(format!(
-            "test run: would {} {e}",
-            if remove { "remove" } else { "install" }
-        ));
+    if is_dev_build(exe) {
+        return Ok(DEV_BUILD_NOTE.into());
     }
     let exe = background_executable(exe)?;
     if cfg!(target_os = "macos") {
@@ -180,18 +177,32 @@ mod tests {
     }
 
     #[test]
-    fn install_reports_a_simulated_change_without_touching_the_host() {
-        if !cfg!(target_os = "macos") {
-            let exe = Path::new("/opt/tempo/tempo-launch");
-            let entry = entry(exe).unwrap();
-            assert_eq!(
-                install(exe, false).unwrap(),
-                format!("test run: would install {entry}")
-            );
-            assert_eq!(
-                install(exe, true).unwrap(),
-                format!("test run: would remove {entry}")
+    fn cargo_outputs_are_dev_builds_and_installed_programs_are_not() {
+        for p in [
+            r"D:\w\target\debug\deps\tempo_launch-1a2b.exe",
+            r"C:\x\target\release\tempo-launch.exe",
+            "/home/x/target/debug/deps/tempo_launch-1a2b",
+            "/home/x/repo/target/release/tempo-launch",
+        ] {
+            assert!(
+                crate::in_cargo_target(Path::new(p)) && is_dev_build(Path::new(p)),
+                "{p}"
             );
         }
+        // under cargo test is_dev_build is true for everything, so the path rule is checked alone
+        for p in [
+            r"C:\Users\x\AppData\Local\Programs\Perennos Tempo\bin\tempo-launch.exe",
+            "/usr/local/bin/tempo-launch",
+        ] {
+            assert!(!crate::in_cargo_target(Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn install_of_a_dev_build_runs_nothing() {
+        // returns the note at once: no schtasks, crontab or systemctl is started
+        let exe = Path::new("/x/target/debug/deps/tempo_launch-1");
+        assert_eq!(install(exe, false).unwrap(), DEV_BUILD_NOTE);
+        assert_eq!(install(exe, true).unwrap(), DEV_BUILD_NOTE);
     }
 }
