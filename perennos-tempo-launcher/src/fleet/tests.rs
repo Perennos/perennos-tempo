@@ -151,6 +151,39 @@ pub fn paths(tag: &str) -> Paths {
     }
 }
 
+static PHONE_RELAY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct PhoneRelayEnv {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl PhoneRelayEnv {
+    fn set(value: Option<&str>) -> Self {
+        let lock = PHONE_RELAY_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("TEMPO_ALERT_RELAY_URL");
+        if let Some(value) = value {
+            std::env::set_var("TEMPO_ALERT_RELAY_URL", value);
+        } else {
+            std::env::remove_var("TEMPO_ALERT_RELAY_URL");
+        }
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for PhoneRelayEnv {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.take() {
+            std::env::set_var("TEMPO_ALERT_RELAY_URL", value);
+        } else {
+            std::env::remove_var("TEMPO_ALERT_RELAY_URL");
+        }
+    }
+}
+
 pub fn open_node(paths: &Paths, key: [u8; 32]) -> Result<Arc<Node>, String> {
     let node = Node::open(paths, key)?;
     MINE.with(|m| {
@@ -2055,6 +2088,237 @@ fn s155_zero_filled_fleet_recovers_from_last_good() {
 }
 
 #[test]
+fn s164_zero_filled_fleet_is_copied_before_last_good_restore() {
+    let p = paths("s164-zero-filled-fleet-recovery");
+    store::update(&p, |fleet| fleet.me = "demo-main".into()).unwrap();
+    let last_good = std::fs::read(p.file("fleet.json.last-good")).unwrap();
+    let rejected = vec![0u8; 128];
+    std::fs::write(p.file("fleet.json"), &rejected).unwrap();
+
+    assert_eq!(store::load_checked(&p).unwrap().me, "demo-main");
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), last_good);
+    let backups: Vec<_> = std::fs::read_dir(&p.home)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("fleet.json.rejected-") && name.ends_with('Z')
+        })
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), rejected);
+}
+
+#[test]
+fn s164_non_json_fleet_is_copied_before_last_good_restore() {
+    let p = paths("s164-non-json-fleet-recovery");
+    store::update(&p, |fleet| fleet.me = "demo-main".into()).unwrap();
+    let last_good = std::fs::read(p.file("fleet.json.last-good")).unwrap();
+    let rejected = b"{ this is not JSON";
+    std::fs::write(p.file("fleet.json"), rejected).unwrap();
+
+    assert_eq!(store::load_checked(&p).unwrap().me, "demo-main");
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), last_good);
+    let backups: Vec<_> = std::fs::read_dir(&p.home)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("fleet.json.rejected-") && name.ends_with('Z')
+        })
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), rejected);
+}
+
+#[test]
+fn s164_non_utf8_fleet_is_copied_before_last_good_restore() {
+    let p = paths("s164-non-utf8-fleet-recovery");
+    store::update(&p, |fleet| fleet.me = "demo-main".into()).unwrap();
+    let last_good = std::fs::read(p.file("fleet.json.last-good")).unwrap();
+    let rejected = [0xff, 0xfe, 0x80];
+    std::fs::write(p.file("fleet.json"), rejected).unwrap();
+
+    assert_eq!(store::load_checked(&p).unwrap().me, "demo-main");
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), last_good);
+    let backup = std::fs::read_dir(&p.home)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("fleet.json.rejected-")
+        })
+        .unwrap();
+    assert_eq!(std::fs::read(backup.path()).unwrap(), rejected);
+}
+
+#[test]
+fn s164_valid_json_that_fails_validation_is_left_in_place() {
+    let p = paths("s164-valid-json-rejection");
+    store::update(&p, |fleet| fleet.me = "demo-main".into()).unwrap();
+    let last_good = std::fs::read(p.file("fleet.json.last-good")).unwrap();
+    let rejected = br#"{"version":1,"self":"demo-main","machines":[],"owner_field":true}"#;
+    std::fs::write(p.file("fleet.json"), rejected).unwrap();
+
+    let error = store::load_checked(&p).unwrap_err();
+    assert!(
+        error.contains("valid JSON") && error.contains("left unchanged"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), rejected);
+    assert_eq!(
+        std::fs::read(p.file("fleet.json.last-good")).unwrap(),
+        last_good
+    );
+}
+
+#[test]
+fn s164_valid_json_with_bad_address_is_left_in_place() {
+    let p = paths("s164-valid-json-bad-address");
+    store::update(&p, |fleet| fleet.me = "demo-main".into()).unwrap();
+    let rejected = br#"{"version":1,"self":"demo-main","machines":[{"name":"demo-peer","addr":"Tower.local","port":8770,"role":"worker"}]}"#;
+    std::fs::write(p.file("fleet.json"), rejected).unwrap();
+
+    let error = store::load_checked(&p).unwrap_err();
+    assert!(
+        error.contains("valid JSON") && error.contains("left unchanged"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), rejected);
+}
+
+#[test]
+fn s164_heartbeat_error_child() {
+    let Some(home) = std::env::var_os("S164_HEARTBEAT_ERROR_HOME") else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    let p = Paths {
+        agent_data: home.join("agent"),
+        home,
+    };
+    store::update(&p, |fleet| fleet.me = "demo-main".into()).unwrap();
+    let node = Node::open(&p, KEY).unwrap();
+    std::fs::write(
+        p.file("fleet.json"),
+        br#"{"version":1,"self":"demo-main","machines":[],"owner_field":true}"#,
+    )
+    .unwrap();
+    serve::on_heartbeat(&node, "demo-peer", b"{}");
+}
+
+#[test]
+fn s164_heartbeat_store_error_is_logged() {
+    let p = paths("s164-heartbeat-store-error");
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fleet::tests::s164_heartbeat_error_child",
+            "--nocapture",
+        ])
+        .env("S164_HEARTBEAT_ERROR_HOME", &p.home)
+        .output()
+        .unwrap();
+    assert!(child.status.success());
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        stderr.contains("heartbeat") && stderr.contains("fleet.json"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn s164_peer_alert_waits_one_heartbeat_window_after_start() {
+    let p = paths("s164-peer-startup-grace");
+    store::update(&p, |fleet| {
+        let mut peer = Machine::new("worker", "10.0.0.8", "worker");
+        peer.last_seen = store::now_s().saturating_sub(601);
+        peer.joined_at = peer.last_seen.saturating_sub(1);
+        fleet.machines.push(peer);
+    })
+    .unwrap();
+
+    let first_ms = store::now_ms();
+    let mut monitor = serve::SilenceMonitor::default();
+    serve::monitor_silence(&p, &mut monitor, first_ms);
+    assert!(!p.file("logs").join(serve::SILENCE_LOG).exists());
+    serve::monitor_silence(
+        &p,
+        &mut monitor,
+        first_ms + serve::HEARTBEAT.as_millis() as u64,
+    );
+    let log = std::fs::read_to_string(p.file("logs").join(serve::SILENCE_LOG)).unwrap();
+    assert!(log.contains("Worker hasn't checked in for 10 minutes."));
+}
+
+#[test]
+fn s164_legacy_peer_without_timestamps_does_not_alert() {
+    let p = paths("s164-legacy-peer-no-times");
+    store::update(&p, |fleet| {
+        let mut peer = Machine::new("legacy", "10.0.0.8", "worker");
+        peer.last_seen = 0;
+        peer.joined_at = 0;
+        fleet.machines.push(peer);
+    })
+    .unwrap();
+
+    assert!(serve::silence_status(&p)
+        .iter()
+        .all(|message| !message.contains("Legacy")));
+    let mut monitor = serve::SilenceMonitor::default();
+    serve::monitor_silence(&p, &mut monitor, store::now_ms());
+    let log = std::fs::read_to_string(p.file("logs").join(serve::SILENCE_LOG)).unwrap_or_default();
+    assert!(!log.contains("Legacy"));
+}
+
+#[test]
+fn s164_phone_alert_is_not_queued_without_a_relay() {
+    let _relay = PhoneRelayEnv::set(None);
+    let p = paths("s164-no-phone-relay");
+    assert!(!relay::queue_alert(&p, "Worker is quiet."));
+    assert!(!p.file("fleet-alerts.json").exists());
+    assert_eq!(relay::pending_message(&p), None);
+}
+
+#[test]
+fn s164_queued_phone_alert_reports_missing_relay_in_status() {
+    let p = paths("s164-phone-alert-missing-relay");
+    {
+        let _relay = PhoneRelayEnv::set(Some("http://127.0.0.1:1/topic"));
+        assert!(relay::queue_alert(&p, "Worker is quiet."));
+    }
+    let _relay = PhoneRelayEnv::set(None);
+    assert_eq!(
+        relay::pending_message(&p).as_deref(),
+        Some("No phone relay configured.")
+    );
+    assert!(serve::silence_status(&p)
+        .iter()
+        .any(|message| message == "No phone relay configured."));
+}
+
+#[test]
+fn s164_full_phone_queue_drops_oldest_and_keeps_newest() {
+    let _relay = PhoneRelayEnv::set(Some("http://127.0.0.1:1/topic"));
+    let p = paths("s164-full-phone-queue");
+    for index in 0..32 {
+        assert!(relay::queue_alert(&p, &format!("Alert {index}.")));
+    }
+    assert!(relay::queue_alert(&p, "Alert 32."));
+    let queue = std::fs::read_to_string(p.file("fleet-alerts.json")).unwrap();
+    assert!(!queue.contains("Alert 0."));
+    assert!(queue.contains("Alert 1.") && queue.contains("Alert 32."));
+    assert_eq!(
+        relay::pending_message(&p).as_deref(),
+        Some("32 phone alerts are waiting to be sent.")
+    );
+}
+
+#[test]
 fn s155_status_reports_unknown_instead_of_a_silent_empty_fleet() {
     let p = paths("s155-status-unknown-fleet");
     std::fs::create_dir_all(&p.home).unwrap();
@@ -2219,13 +2483,20 @@ fn s155_quiet_silence_transition_is_written_to_the_alert_log() {
 
     // The quiet CLI path still calls this monitor; quiet only suppresses its startup banner.
     let mut monitor = serve::SilenceMonitor::default();
-    serve::monitor_silence(&p, &mut monitor, store::now_ms());
+    let first_ms = store::now_ms();
+    serve::monitor_silence(&p, &mut monitor, first_ms);
+    serve::monitor_silence(
+        &p,
+        &mut monitor,
+        first_ms + serve::HEARTBEAT.as_millis() as u64,
+    );
     let log = std::fs::read_to_string(p.file("logs").join(serve::SILENCE_LOG)).unwrap();
     assert!(log.contains("Worker hasn't checked in for 10 minutes."));
 }
 
 #[test]
 fn s155_phone_alerts_stay_queued_until_the_relay_accepts_them() {
+    let _relay = PhoneRelayEnv::set(Some("http://127.0.0.1:1/topic"));
     let p = paths("s155-phone-alert-outbox");
     assert!(relay::queue_alert(
         &p,

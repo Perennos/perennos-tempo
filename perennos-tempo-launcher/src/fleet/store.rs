@@ -339,20 +339,27 @@ fn load_checked_locked(p: &Paths) -> Result<Fleet, String> {
     let backup = p.file("fleet.json.last-good");
     let current = read_fleet_bytes(&path)?;
     if let Some(bytes) = current.as_deref() {
-        if let Ok(fleet) = parse_fleet_bytes(bytes) {
-            if let Err(error) = ensure_last_good(&backup, bytes) {
-                eprintln!(
-                    "The fleet is readable, but its recovery copy could not be refreshed: {error}"
-                );
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if let Ok(json) = parse_registry_text(text) {
+                let fleet = validate_registry(&json).map_err(|error| {
+                    format!(
+                        "fleet.json contains valid JSON that fails validation; the file was left unchanged and fleet status is unknown. {error}"
+                    )
+                })?;
+                if let Err(error) = ensure_last_good(&backup, bytes) {
+                    eprintln!(
+                        "The fleet is readable, but its recovery copy could not be refreshed: {error}"
+                    );
+                }
+                return Ok(fleet);
             }
-            return Ok(fleet);
         }
     }
     let last_good = match read_fleet_bytes(&backup) {
         Ok(Some(bytes)) => bytes,
         Ok(None) if current.is_none() => return Ok(empty_fleet()),
         Ok(None) => {
-            return Err("fleet.json is unreadable and no working recovery copy is available; the file was left unchanged".into())
+            return Err("fleet.json is unreadable and no working recovery copy is available; the file was left unchanged, so this computer's status is unknown".into())
         }
         Err(error) => {
             return Err(format!("fleet.json could not be read and its recovery copy is unavailable: {error}"))
@@ -360,6 +367,9 @@ fn load_checked_locked(p: &Paths) -> Result<Fleet, String> {
     };
     let fleet = parse_fleet_bytes(&last_good)
         .map_err(|_| "fleet.json is unreadable and its recovery copy is not valid; both files were left unchanged".to_string())?;
+    if let Some(rejected) = current.as_deref() {
+        archive_rejected_fleet(&path, rejected)?;
+    }
     apply_json_atomic(
         &path,
         current.as_deref(),
@@ -370,6 +380,46 @@ fn load_checked_locked(p: &Paths) -> Result<Fleet, String> {
     .map_err(|e| format!("fleet.json could not be restored from its last saved copy: {e}"))?;
     eprintln!("fleet.json could not be read, so the last saved copy was restored.");
     Ok(fleet)
+}
+
+fn archive_rejected_fleet(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "fleet.json has no parent folder for its rejected copy".to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("could not timestamp the rejected fleet.json copy: {error}"))?
+        .as_millis();
+    for collision in 0..100u8 {
+        let name = format!("fleet.json.rejected-{stamp:020}-{collision:02}Z");
+        let destination = parent.join(&name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&destination) {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| {
+                        format!("could not preserve rejected fleet.json as {name}: {error}")
+                    })?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not preserve rejected fleet.json as {name}: {error}"
+                ))
+            }
+        }
+    }
+    Err("could not preserve rejected fleet.json because its UTC archive name collided".into())
 }
 
 fn empty_fleet() -> Fleet {

@@ -145,7 +145,7 @@ pub fn on_heartbeat(node: &Node, from: &str, body: &[u8]) {
     let Some(j) = std::str::from_utf8(body).ok().and_then(|t| parse(t).ok()) else {
         return;
     };
-    let _ = store::update(&node.paths, |f| {
+    if let Err(error) = store::update(&node.paths, |f| {
         if let Some(m) = f.machines.iter_mut().find(|m| m.name == from) {
             m.last_seen = now_s();
             // the offer rides on every sixth heartbeat: between those the last one stands
@@ -160,7 +160,9 @@ pub fn on_heartbeat(node: &Node, from: &str, body: &[u8]) {
             }
             m.health = h;
         }
-    });
+    }) {
+        eprintln!("fleet: heartbeat update failed: {error}");
+    }
 }
 
 fn machine_signal_ms(machine: &Machine) -> Option<u64> {
@@ -199,6 +201,9 @@ struct SilenceObservation {
 }
 
 fn peer_observation(machine: &Machine, now_ms: u64) -> SilenceObservation {
+    if machine.last_seen == 0 && machine.joined_at == 0 {
+        return healthy_observation();
+    }
     let signal_ms = machine_signal_ms(machine);
     match transition(now_ms, signal_ms, SILENCE_ALARM_MS, false) {
         Transition::Healthy | Transition::Recovered => SilenceObservation {
@@ -254,10 +259,7 @@ pub fn silence_status(paths: &Paths) -> Vec<String> {
             }
             (alerts, messenger_expected)
         }
-        Err(_) => (
-            vec!["The fleet setup can't be read, so this computer's status is unknown.".into()],
-            false,
-        ),
+        Err(error) => (vec![error], false),
     };
     if let Some(message) = messenger_observation_at(paths, now_ms, messenger_expected)
         .0
@@ -301,6 +303,7 @@ impl MessengerHealth {
 #[derive(Default)]
 pub(super) struct SilenceMonitor {
     peers: HashMap<String, SilenceLevel>,
+    peer_alerts_since_ms: Option<u64>,
     messenger: Option<SilenceLevel>,
     missing_messenger_since_ms: Option<u64>,
     fleet_unknown: bool,
@@ -629,6 +632,9 @@ fn log_silence_change(paths: &Paths, message: &str) {
 }
 
 pub(super) fn monitor_silence(paths: &Paths, state: &mut SilenceMonitor, now_ms: u64) {
+    let peer_alerts_since_ms = *state.peer_alerts_since_ms.get_or_insert(now_ms);
+    let peer_alerts_ready =
+        now_ms.saturating_sub(peer_alerts_since_ms) >= HEARTBEAT.as_millis() as u64;
     let fleet = match store::load_checked(paths) {
         Ok(fleet) => {
             if state.fleet_unknown {
@@ -660,6 +666,14 @@ pub(super) fn monitor_silence(paths: &Paths, state: &mut SilenceMonitor, now_ms:
             .get(&machine.name)
             .copied()
             .unwrap_or(SilenceLevel::Healthy);
+        if !peer_alerts_ready
+            && matches!(
+                observation.level,
+                SilenceLevel::Alert | SilenceLevel::Unknown
+            )
+        {
+            continue;
+        }
         if observation.level == previous {
             continue;
         }
@@ -1355,6 +1369,11 @@ pub fn run(p: &Paths, quiet: bool, announce: bool) -> i32 {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    #[test]
+    fn s164_silence_alarm_stays_at_ten_minutes() {
+        assert_eq!(SILENCE_ALARM_MS, 10 * 60 * 1000);
+    }
 
     #[test]
     fn rust_alarm_uses_the_same_golden_traces_as_dead_air() {

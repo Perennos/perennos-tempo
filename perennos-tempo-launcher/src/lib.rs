@@ -588,10 +588,36 @@ fn write_validated_atomic(
     if std::env::var("S155_ABORT_AFTER_JSON_STAGE").as_deref() == Ok("1") {
         std::process::abort();
     }
-    fs::rename(&temp_path, path)?;
+    atomic_rename(&temp_path, path)?;
     sync_parent(path)?;
     cleanup.0 = None;
     Ok(())
+}
+
+fn atomic_rename(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        retry_access_denied(|| fs::rename(from, to))
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn retry_access_denied(rename: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let mut rename = rename;
+    let mut attempts = 0;
+    loop {
+        match rename() {
+            Err(error) if error.raw_os_error() == Some(5) && attempts < 2 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn validate_replace_path(path: &Path) -> io::Result<()> {
@@ -3562,6 +3588,39 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn s164_atomic_rename_retries_access_denied_briefly() {
+        let mut attempts = 0;
+        retry_access_denied(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from_raw_os_error(5))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+
+        attempts = 0;
+        let error = retry_access_denied(|| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(5))
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+        assert_eq!(attempts, 3);
+
+        attempts = 0;
+        let error = retry_access_denied(|| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(13))
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(13));
+        assert_eq!(attempts, 1);
     }
 
     fn tmp(tag: &str) -> PathBuf {

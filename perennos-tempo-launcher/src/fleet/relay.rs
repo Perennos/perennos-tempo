@@ -16,6 +16,10 @@ const MAX_MESSAGE_BYTES: usize = 1024;
 const MAX_ATTEMPTS: u64 = 1_000_000;
 const ALERT_RELAY_ENV: &str = "TEMPO_ALERT_RELAY_URL";
 
+fn relay_configured() -> bool {
+    std::env::var(ALERT_RELAY_ENV).is_ok_and(|url| !url.trim().is_empty())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingAlert {
     id: String,
@@ -360,10 +364,7 @@ fn enqueue(paths: &Paths, message: &str) -> io::Result<()> {
     let _lock = FileLock::acquire(&paths.file(LOCK_FILE), Duration::from_secs(5))?;
     let (mut alerts, previous) = read_queue(&path)?;
     if alerts.len() >= MAX_QUEUE {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            "phone alert queue is full",
-        ));
+        alerts.remove(0);
     }
     alerts.push(PendingAlert {
         id: super::crypto::hex(&super::crypto::random(16)),
@@ -398,6 +399,9 @@ fn remove_delivered(paths: &Paths, id: &str) -> io::Result<()> {
 }
 
 pub(super) fn queue_alert(paths: &Paths, message: &str) -> bool {
+    if !relay_configured() {
+        return false;
+    }
     match enqueue(paths, message) {
         Ok(()) => true,
         Err(_) => {
@@ -436,12 +440,14 @@ pub(super) fn next_retry_delay(paths: &Paths, now: u64) -> Option<Duration> {
 }
 
 pub(super) fn pending_message(paths: &Paths) -> Option<String> {
+    let relay_configured = relay_configured();
     let path = paths.file(QUEUE_FILE);
     match read_queue_bytes(&path).and_then(|bytes| match bytes {
         Some(bytes) => parse_queue(&bytes),
         None => Ok(Vec::new()),
     }) {
         Ok(alerts) if alerts.is_empty() => None,
+        Ok(_) if !relay_configured => Some("No phone relay configured.".into()),
         Ok(alerts) if alerts.len() == 1 => Some("One phone alert is waiting to be sent.".into()),
         Ok(alerts) => Some(format!(
             "{} phone alerts are waiting to be sent.",
