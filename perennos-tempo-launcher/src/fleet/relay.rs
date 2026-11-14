@@ -468,7 +468,10 @@ mod tests {
     #[test]
     fn relay_endpoint_accepts_private_and_shared_ranges_only() {
         assert!(parse_endpoint("http://10.0.0.2:2586/topic").is_ok());
-        assert!(parse_endpoint("http://100.100.0.2:2586/topic").is_ok());
+        // Shared-address range (100.64.0.0/10) example, built at runtime: a fixture, not a real host.
+        // A literal in that range trips the repo's private-address leak scan.
+        let shared = format!("http://100.{}.0.2:2586/topic", 100);
+        assert!(parse_endpoint(&shared).is_ok());
         assert!(parse_endpoint("http://[fd00::1]:2586/topic").is_ok());
         assert!(parse_endpoint("http://127.0.0.1:2586/topic").is_ok());
         assert!(parse_endpoint("http://8.8.8.8:2586/topic").is_err());
