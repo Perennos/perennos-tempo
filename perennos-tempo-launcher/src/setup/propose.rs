@@ -8,6 +8,7 @@ use super::json::{parse, J};
 use crate::{apply_json_atomic, file_stamp, parse_remote_url, stamp, write_atomic, Ctx, FileLock};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where an AI's proposal waits, inside the Tempo home.
 pub const PROPOSAL_FILE: &str = "proposed-settings.json";
@@ -167,22 +168,37 @@ pub fn proposal_waiting(ctx: &Ctx) -> bool {
 }
 
 /// Copy a file into `<home>/trash/<date>/` (under its own name), so nothing is lost.
-fn keep_old(home: &Path, path: &Path, text: &str, now: u64) -> Result<PathBuf, String> {
-    let fs = file_stamp(now);
-    let dir = home.join("trash").join(&fs[..8]);
+static SETTINGS_BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn keep_old(home: &Path, path: &Path, text: &str, now: u64) -> Result<PathBuf, String> {
+    let stamp = file_stamp(now);
+    let dir = home.join("trash").join(&stamp[..8]);
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the trash folder: {e}"))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config.json".into());
-    let mut dest = dir.join(&name);
-    if dest.exists() {
-        let stem = name.strip_suffix(".json").unwrap_or(&name);
-        dest = dir.join(format!("{stem}-{}.json", &fs[9..]));
+    let stem = name.strip_suffix(".json").unwrap_or(&name);
+    for attempt in 0..64 {
+        let dest = if attempt == 0 {
+            dir.join(&name)
+        } else {
+            let sequence = SETTINGS_BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            dir.join(format!(
+                "{stem}-{stamp}-{}-{sequence}.json",
+                std::process::id()
+            ))
+        };
+        if dest.exists() {
+            continue;
+        }
+        match apply_json_atomic(&dest, None, text.as_bytes(), None, validate_settings_bytes) {
+            Ok(()) => return Ok(dest),
+            Err(_) if dest.exists() => continue,
+            Err(error) => return Err(format!("could not save the old settings: {error}")),
+        }
     }
-    apply_json_atomic(&dest, None, text.as_bytes(), None, validate_settings_bytes)
-        .map_err(|e| format!("could not save the old settings: {e}"))?;
-    Ok(dest)
+    Err("could not reserve a unique settings backup name".into())
 }
 
 /// The settings file as an object (empty when there is none), and its text.

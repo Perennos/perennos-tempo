@@ -373,14 +373,15 @@ fn load_checked_locked(p: &Paths) -> Result<Fleet, String> {
 }
 
 fn empty_fleet() -> Fleet {
-    let mut fleet = Fleet::default();
-    fleet.me = hostname();
-    fleet
+    Fleet {
+        me: hostname(),
+        ..Fleet::default()
+    }
 }
 
 fn read_fleet_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     use std::io::Read;
-    let meta = match std::fs::symlink_metadata(&path) {
+    let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {

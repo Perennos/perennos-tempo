@@ -485,29 +485,7 @@ pub fn merge_config(
     cfg.set("configured_at", J::s(&stamp(now)));
     cfg.set("configured_values", J::Obj(written));
     if let Some(t) = &old_text {
-        let fs = file_stamp(now);
-        let dir = home.join("trash").join(&fs[..8]);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("could not make the trash folder: {e}"))?;
-        // the backup keeps the file's own name: config.json, or the older agent-config.json
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "config.json".into());
-        let mut dest = dir.join(&name);
-        if dest.exists() {
-            let stem = name.strip_suffix(".json").unwrap_or(&name);
-            dest = dir.join(format!("{stem}-{}.json", &fs[9..]));
-        }
-        apply_json_atomic(
-            &dest,
-            None,
-            t.as_bytes(),
-            None,
-            super::propose::validate_settings_bytes,
-        )
-        .map_err(|e| format!("could not save the old settings: {e}"))?;
-        w.trashed = Some(dest);
+        w.trashed = Some(super::propose::keep_old(home, &path, t, now)?);
     }
     apply_json_atomic(
         &path,
@@ -1852,6 +1830,26 @@ mod tests {
             "{ not json"
         );
         assert!(!home.join("trash").exists());
+    }
+
+    #[test]
+    fn same_second_settings_changes_keep_distinct_recoverable_backups() {
+        let root = tmp("same-second-backups");
+        let (home, data) = (root.join("home"), root.join("home/agent"));
+        let now = 1_793_000_000;
+
+        merge_config(&home, &data, &vals("before"), now).unwrap();
+        merge_config(&home, &data, &vals("middle"), now).unwrap();
+        merge_config(&home, &data, &vals("after"), now).unwrap();
+
+        let day = file_stamp(now);
+        let backups: Vec<_> = std::fs::read_dir(home.join("trash").join(&day[..8]))
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(backups.len(), 2, "every prior version remains recoverable");
+        assert!(backups.iter().any(|text| text.contains("before")));
+        assert!(backups.iter().any(|text| text.contains("middle")));
     }
 
     #[test]
