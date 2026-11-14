@@ -209,6 +209,8 @@ pub(crate) fn load_settings(path: &Path) -> Result<(J, Option<String>), String> 
                     ));
                 }
             }
+            #[cfg(not(windows))]
+            let _ = meta;
             Some(read_settings_text(path)?)
         }
     };

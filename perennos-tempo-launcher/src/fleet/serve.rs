@@ -1418,10 +1418,10 @@ mod completion_tests {
     #[test]
     fn messenger_detects_a_stale_work_loop_at_ten_minutes() {
         let health = messenger(100, 100, 1, Some(100));
-        let (level, message) = messenger_observation(&health, 700_000);
-        assert_eq!(level, MessengerLevel::Alert);
+        let observation = messenger_observation(&health, 700_000);
+        assert_eq!(observation.level, SilenceLevel::Alert);
         assert_eq!(
-            message.as_deref(),
+            observation.message.as_deref(),
             Some("The fleet messenger hasn't checked in for 10 minutes. Last seen 00:01 UTC.")
         );
     }
@@ -1429,17 +1429,17 @@ mod completion_tests {
     #[test]
     fn messenger_detects_fresh_loop_with_stale_delivery() {
         let health = messenger(100, 700, 2, None);
-        let (level, message) = messenger_observation(&health, 700_000);
-        assert_eq!(level, MessengerLevel::Alert);
-        assert_eq!(message.as_deref(), Some("The fleet messenger is running but hasn't reached a peer for 10 minutes. I'm retrying; nothing for you to do yet."));
+        let observation = messenger_observation(&health, 700_000);
+        assert_eq!(observation.level, SilenceLevel::Alert);
+        assert_eq!(observation.message.as_deref(), Some("The fleet messenger is running but hasn't reached a peer for 10 minutes. I'm retrying; nothing for you to do yet."));
     }
 
     #[test]
     fn messenger_does_not_warn_without_enabled_peers() {
         let health = messenger(100, 700, 0, None);
         assert_eq!(
-            messenger_observation(&health, 700_000).0,
-            MessengerLevel::Healthy
+            messenger_observation(&health, 700_000).level,
+            SilenceLevel::Healthy
         );
     }
 
@@ -1447,8 +1447,8 @@ mod completion_tests {
     fn future_messenger_and_peer_timestamps_are_unknown() {
         let health = messenger(101, 101, 1, Some(101));
         assert_eq!(
-            messenger_observation(&health, 100_000).0,
-            MessengerLevel::Unknown
+            messenger_observation(&health, 100_000).level,
+            SilenceLevel::Unknown
         );
         let mut machine = Machine::new("worker", "10.0.0.8", "worker");
         machine.last_seen = 101;

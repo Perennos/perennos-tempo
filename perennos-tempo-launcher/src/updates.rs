@@ -244,6 +244,7 @@ fn validate_cache_bytes(bytes: &[u8]) -> io::Result<()> {
         || !match json.str("error") {
             Some(ERR_FETCH | ERR_RELEASE | ERR_OLDER) => true,
             None => matches!(json.get("error"), Some(J::Null)),
+            Some(_) => false,
         }
     {
         return Err(io::Error::new(
@@ -506,7 +507,9 @@ pub fn schedule_auto_check(ctx: &crate::Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
 
     struct FakeFetch {
         answer: Fetched,

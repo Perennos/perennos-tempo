@@ -3557,6 +3557,7 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::json::J;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn s(v: &[&str]) -> Vec<String> {
