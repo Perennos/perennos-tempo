@@ -5,9 +5,9 @@
 
 use crate::setup::json::{parse, J};
 use crate::setup::propose::{self, engine_url};
-use crate::{allowed_remote_host, write_atomic, Ctx};
+use crate::{allowed_remote_host, apply_json_atomic, Ctx, FileLock};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const FLEET_PORT: u16 = 8770;
 
@@ -101,6 +101,8 @@ pub struct Machine {
     pub role: String,
     pub enabled: bool,
     pub last_seen: u64,
+    /// When the owner added this computer; old entries without it stay unknown until first seen.
+    pub joined_at: u64,
     /// What the last scan or probe found.
     pub probe: J,
     /// What its last heartbeat said.
@@ -122,6 +124,7 @@ impl Machine {
             role: role.into(),
             enabled: true,
             last_seen: 0,
+            joined_at: now_s(),
             probe: J::Null,
             health: J::Null,
             ssh: J::Null,
@@ -146,6 +149,7 @@ impl Machine {
             ("role".into(), J::s(&self.role)),
             ("enabled".into(), J::Bool(self.enabled)),
             ("last_seen".into(), J::n(self.last_seen as f64)),
+            ("joined_at".into(), J::n(self.joined_at as f64)),
         ];
         if !self.id.is_empty() {
             o.push(("id".into(), J::s(&self.id)));
@@ -177,6 +181,7 @@ impl Machine {
             role: j.str("role").unwrap_or("engine").to_string(),
             enabled: j.bool("enabled").unwrap_or(true),
             last_seen: j.f64("last_seen").unwrap_or(0.0) as u64,
+            joined_at: j.f64("joined_at").unwrap_or(0.0) as u64,
             probe: get("probe"),
             health: get("health"),
             ssh: get("ssh"),
@@ -264,52 +269,36 @@ impl Fleet {
 }
 
 pub fn load(p: &Paths) -> Fleet {
-    let mut f = std::fs::read_to_string(p.file("fleet.json"))
-        .ok()
-        .and_then(|t| parse(&t).ok())
-        .map(|j| Fleet::from_j(&j))
-        .unwrap_or_default();
+    let mut f = match load_checked(p) {
+        Ok(fleet) => fleet,
+        Err(error) => {
+            eprintln!("fleet.json could not be read. {error}");
+            Fleet::default()
+        }
+    };
     if f.me.is_empty() {
         f.me = hostname();
     }
     f
 }
 
-/// Read, change and write fleet.json while holding its lock. A lock older than ten seconds is
-/// taken over (its owner died).
+/// Read, change and write fleet.json while holding the OS lock. An orphaned lock file is reusable.
 pub fn update<T>(p: &Paths, f: impl FnOnce(&mut Fleet) -> T) -> Result<T, String> {
-    let lock = p.file("fleet.json.lock");
-    let _ = std::fs::create_dir_all(&p.home);
-    let start = Instant::now();
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(_) => break,
-            Err(_) => {
-                let stale = std::fs::metadata(&lock)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|a| a > Duration::from_secs(10));
-                if stale {
-                    let _ = std::fs::remove_file(&lock);
-                } else if start.elapsed() > Duration::from_secs(5) {
-                    return Err("fleet.json is busy; try again".into());
-                } else {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            }
-        }
-    }
-    let mut fleet = load(p);
+    let _lock = FileLock::acquire(&p.file("fleet.json.lock"), Duration::from_secs(5))
+        .map_err(|e| format!("could not lock fleet.json: {e}"))?;
+    let mut fleet = load_checked_locked(p)?;
+    let path = p.file("fleet.json");
+    let previous = read_fleet_bytes(&path)?;
     let out = f(&mut fleet);
-    let r = write_atomic(&p.file("fleet.json"), fleet.to_j().pretty().as_bytes())
-        .map_err(|e| format!("could not write fleet.json: {e}"));
-    let _ = std::fs::remove_file(&lock);
-    r.map(|()| out)
+    apply_json_atomic(
+        &path,
+        previous.as_deref(),
+        fleet.to_j().pretty().as_bytes(),
+        Some(&p.file("fleet.json.last-good")),
+        validate_fleet_bytes,
+    )
+    .map_err(|e| format!("could not write fleet.json: {e}"))?;
+    Ok(out)
 }
 
 /// Enrollment-only update: validate and edit while holding the existing registry lock.
@@ -317,65 +306,212 @@ pub fn update_checked<T>(
     p: &Paths,
     f: impl FnOnce(&mut Fleet) -> Result<T, String>,
 ) -> Result<T, String> {
-    let lock = p.file("fleet.json.lock");
-    std::fs::create_dir_all(&p.home).map_err(|e| format!("could not open fleet home: {e}"))?;
-    let start = Instant::now();
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(_) => break,
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
-                return Err(format!("could not lock fleet.json: {e}"))
-            }
-            Err(_) if start.elapsed() > Duration::from_secs(5) => {
-                return Err("fleet.json is busy; try again".into())
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(5)),
-        }
-    }
-    let result = (|| {
-        let mut fleet = load_checked(p)?;
-        let out = f(&mut fleet)?;
-        write_atomic(&p.file("fleet.json"), fleet.to_j().pretty().as_bytes())
-            .map_err(|e| format!("could not write fleet.json: {e}"))?;
-        Ok(out)
-    })();
-    let _ = std::fs::remove_file(&lock);
-    result
+    let _lock = FileLock::acquire(&p.file("fleet.json.lock"), Duration::from_secs(5))
+        .map_err(|e| format!("could not lock fleet.json: {e}"))?;
+    let mut fleet = load_checked_locked(p)?;
+    let path = p.file("fleet.json");
+    let previous = read_fleet_bytes(&path)?;
+    let out = f(&mut fleet)?;
+    apply_json_atomic(
+        &path,
+        previous.as_deref(),
+        fleet.to_j().pretty().as_bytes(),
+        Some(&p.file("fleet.json.last-good")),
+        validate_fleet_bytes,
+    )
+    .map_err(|e| format!("could not write fleet.json: {e}"))?;
+    Ok(out)
 }
 
 pub fn load_checked(p: &Paths) -> Result<Fleet, String> {
-    use std::io::Read;
+    if read_fleet_bytes(&p.file("fleet.json"))?.is_none()
+        && read_fleet_bytes(&p.file("fleet.json.last-good"))?.is_none()
+    {
+        return Ok(empty_fleet());
+    }
+    let _lock = FileLock::acquire(&p.file("fleet.json.lock"), Duration::from_secs(5))
+        .map_err(|e| format!("could not lock fleet.json: {e}"))?;
+    load_checked_locked(p)
+}
+
+fn load_checked_locked(p: &Paths) -> Result<Fleet, String> {
     let path = p.file("fleet.json");
-    let meta = match std::fs::symlink_metadata(&path) {
+    let backup = p.file("fleet.json.last-good");
+    let current = read_fleet_bytes(&path)?;
+    if let Some(bytes) = current.as_deref() {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if let Ok(json) = parse_registry_text(text) {
+                let fleet = validate_registry(&json).map_err(|error| {
+                    format!(
+                        "fleet.json contains valid JSON that fails validation; the file was left unchanged and fleet status is unknown. {error}"
+                    )
+                })?;
+                if let Err(error) = ensure_last_good(&backup, bytes) {
+                    eprintln!(
+                        "The fleet is readable, but its recovery copy could not be refreshed: {error}"
+                    );
+                }
+                return Ok(fleet);
+            }
+        }
+    }
+    let last_good = match read_fleet_bytes(&backup) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) if current.is_none() => return Ok(empty_fleet()),
+        Ok(None) => {
+            return Err("fleet.json is unreadable and no working recovery copy is available; the file was left unchanged, so this computer's status is unknown".into())
+        }
+        Err(error) => {
+            return Err(format!("fleet.json could not be read and its recovery copy is unavailable: {error}"))
+        }
+    };
+    let fleet = parse_fleet_bytes(&last_good)
+        .map_err(|_| "fleet.json is unreadable and its recovery copy is not valid; both files were left unchanged".to_string())?;
+    if let Some(rejected) = current.as_deref() {
+        archive_rejected_fleet(&path, rejected)?;
+    }
+    apply_json_atomic(
+        &path,
+        current.as_deref(),
+        &last_good,
+        None,
+        validate_fleet_bytes,
+    )
+    .map_err(|e| format!("fleet.json could not be restored from its last saved copy: {e}"))?;
+    eprintln!("fleet.json could not be read, so the last saved copy was restored.");
+    Ok(fleet)
+}
+
+fn archive_rejected_fleet(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "fleet.json has no parent folder for its rejected copy".to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("could not timestamp the rejected fleet.json copy: {error}"))?
+        .as_millis();
+    for collision in 0..100u8 {
+        let name = format!("fleet.json.rejected-{stamp:020}-{collision:02}Z");
+        let destination = parent.join(&name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&destination) {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| {
+                        format!("could not preserve rejected fleet.json as {name}: {error}")
+                    })?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not preserve rejected fleet.json as {name}: {error}"
+                ))
+            }
+        }
+    }
+    Err("could not preserve rejected fleet.json because its UTC archive name collided".into())
+}
+
+fn empty_fleet() -> Fleet {
+    Fleet {
+        me: hostname(),
+        ..Fleet::default()
+    }
+}
+
+fn read_fleet_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read;
+    let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(load(p)),
-        Err(e) => return Err(format!("could not inspect fleet.json: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "could not inspect {}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ))
+        }
     };
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 1024 * 1024 {
-        return Err("fleet.json is not a bounded regular file; it was kept unchanged".into());
+        return Err(format!(
+            "{} is not a bounded regular file; it was kept unchanged",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         if meta.file_attributes() & 0x400 != 0 {
-            return Err("fleet.json is a reparse point; it was kept unchanged".into());
+            return Err(format!(
+                "{} is a reparse point; it was kept unchanged",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
         }
     }
-    let mut text = String::new();
-    std::fs::File::open(&path)
-        .map_err(|e| format!("could not read fleet.json: {e}"))?
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| {
+            format!(
+                "could not read {}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })?
         .take(1024 * 1024 + 1)
-        .read_to_string(&mut text)
-        .map_err(|e| format!("could not read fleet.json: {e}"))?;
-    if text.len() > 1024 * 1024 {
-        return Err("fleet.json exceeded its read limit; it was kept unchanged".into());
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            format!(
+                "could not read {}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(format!(
+            "{} exceeded its read limit; it was kept unchanged",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
     }
-    let json = parse_registry_text(&text)?;
+    Ok(Some(bytes))
+}
+
+fn parse_fleet_bytes(bytes: &[u8]) -> Result<Fleet, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "fleet.json is not UTF-8; it was kept unchanged".to_string())?;
+    let json = parse_registry_text(text)?;
     validate_registry(&json)
+}
+
+fn validate_fleet_bytes(bytes: &[u8]) -> std::io::Result<()> {
+    parse_fleet_bytes(bytes)
+        .map(|_| ())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn ensure_last_good(path: &Path, current: &[u8]) -> Result<(), String> {
+    if read_fleet_bytes(path)
+        .ok()
+        .flatten()
+        .is_some_and(|bytes| validate_fleet_bytes(&bytes).is_ok())
+    {
+        return Ok(());
+    }
+    let previous = read_fleet_bytes(path)?;
+    apply_json_atomic(
+        path,
+        previous.as_deref(),
+        current,
+        None,
+        validate_fleet_bytes,
+    )
+    .map_err(|e| format!("could not save the fleet recovery copy: {e}"))
 }
 
 /// Reject malformed string escapes that the legacy general-purpose parser accepts lossily.
@@ -548,6 +684,7 @@ pub fn validate_registry(json: &J) -> Result<Fleet, String> {
         "role",
         "enabled",
         "last_seen",
+        "joined_at",
         "id",
         "probe",
         "health",
@@ -555,7 +692,6 @@ pub fn validate_registry(json: &J) -> Result<Fleet, String> {
         "tools",
     ];
     let mut names = std::collections::HashSet::new();
-    let mut addresses = std::collections::HashSet::new();
     for item in json.arr("machines") {
         let Some(member) = Machine::from_j(item) else {
             return Err("fleet.json has an invalid member; it was kept unchanged".into());
@@ -565,7 +701,6 @@ pub fn validate_registry(json: &J) -> Result<Fleet, String> {
             || (!member.id.is_empty()
                 && (member.id.len() != 64 || !member.id.bytes().all(|b| b.is_ascii_hexdigit())))
             || !names.insert(member.name.to_ascii_lowercase())
-            || !addresses.insert(member.addr.to_ascii_lowercase())
             || item
                 .get("enabled")
                 .is_some_and(|v| !matches!(v, J::Bool(_)))
@@ -576,9 +711,12 @@ pub fn validate_registry(json: &J) -> Result<Fleet, String> {
                 item.f64("port")
                     .is_none_or(|n| !(1.0..=65535.0).contains(&n) || n.fract() != 0.0)
             })
-            || item.get("last_seen").is_some_and(|_| {
-                item.f64("last_seen")
-                    .is_none_or(|n| !(0.0..=9007199254740991.0).contains(&n) || n.fract() != 0.0)
+            || ["last_seen", "joined_at"].iter().any(|key| {
+                item.get(key).is_some_and(|_| {
+                    item.f64(key).is_none_or(|n| {
+                        !(0.0..=9007199254740991.0).contains(&n) || n.fract() != 0.0
+                    })
+                })
             })
         {
             return Err(
