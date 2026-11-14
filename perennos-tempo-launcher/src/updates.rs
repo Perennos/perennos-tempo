@@ -2,18 +2,16 @@
 
 use crate::setup::json::{self, J};
 use crate::setup::registry::{Fetch, Fetched};
-use crate::{unix_now, write_atomic};
-use std::fs::{self, OpenOptions};
+use crate::{apply_json_atomic, unix_now, FileLock};
+use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::Path;
 
 pub const API_URL: &str = "https://api.github.com/repos/Perennos/perennos-tempo/releases/latest";
 pub const RELEASES_URL: &str = "https://github.com/Perennos/perennos-tempo/releases/tag/";
 pub const CACHE_FILE: &str = "updates.json";
 const LOCK_FILE: &str = "updates.lock";
 const TTL_S: u64 = 24 * 60 * 60;
-const LOCK_STALE_S: u64 = 60;
 const ERR_FETCH: &str = "The release check could not reach GitHub.";
 const ERR_RELEASE: &str = "GitHub did not return an official stable release.";
 const ERR_OLDER: &str = "GitHub returned a release older than the one already known.";
@@ -137,30 +135,123 @@ impl Cache {
 }
 
 pub fn read_cache(home: &Path) -> Cache {
-    let path = home.join(CACHE_FILE);
-    let Ok(meta) = fs::metadata(&path) else {
-        return Cache::default();
-    };
-    if meta.len() > 16 * 1024 {
-        return Cache {
+    read_cache_checked(home)
+        .map(|(cache, _)| cache)
+        .unwrap_or_else(|_| Cache {
             error: Some(ERR_CACHE.into()),
             ..Cache::default()
-        };
-    }
-    let parsed = fs::read_to_string(path)
-        .ok()
-        .and_then(|s| json::parse(&s).ok());
-    match parsed {
-        Some(j) => Cache::from_json(&j),
-        None => Cache {
-            error: Some(ERR_CACHE.into()),
-            ..Cache::default()
-        },
-    }
+        })
 }
 
 fn save_cache(home: &Path, cache: &Cache) -> io::Result<()> {
-    write_atomic(&home.join(CACHE_FILE), cache.json().pretty().as_bytes())
+    let path = home.join(CACHE_FILE);
+    let previous = read_cache_bytes(&path)?;
+    if let Some(bytes) = previous.as_deref() {
+        validate_cache_bytes(bytes)?;
+    }
+    save_cache_expected(&path, cache, previous.as_deref())
+}
+
+fn save_cache_expected(path: &Path, cache: &Cache, expected: Option<&[u8]>) -> io::Result<()> {
+    apply_json_atomic(
+        path,
+        expected,
+        cache.json().pretty().as_bytes(),
+        None,
+        validate_cache_bytes,
+    )
+}
+
+fn read_cache_checked(home: &Path) -> Result<(Cache, Option<Vec<u8>>), String> {
+    let path = home.join(CACHE_FILE);
+    let bytes = read_cache_bytes(&path).map_err(|e| format!("{ERR_CACHE} {e}"))?;
+    match bytes.as_deref() {
+        Some(bytes) => {
+            validate_cache_bytes(bytes).map_err(|e| format!("{ERR_CACHE} {e}"))?;
+            let text = std::str::from_utf8(bytes).map_err(|e| format!("{ERR_CACHE} {e}"))?;
+            let json = json::parse(text).map_err(|e| format!("{ERR_CACHE} {e}"))?;
+            Ok((Cache::from_json(&json), Some(bytes.to_vec())))
+        }
+        None => Ok((Cache::default(), None)),
+    }
+}
+
+fn read_cache_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cache is not a bounded regular file",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cache is a reparse point",
+            ));
+        }
+    }
+    let bytes = fs::read(path)?;
+    if bytes.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cache exceeded its read limit",
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+fn validate_cache_bytes(bytes: &[u8]) -> io::Result<()> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let json =
+        json::parse(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let J::Obj(fields) = &json else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cache must be an object",
+        ));
+    };
+    let mut keys = std::collections::HashSet::new();
+    if fields.iter().any(|(key, _)| !keys.insert(key.as_str()))
+        || fields.len() != 4
+        || ["enabled", "checked_at", "latest", "error"]
+            .iter()
+            .any(|key| json.get(key).is_none())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cache fields are incomplete or duplicated",
+        ));
+    }
+    if !matches!(json.get("enabled"), Some(J::Bool(_)))
+        || !match json.get("checked_at") {
+            Some(J::Null) => true,
+            Some(J::Num(value)) => value.parse::<u64>().is_ok(),
+            _ => false,
+        }
+        || !match json.str("latest") {
+            Some(tag) => Version::parse(tag).is_some_and(|v| v.tag() == tag),
+            None => matches!(json.get("latest"), Some(J::Null)),
+        }
+        || !match json.str("error") {
+            Some(ERR_FETCH | ERR_RELEASE | ERR_OLDER) => true,
+            None => matches!(json.get("error"), Some(J::Null)),
+        }
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cache fields have invalid types or values",
+        ));
+    }
+    Ok(())
 }
 
 fn official_release(body: &str, floor: Option<Version>) -> Result<Version, &'static str> {
@@ -179,44 +270,6 @@ fn official_release(body: &str, floor: Option<Version>) -> Result<Version, &'sta
     Ok(version)
 }
 
-struct Lock(PathBuf);
-
-impl Lock {
-    fn acquire(home: &Path, now: u64) -> io::Result<Option<Self>> {
-        fs::create_dir_all(home)?;
-        let path = home.join(LOCK_FILE);
-        for attempt in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(Some(Self(path))),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let stale = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|at| SystemTime::now().duration_since(at).ok())
-                        .is_some_and(|age| age >= Duration::from_secs(LOCK_STALE_S));
-                    if attempt == 0 && stale {
-                        let moved =
-                            home.join(format!("updates.lock.stale.{}.{now}", std::process::id()));
-                        if fs::rename(&path, &moved).is_ok() {
-                            let _ = fs::remove_file(moved);
-                            continue;
-                        }
-                    }
-                    return Ok(None);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(None)
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
 /// Check once under an exclusive cache lock. A failed check keeps the last known release.
 pub fn check_with(
     home: &Path,
@@ -224,10 +277,10 @@ pub fn check_with(
     now: u64,
     automatic: bool,
 ) -> Result<Cache, String> {
-    let _lock = Lock::acquire(home, now)
+    let _lock = FileLock::try_acquire(&home.join(LOCK_FILE))
         .map_err(|e| format!("could not lock the update cache: {e}"))?
         .ok_or_else(|| "an update check is already running".to_string())?;
-    let mut cache = read_cache(home);
+    let (mut cache, previous) = read_cache_checked(home)?;
     if automatic && (!cache.enabled || !cache.due(now)) {
         return Ok(cache);
     }
@@ -242,17 +295,19 @@ pub fn check_with(
         },
         Fetched::Failed | Fetched::NotFound => cache.error = Some(ERR_FETCH.into()),
     }
-    save_cache(home, &cache).map_err(|e| format!("could not save update status: {e}"))?;
+    save_cache_expected(&home.join(CACHE_FILE), &cache, previous.as_deref())
+        .map_err(|e| format!("could not save update status: {e}"))?;
     Ok(cache)
 }
 
 pub fn set_enabled(home: &Path, enabled: bool) -> Result<Cache, String> {
-    let _lock = Lock::acquire(home, unix_now())
+    let _lock = FileLock::try_acquire(&home.join(LOCK_FILE))
         .map_err(|e| format!("could not lock the update cache: {e}"))?
         .ok_or_else(|| "an update check is already running".to_string())?;
-    let mut cache = read_cache(home);
+    let (mut cache, previous) = read_cache_checked(home)?;
     cache.enabled = enabled;
-    save_cache(home, &cache).map_err(|e| format!("could not save update settings: {e}"))?;
+    save_cache_expected(&home.join(CACHE_FILE), &cache, previous.as_deref())
+        .map_err(|e| format!("could not save update settings: {e}"))?;
     Ok(cache)
 }
 
@@ -642,12 +697,38 @@ mod tests {
                 == Some(10)
         );
         assert_eq!(fetch.calls.load(Ordering::SeqCst), 0);
-        let lock = Lock::acquire(&home, 20).unwrap().unwrap();
+        let lock = crate::FileLock::try_acquire(&home.join(LOCK_FILE))
+            .unwrap()
+            .unwrap();
         assert!(check_with(&home, &fetch, 10 + TTL_S, true).is_err());
         drop(lock);
         cache = check_with(&home, &fetch, 10 + TTL_S, true).unwrap();
         assert_eq!(cache.latest, Version::parse("v2.2.0"));
         assert_eq!(fetch.calls.load(Ordering::SeqCst), 1);
+        assert!(home.join(LOCK_FILE).is_file());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn corrupt_update_cache_is_preserved_instead_of_replaced() {
+        let home = home();
+        let bad = b"{\"enabled\":true,\"enabled\":false}";
+        fs::write(home.join(CACHE_FILE), bad).unwrap();
+        let fetch = FakeFetch::new(Fetched::Failed);
+        assert!(check_with(&home, &fetch, 99, false).is_err());
+        assert_eq!(fs::read(home.join(CACHE_FILE)).unwrap(), bad);
+        assert_eq!(fetch.calls.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn orphaned_update_lock_file_does_not_block_a_new_writer() {
+        let home = home();
+        let lock = home.join(LOCK_FILE);
+        fs::write(&lock, b"left by an exited process").unwrap();
+        let fetch = FakeFetch::new(Fetched::Body(release("v2.2.0", None, false, false)));
+        assert!(check_with(&home, &fetch, 99, false).is_ok());
+        assert_eq!(fs::read(&lock).unwrap(), b"left by an exited process");
         fs::remove_dir_all(home).unwrap();
     }
 }

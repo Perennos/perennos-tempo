@@ -2010,7 +2010,7 @@ fn checked_enrollment_update_preserves_malformed_duplicate_and_unfamiliar_regist
             std::fs::read_to_string(p.file("fleet.json")).unwrap(),
             bytes
         );
-        assert!(!p.file("fleet.json.lock").exists());
+        assert!(p.file("fleet.json.lock").exists());
     }
     let valid = "{ \"self\":\"main\", \"machines\":[], \"allow\":[] }";
     std::fs::write(p.file("fleet.json"), valid).unwrap();
@@ -2028,6 +2028,236 @@ fn checked_enrollment_update_preserves_malformed_duplicate_and_unfamiliar_regist
     })
     .unwrap();
     assert_eq!(store::load_checked(&p).unwrap().machines.len(), 1);
+}
+
+#[test]
+fn s155_zero_filled_fleet_recovers_from_last_good() {
+    let p = paths("s155-zero-fill-recovery");
+    store::update(&p, |fleet| {
+        fleet.me = "demo-main".into();
+        fleet
+            .machines
+            .push(Machine::new("demo-peer", "10.0.0.8", "worker"));
+    })
+    .unwrap();
+    assert_eq!(
+        std::fs::read(p.file("fleet.json")).unwrap(),
+        std::fs::read(p.file("fleet.json.last-good")).unwrap()
+    );
+    store::load_checked(&p).unwrap();
+    let last_good = std::fs::read(p.file("fleet.json.last-good")).unwrap();
+    std::fs::write(p.file("fleet.json"), [0u8; 128]).unwrap();
+
+    let recovered = store::load_checked(&p).unwrap();
+    assert_eq!(recovered.me, "demo-main");
+    assert_eq!(recovered.machines[0].name, "demo-peer");
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), last_good);
+}
+
+#[test]
+fn s155_status_reports_unknown_instead_of_a_silent_empty_fleet() {
+    let p = paths("s155-status-unknown-fleet");
+    std::fs::create_dir_all(&p.home).unwrap();
+    let torn = [0u8; 64];
+    std::fs::write(p.file("fleet.json"), torn).unwrap();
+
+    let alerts = serve::silence_status(&p);
+    assert!(alerts
+        .iter()
+        .any(|message| message.contains("this computer's status is unknown")));
+    assert_eq!(std::fs::read(p.file("fleet.json")).unwrap(), torn);
+}
+
+#[test]
+fn s155_status_reports_malformed_messenger_checkin_as_unknown() {
+    let p = paths("s155-status-unknown-messenger");
+    std::fs::create_dir_all(&p.home).unwrap();
+    std::fs::write(p.file("fleet-messenger.json"), [0u8; 64]).unwrap();
+
+    let alerts = serve::silence_status(&p);
+    assert!(alerts
+        .iter()
+        .any(|message| message.contains("health is unknown")));
+}
+
+#[test]
+fn s155_missing_messenger_checkin_is_unknown_when_peers_are_enabled() {
+    let p = paths("s155-missing-messenger-checkin");
+    store::update(&p, |fleet| {
+        let now = store::now_s();
+        let mut peer = Machine::new("worker", "10.0.0.8", "worker");
+        peer.last_seen = now;
+        peer.joined_at = now;
+        fleet.machines.push(peer);
+    })
+    .unwrap();
+
+    assert!(serve::silence_status(&p)
+        .iter()
+        .any(|message| message.contains("messenger hasn't checked in yet")));
+}
+
+#[test]
+fn s155_live_monitor_waits_one_heartbeat_interval_before_alerting_missing_messenger() {
+    let p = paths("s155-missing-messenger-grace");
+    store::update(&p, |fleet| {
+        let now = store::now_s();
+        let mut peer = Machine::new("worker", "10.0.0.8", "worker");
+        peer.last_seen = now;
+        peer.joined_at = now;
+        fleet.machines.push(peer);
+    })
+    .unwrap();
+
+    let mut monitor = serve::SilenceMonitor::default();
+    let first_seen = store::now_ms();
+    serve::monitor_silence(&p, &mut monitor, first_seen);
+    assert!(!p.file("logs").join(serve::SILENCE_LOG).exists());
+
+    serve::monitor_silence(
+        &p,
+        &mut monitor,
+        first_seen + serve::HEARTBEAT.as_millis() as u64,
+    );
+    let log = std::fs::read_to_string(p.file("logs").join(serve::SILENCE_LOG)).unwrap();
+    assert!(log.contains("The fleet messenger hasn't checked in yet"));
+}
+
+#[test]
+fn s155_missing_messenger_checkin_is_quiet_without_enabled_peers() {
+    let p = paths("s155-no-peer-messenger-checkin");
+    store::update(&p, |_| {}).unwrap();
+
+    assert!(serve::silence_status(&p).is_empty());
+}
+
+#[test]
+fn s155_atomic_writer_child() {
+    if std::env::var("S155_ABORT_AFTER_JSON_STAGE").as_deref() != Ok("1") {
+        return;
+    }
+    let home = PathBuf::from(std::env::var_os("S155_TEST_HOME").expect("test home"));
+    let p = Paths {
+        agent_data: home.join("agent"),
+        home,
+    };
+    store::update(&p, |fleet| fleet.me = "must-not-appear".into()).unwrap();
+    panic!("the staged-write crash hook should terminate the child first");
+}
+
+#[test]
+fn s155_crash_before_atomic_rename_leaves_last_good_recoverable() {
+    let p = paths("s155-crash-recovery");
+    store::update(&p, |fleet| fleet.me = "before-crash".into()).unwrap();
+    store::load_checked(&p).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let child = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "fleet::tests::s155_atomic_writer_child",
+            "--nocapture",
+        ])
+        .env("S155_ABORT_AFTER_JSON_STAGE", "1")
+        .env("S155_TEST_HOME", &p.home)
+        .output()
+        .unwrap();
+    assert!(!child.status.success(), "child did not crash after staging");
+    assert_eq!(store::load_checked(&p).unwrap().me, "before-crash");
+
+    std::fs::write(p.file("fleet.json"), [0u8; 128]).unwrap();
+    assert_eq!(store::load_checked(&p).unwrap().me, "before-crash");
+    assert_eq!(
+        std::fs::read(p.file("fleet.json")).unwrap(),
+        std::fs::read(p.file("fleet.json.last-good")).unwrap()
+    );
+}
+
+#[test]
+fn s155_orphaned_lock_file_is_reusable_and_writers_serialize() {
+    let p = paths("s155-orphaned-lock");
+    std::fs::create_dir_all(&p.home).unwrap();
+    let lock_path = p.file("fleet.json.lock");
+    std::fs::write(&lock_path, b"left by a process that exited").unwrap();
+
+    let left = p.clone();
+    let right = p.clone();
+    let a = std::thread::spawn(move || {
+        store::update(&left, |fleet| {
+            fleet
+                .machines
+                .push(Machine::new("left", "10.0.0.2", "worker"));
+        })
+    });
+    let b = std::thread::spawn(move || {
+        store::update(&right, |fleet| {
+            fleet
+                .machines
+                .push(Machine::new("right", "10.0.0.3", "worker"));
+        })
+    });
+    a.join().unwrap().unwrap();
+    b.join().unwrap().unwrap();
+
+    let fleet = store::load_checked(&p).unwrap();
+    assert_eq!(fleet.machines.len(), 2);
+    assert!(fleet.machines.iter().any(|m| m.name == "left"));
+    assert!(fleet.machines.iter().any(|m| m.name == "right"));
+    assert_eq!(
+        std::fs::read(&lock_path).unwrap(),
+        b"left by a process that exited"
+    );
+}
+
+#[test]
+fn s155_quiet_silence_transition_is_written_to_the_alert_log() {
+    let p = paths("s155-quiet-alert-log");
+    let now = store::now_s();
+    let mut peer = Machine::new("worker", "10.0.0.8", "worker");
+    peer.last_seen = now.saturating_sub(601);
+    peer.joined_at = peer.last_seen.saturating_sub(1);
+    store::update(&p, |fleet| fleet.machines.push(peer)).unwrap();
+
+    // The quiet CLI path still calls this monitor; quiet only suppresses its startup banner.
+    let mut monitor = serve::SilenceMonitor::default();
+    serve::monitor_silence(&p, &mut monitor, store::now_ms());
+    let log = std::fs::read_to_string(p.file("logs").join(serve::SILENCE_LOG)).unwrap();
+    assert!(log.contains("Worker hasn't checked in for 10 minutes."));
+}
+
+#[test]
+fn s155_phone_alerts_stay_queued_until_the_relay_accepts_them() {
+    let p = paths("s155-phone-alert-outbox");
+    assert!(relay::queue_alert(
+        &p,
+        "Worker hasn't checked in. I'm retrying."
+    ));
+    assert_eq!(
+        relay::pending_message(&p).as_deref(),
+        Some("One phone alert is waiting to be sent.")
+    );
+    assert!(serve::silence_status(&p)
+        .iter()
+        .any(|message| message.contains("One phone alert is waiting to be sent")));
+    assert!(p.file("fleet-alerts.json").is_file());
+}
+
+#[test]
+#[ignore = "sends one test notification to the configured private phone relay"]
+fn s155_manual_phone_relay_delivery() {
+    assert!(
+        std::env::var("TEMPO_ALERT_RELAY_URL").is_ok(),
+        "configure the private test relay first"
+    );
+    let p = paths("s155-manual-phone-relay");
+    assert!(relay::queue_alert(
+        &p,
+        "S155 test alert. The phone relay is connected to this test fleet."
+    ));
+    relay::send_pending_once(&p);
+    assert!(
+        relay::pending_message(&p).is_none(),
+        "the relay did not accept the test alert"
+    );
 }
 
 #[test]
@@ -2081,5 +2311,5 @@ fn checked_enrollment_update_does_not_replace_an_unreadable_registry() {
         std::fs::read_to_string(p.file("fleet.json")).unwrap(),
         bytes
     );
-    assert!(!p.file("fleet.json.lock").exists());
+    assert!(p.file("fleet.json.lock").exists());
 }

@@ -8,7 +8,7 @@ use super::plan::{self, Goals, Pick, Plan, Prefer, Status};
 use super::probe::{self, Host, Machine};
 use super::registry;
 use super::runtime::{self, RuntimePlan};
-use crate::{file_stamp, json_escape, stamp, write_atomic, Ctx};
+use crate::{apply_json_atomic, file_stamp, json_escape, stamp, write_atomic, Ctx, FileLock};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -448,19 +448,12 @@ pub fn merge_config(
     now: u64,
 ) -> Result<Written, String> {
     let path = agent_settings_path(agent_data);
-    let old_text = std::fs::read_to_string(&path).ok();
-    let mut cfg = match &old_text {
-        Some(t) => match parse(t) {
-            Ok(j @ J::Obj(_)) => j,
-            _ => {
-                return Err(format!(
-                    "{} is not a JSON object, so setup left it alone. Fix or move it, then run setup again.",
-                    path.display()
-                ))
-            }
-        },
-        None => J::Obj(Vec::new()),
-    };
+    let _lock = FileLock::acquire(
+        &super::propose::settings_lock_path(&path),
+        Duration::from_secs(5),
+    )
+    .map_err(|e| format!("could not lock {}: {e}", path.display()))?;
+    let (mut cfg, old_text) = super::propose::load_settings(&path)?;
     let snapshot = cfg.get("configured_values").cloned();
     let mut w = Written {
         path: path.clone(),
@@ -506,11 +499,24 @@ pub fn merge_config(
             let stem = name.strip_suffix(".json").unwrap_or(&name);
             dest = dir.join(format!("{stem}-{}.json", &fs[9..]));
         }
-        std::fs::write(&dest, t).map_err(|e| format!("could not save the old settings: {e}"))?;
+        apply_json_atomic(
+            &dest,
+            None,
+            t.as_bytes(),
+            None,
+            super::propose::validate_settings_bytes,
+        )
+        .map_err(|e| format!("could not save the old settings: {e}"))?;
         w.trashed = Some(dest);
     }
-    write_atomic(&path, cfg.pretty().as_bytes())
-        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    apply_json_atomic(
+        &path,
+        old_text.as_deref().map(str::as_bytes),
+        cfg.pretty().as_bytes(),
+        None,
+        super::propose::validate_settings_bytes,
+    )
+    .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     w.changed = true;
     Ok(w)
 }

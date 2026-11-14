@@ -7,10 +7,11 @@
 
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod bank;
@@ -415,6 +416,227 @@ fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
         std::process::id()
     ));
     fs::write(&tmp, data).and_then(|()| fs::rename(&tmp, path))
+}
+
+static APPLY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// An OS lock survives process crashes without treating an old lock file as proof of a live owner.
+pub(crate) struct FileLock {
+    _file: File,
+}
+
+impl FileLock {
+    pub(crate) fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::symlink_metadata(path) {
+            Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "lock path is not a regular file",
+                ));
+            }
+            #[cfg(windows)]
+            Ok(meta) => {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & 0x400 != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "lock path is a reparse point",
+                    ));
+                }
+            }
+            #[cfg(not(windows))]
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    pub(crate) fn acquire(path: &Path, timeout: Duration) -> io::Result<Self> {
+        let start = Instant::now();
+        loop {
+            if let Some(lock) = Self::try_acquire(path)? {
+                return Ok(lock);
+            }
+            if start.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "state file is busy; try again",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Validate, bind to the bytes just read, durably stage, revalidate, then atomically replace JSON.
+pub(crate) fn apply_json_atomic(
+    path: &Path,
+    expected_previous: Option<&[u8]>,
+    next: &[u8],
+    last_good: Option<&Path>,
+    validate: impl Fn(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    validate(next)?;
+    validate_replace_path(path)?;
+    let previous = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if previous.as_deref() != expected_previous {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "state changed before the update could be applied",
+        ));
+    }
+    if let (Some(backup), Some(bytes)) = (last_good, previous.as_deref()) {
+        validate(bytes)?;
+        write_validated_atomic(backup, bytes, &validate)?;
+    }
+    write_validated_atomic(path, next, &validate)?;
+    if previous.is_none() {
+        if let Some(backup) = last_good {
+            if let Err(error) = write_validated_atomic(backup, next, &validate) {
+                eprintln!(
+                    "The state file was saved, but its recovery copy could not be initialized: {error}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_validated_atomic(
+    path: &Path,
+    bytes: &[u8],
+    validate: &impl Fn(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    validate_replace_path(path)?;
+    let prior_permissions = match fs::symlink_metadata(path) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("state"))
+        .to_string_lossy();
+    let (temp_path, mut file) = (0..64)
+        .find_map(|_| {
+            let sequence = APPLY_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temp =
+                path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => Some(Ok((temp, file))),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not reserve a temp file",
+            )
+        })?;
+    let mut cleanup = TempApplyFile(Some(temp_path.clone()));
+    if let Some(permissions) = prior_permissions {
+        file.set_permissions(permissions)?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut staged = Vec::with_capacity(bytes.len());
+    file.read_to_end(&mut staged)?;
+    if staged != bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged state did not match the requested update",
+        ));
+    }
+    validate(&staged)?;
+    #[cfg(test)]
+    if std::env::var("S155_ABORT_AFTER_JSON_STAGE").as_deref() == Ok("1") {
+        std::process::abort();
+    }
+    fs::rename(&temp_path, path)?;
+    sync_parent(path)?;
+    cleanup.0 = None;
+    Ok(())
+}
+
+fn validate_replace_path(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "state path is not a regular file",
+        )),
+        #[cfg(windows)]
+        Ok(meta) => {
+            use std::os::windows::fs::MetadataExt;
+            if meta.file_attributes() & 0x400 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "state path is a reparse point",
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+struct TempApplyFile(Option<PathBuf>);
+
+impl Drop for TempApplyFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -2791,6 +3013,9 @@ pub fn status_with(ctx: &Ctx, json: bool, ollama_port: u16) -> String {
     }
     for w in &warnings {
         out.push_str(&format!("  {w}\n"));
+    }
+    for alert in fleet::serve::silence_status(&fleet::store::Paths::of(ctx)) {
+        out.push_str(&format!("  fleet alert  {alert}\n"));
     }
     out.push_str(&format!("  vault folder  {}\n", ctx.vault.display()));
     out.push_str(&format!("  logs          {}", ctx.logs_dir().display()));
@@ -5363,5 +5588,49 @@ mod tests {
         );
         // nothing to start without a record
         assert_eq!(ensure_owned_ollama(&ctx, port, false).unwrap(), None);
+    }
+
+    #[test]
+    fn status_shows_peer_silence_in_plain_text_without_changing_json_shape() {
+        let root = tmp("fleet-silence-status");
+        let ctx = ctx_in(&root);
+        let paths = fleet::store::Paths::of(&ctx);
+        let now = fleet::store::now_s();
+        fleet::store::update(&paths, |fleet| {
+            let mut machine = fleet::store::Machine::new("worker", "10.0.0.8", "worker");
+            machine.last_seen = now - 12 * 60;
+            machine.joined_at = machine.last_seen;
+            fleet.machines.push(machine);
+        })
+        .unwrap();
+        fs::write(
+            ctx.home.join("fleet-messenger.json"),
+            J::Obj(vec![
+                ("pid".into(), J::n(42.0)),
+                ("started_at".into(), J::n((now - 24 * 60) as f64)),
+                ("last_loop".into(), J::n((now - 12 * 60) as f64)),
+                ("loop_interval_s".into(), J::n(10.0)),
+                ("peer_count".into(), J::n(0.0)),
+                ("last_delivery_attempt".into(), J::Null),
+                ("last_delivery_ok".into(), J::Null),
+                ("last_delivery_error".into(), J::Null),
+            ])
+            .pretty(),
+        )
+        .unwrap();
+
+        let plain = status_with(&ctx, false, free_port());
+        assert!(
+            plain.contains("fleet alert  Worker hasn't checked in for 12 minutes."),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("The fleet messenger hasn't checked in for 12 minutes."),
+            "{plain}"
+        );
+        let json = status_with(&ctx, true, free_port());
+        assert!(json.contains("\"apps\":[") && json.contains("\"remote\":["));
+        assert!(!json.contains("fleet alert") && !json.contains("fleet_alerts"));
+        let _ = fs::remove_dir_all(root);
     }
 }

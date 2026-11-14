@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 getrandom = "0.2"
+perennos-dead-air-silence-core = { git = "https://github.com/Perennos/dead-air.git", rev = "889f215b7fe48b58ab722097519de4665bb2f696", features = ["trace-fixtures"] }
 # pairing with a short code (SPAKE2 over Ed25519), the key it makes protects what is sent (ChaCha20-Poly1305),
 # and each computer's identity signs its frames (Ed25519): RustCrypto, no more.
 spake2 = "0.4"
