@@ -435,75 +435,6 @@ impl Completion {
     }
 }
 
-#[cfg(test)]
-mod completion_tests {
-    use super::*;
-
-    struct OnDrop(std::sync::mpsc::Sender<()>);
-    impl Drop for OnDrop {
-        fn drop(&mut self) {
-            let _ = self.0.send(());
-        }
-    }
-
-    #[test]
-    fn completion_follows_capture_destruction() {
-        let tracker = Arc::new(Completion::default());
-        let (sent, received) = std::sync::mpsc::channel();
-        let guard = OnDrop(sent);
-        tracker.spawn(move || {
-            let _guard = guard;
-        });
-        tracker.wait(Duration::from_secs(2)).unwrap();
-        assert_eq!(received.try_recv(), Ok(()));
-    }
-
-    #[test]
-    fn blocked_worker_times_out_then_completes() {
-        let tracker = Arc::new(Completion::default());
-        let (started, ready) = std::sync::mpsc::channel();
-        let (release, blocked) = std::sync::mpsc::channel();
-        tracker.spawn(move || {
-            started.send(()).unwrap();
-            let _ = blocked.recv();
-        });
-        ready.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(
-            tracker.wait(Duration::from_millis(20)),
-            Err("server completion timed out")
-        );
-        release.send(()).unwrap();
-        tracker.wait(Duration::from_secs(2)).unwrap();
-    }
-
-    #[test]
-    fn panic_and_spawn_failure_are_reported() {
-        let panicked = Arc::new(Completion::default());
-        panicked.spawn(|| panic!("fixture panic"));
-        assert_eq!(
-            panicked.wait(Duration::from_secs(2)),
-            Err("server thread panicked")
-        );
-        let failed = Arc::new(Completion::default());
-        let (sent, dropped) = std::sync::mpsc::channel();
-        let guard = OnDrop(sent);
-        failed.spawn_with(
-            move || {
-                let _guard = guard;
-            },
-            |work| {
-                drop(work);
-                Err(std::io::Error::other("fixture spawn failure"))
-            },
-        );
-        assert_eq!(dropped.try_recv(), Ok(()));
-        assert_eq!(
-            failed.wait(Duration::ZERO),
-            Err("server thread spawn failed")
-        );
-    }
-}
-
 macro_rules! spawn_fleet {
     ($tracker:expr, $work:expr) => {{
         #[cfg(test)]
@@ -747,5 +678,74 @@ pub fn run(p: &Paths, quiet: bool) -> i32 {
     }
     loop {
         std::thread::park();
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    struct OnDrop(std::sync::mpsc::Sender<()>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn completion_follows_capture_destruction() {
+        let tracker = Arc::new(Completion::default());
+        let (sent, received) = std::sync::mpsc::channel();
+        let guard = OnDrop(sent);
+        tracker.spawn(move || {
+            let _guard = guard;
+        });
+        tracker.wait(Duration::from_secs(2)).unwrap();
+        assert_eq!(received.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn blocked_worker_times_out_then_completes() {
+        let tracker = Arc::new(Completion::default());
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        tracker.spawn(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            tracker.wait(Duration::from_millis(20)),
+            Err("server completion timed out")
+        );
+        release.send(()).unwrap();
+        tracker.wait(Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn panic_and_spawn_failure_are_reported() {
+        let panicked = Arc::new(Completion::default());
+        panicked.spawn(|| panic!("fixture panic"));
+        assert_eq!(
+            panicked.wait(Duration::from_secs(2)),
+            Err("server thread panicked")
+        );
+        let failed = Arc::new(Completion::default());
+        let (sent, dropped) = std::sync::mpsc::channel();
+        let guard = OnDrop(sent);
+        failed.spawn_with(
+            move || {
+                let _guard = guard;
+            },
+            |work| {
+                drop(work);
+                Err(std::io::Error::other("fixture spawn failure"))
+            },
+        );
+        assert_eq!(dropped.try_recv(), Ok(()));
+        assert_eq!(
+            failed.wait(Duration::ZERO),
+            Err("server thread spawn failed")
+        );
     }
 }

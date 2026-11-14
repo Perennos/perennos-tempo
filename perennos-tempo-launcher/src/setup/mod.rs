@@ -95,15 +95,11 @@ pub fn run_welcome(ctx: &Ctx, host: &dyn Host, port: u16) -> Result<PathBuf, Str
     Ok(page)
 }
 
-/// First start: when the agent has no settings yet, write the welcome page (and the plan page
-/// `setup.html`, unless the installer already wrote it) and open the welcome page once. Nothing is
-/// fetched. A marker file remembers that it was opened, so later starts do nothing.
+/// First start: when the agent has no settings yet, prepare the welcome and plan pages. The caller
+/// opens the existing Fleet workbench and records the marker only after its hidden child starts.
 pub fn first_start(ctx: &Ctx, host: &dyn Host, port: u16) -> Option<PathBuf> {
     let marker = ctx.home.join("setup.page-opened");
-    let has_config = ctx.agent_config_file().is_some()
-        || ctx.agent_data.join("agent-config.json").is_file()
-        || std::env::var_os("TEMPO_AGENT_CONFIG").is_some();
-    if has_config || marker.exists() {
+    if marker.exists() {
         return None;
     }
     let c = apply::compute(
@@ -119,7 +115,10 @@ pub fn first_start(ctx: &Ctx, host: &dyn Host, port: u16) -> Option<PathBuf> {
         write_page(ctx, &c.plan, &apply::Opts::default())?;
     }
     let page = write_welcome(ctx, &c.machine, &c.plan, &own_exe())?;
-    write_atomic(&marker, b"opened once\n").ok()?;
-    let _ = ctx.open(&page.to_string_lossy());
     Some(page)
+}
+
+pub fn mark_first_start_opened(ctx: &Ctx) -> Result<(), String> {
+    write_atomic(&ctx.home.join("setup.page-opened"), b"opened once\n")
+        .map_err(|e| format!("could not record first-run setup: {e}"))
 }

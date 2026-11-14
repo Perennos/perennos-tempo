@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod bank;
 pub mod brand;
+pub mod company;
 pub mod conductor;
 pub mod fleet;
 pub mod home;
@@ -2526,7 +2527,8 @@ fn start(ctx: &Ctx) -> i32 {
 
 fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
     // the first time, before any settings exist: the plan for this computer, as a page, once
-    if let Some(page) = setup::first_start(ctx, &setup::probe::RealHost, ollama_port) {
+    let first_run = setup::first_start(ctx, &setup::probe::RealHost, ollama_port);
+    if let Some(page) = first_run.as_ref() {
         ctx.note(&format!("setup: plan written to {}", page.display()));
     }
     // Tempo's own Ollama, when it has one and none answers, before the agent: the agent's models
@@ -2559,6 +2561,21 @@ fn start_at(ctx: &Ctx, ollama_port: u16) -> i32 {
         }
     }
     fleet::autostart(ctx);
+    #[cfg(not(test))]
+    if first_run.is_some() {
+        let mut child = Command::new(setup::own_exe());
+        child
+            .args(["fleet", "page"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match spawn_hidden(&mut child) {
+            Ok(_) => {
+                let _ = setup::mark_first_start_opened(ctx);
+            }
+            Err(e) => ctx.note(&format!("setup: first-run workbench could not start: {e}")),
+        }
+    }
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut failed = 0;
     for l in waiting {
@@ -4652,7 +4669,7 @@ mod tests {
     }
 
     #[test]
-    fn first_start_opens_the_welcome_page_once_and_fetches_nothing() {
+    fn first_start_prepares_welcome_once_and_fetches_nothing() {
         use setup::probe::tests::Fake;
         let root = tmp("firststart");
         let ctx = ctx_in(&root);
@@ -4697,15 +4714,13 @@ mod tests {
         ] {
             assert!(!html.contains(bad), "{bad}");
         }
-        // the plan page is there too, and the welcome page was the one opened
+        // The plan page is there; start() opens the hidden Fleet workbench later.
         let plan_html = fs::read_to_string(ctx.home.join("setup.html")).unwrap();
         assert!(plan_html.contains("USD 10 million") && plan_html.contains("--with-d1"));
         assert!(plan_html.contains("never downloaded"));
-        assert_eq!(ctx.opened.borrow().len(), 1);
-        assert!(ctx.opened.borrow()[0].ends_with("welcome.html"));
-        // the second start: nothing more
+        assert!(ctx.opened.borrow().is_empty());
+        assert!(setup::mark_first_start_opened(&ctx).is_ok());
         assert!(setup::first_start(&ctx, &host, 1).is_none());
-        assert_eq!(ctx.opened.borrow().len(), 1);
         // a plan page the installer wrote with `setup --page` is kept as it is
         let root3 = tmp("firststart3");
         let ctx3 = ctx_in(&root3);
@@ -4725,20 +4740,21 @@ mod tests {
         let written = fs::read_to_string(ctx3.home.join("setup.html")).unwrap();
         assert!(ctx3.opened.borrow().is_empty());
         assert!(setup::first_start(&ctx3, &host, 1).is_some());
-        assert_eq!(ctx3.opened.borrow().len(), 1);
+        assert!(ctx3.opened.borrow().is_empty());
         assert_eq!(
             fs::read_to_string(ctx3.home.join("setup.html")).unwrap(),
             written
         );
+        assert!(setup::mark_first_start_opened(&ctx3).is_ok());
         assert!(setup::first_start(&ctx3, &host, 1).is_none());
         let _ = fs::remove_dir_all(root3);
-        // with settings already there it never runs at all
+        // Existing model settings do not suppress the first-run company setup.
         let root2 = tmp("firststart2");
         let ctx2 = ctx_in(&root2);
         fs::create_dir_all(&ctx2.agent_data).unwrap();
         fs::write(ctx2.agent_data.join("config.json"), "{}").unwrap();
-        assert!(setup::first_start(&ctx2, &host, 1).is_none());
-        assert!(!ctx2.home.join("welcome.html").exists());
+        assert!(setup::first_start(&ctx2, &host, 1).is_some());
+        assert!(ctx2.home.join("welcome.html").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(root2);
     }

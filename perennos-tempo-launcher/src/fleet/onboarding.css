@@ -1,4 +1,4 @@
-/* Hallmark · existing Perennos tokens · inventory workbench · roman headings.
+/* Hallmark · macrostructure: 05 Workbench · genre: developer setup · theme: existing Perennos tokens · pre-emit critique: P5 H4 E4 S5 R4 V4
  * Pre-emit and rendered audit remain untested until native browser acceptance. */
 html, body { overflow-x: clip; }
 main { max-width: 1120px; }
@@ -46,3 +46,50 @@ button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-vis
   #review dd { margin-bottom: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+#company, #engine-inventory, #setup-settings { margin-block: 28px; padding-top: 18px; border-top: 1px solid var(--silver); }
+#org-members > li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(8rem, .8fr); gap: 8px; align-items: center; }
+#org-members .org-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#org-members .org-actions span { flex: 1 1 12ch; min-width: 0; overflow-wrap: anywhere; }
+#membership-counts { font-variant-numeric: tabular-nums; }
+#org-members input, #department-name, #cloud-provider, #cloud-node { min-width: 0; min-height: 44px; border: 1px solid var(--silver); border-radius: 4px; padding: 8px 10px; color: var(--ink); background: var(--bg); font: 400 14px/1.4 var(--sans); }
+#engine-candidates > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; align-items: start; }
+#engine-candidates > li ul { grid-column: 1 / -1; margin: 0; }
+#org-members button, #engine-candidates button { white-space: nowrap; }
+#cloud-notice { border-left: 2px solid var(--warm); padding-left: 12px; }
+#departments:empty::after { content: "No departments yet."; color: var(--silver); }
+html, body { overflow-x: clip; }
+@media (max-width: 480px) {
+  #org-members > li { grid-template-columns: minmax(0, 1fr); }
+  #org-members > li strong, #org-members > li input, #org-members .org-actions { grid-column: 1; min-width: 0; overflow-wrap: anywhere; }
+  #org-members .org-actions span { flex-basis: 100%; }
+  #engine-candidates > li { grid-template-columns: minmax(0, 1fr); }
+  #engine-candidates > li ul { grid-column: 1; }
+  #engine-inventory .actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+  #engine-inventory .actions input, #engine-inventory .actions select { width: 100%; }
+}
+@media (max-width: 320px) {
+  #org-members .org-actions { gap: 6px; }
+  #org-members .org-actions button { padding-inline: 10px; }
+}
+.tempo-tabs { display: flex; gap: 8px; padding: 16px 0 8px; border-bottom: 1px solid var(--line2); }
+.tempo-tabs button[aria-pressed="true"] { color: var(--on-warm); background: var(--warm); border-color: var(--warm); }
+#conductor-view { padding-top: 12px; }
+.conductor-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 20px 0 8px; }
+.conductor-head h1 { margin: 4px 0; }
+#conductor-map { display: block; width: 100%; height: 320px; border: 1px solid var(--line2); border-radius: 8px; background: radial-gradient(ellipse at center, var(--bg), var(--bg) 70%); }
+.conductor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+#standings, #floor-traffic { list-style-position: inside; }
+#standings li, #floor-traffic li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line2); padding: 12px 0; overflow-wrap: anywhere; }
+#conductor-company-mount { border-top: 2px solid var(--warm); margin-top: 12px; }
+#conductor-company-mount #company { border-top: 0; margin-top: 0; }
+#cloud-accounts { margin-block: 16px; }
+.cloud-account { display: grid !important; grid-template-columns: minmax(0, 1fr) auto; align-items: center !important; }
+.cloud-account .cloud-state { color: var(--silver); font-size: 14px; }
+.cloud-connect { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 16px; border: 1px solid var(--silver); border-radius: 4px; color: var(--ink); text-decoration: none; font: 600 14px/1.4 var(--sans); }
+.cloud-connect:hover { border-color: var(--warm); }
+@media (max-width: 640px) {
+  .conductor-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  #conductor-map { height: 260px; }
+  .cloud-account { grid-template-columns: minmax(0, 1fr); }
+}

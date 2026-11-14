@@ -347,12 +347,28 @@ pub fn write(
             runs: recent_runs(ctx, b),
         })
         .collect();
-    let html = render_with(
+    let profile = crate::company::ensure(&ctx.home)?;
+    let mut html = render_with(
         &views,
         engines,
         apps,
         &crate::fleet::page::section(&crate::fleet::store::Paths::of(ctx), true),
     );
+    let tour = crate::company::tour_markup(ctx, &profile);
+    html = html.replace(
+        "default-src 'none';",
+        "default-src 'none'; script-src 'self';",
+    );
+    html = html.replace(
+        "</body>",
+        &format!("{tour}<script src=\"conductor-welcome.js\" defer></script></body>"),
+    );
+    let script = file
+        .parent()
+        .unwrap_or(&ctx.home)
+        .join("conductor-welcome.js");
+    write_atomic(&script, include_bytes!("welcome.js"))
+        .map_err(|e| format!("could not write {}: {e}", script.display()))?;
     write_atomic(&file, html.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", file.display()))?;
     Ok(file)
