@@ -125,10 +125,22 @@ struct Job {
 /// The budget a send asks for: none (the turn is only stoppable), the config's defaults for
 /// `"budget": {}`, or those with any of `tokens`, `wall_s`, `tool_calls`, `cloud_cents` changed.
 fn clamp_fleet_budget(mut budget: crate::budget::Budget) -> crate::budget::Budget {
-    budget.tokens = if budget.tokens == 0 { 2048 } else { budget.tokens.min(2048) };
+    budget.tokens = if budget.tokens == 0 {
+        2048
+    } else {
+        budget.tokens.min(2048)
+    };
     let wall = Duration::from_secs(90);
-    budget.wall_time = if budget.wall_time.is_zero() { wall } else { budget.wall_time.min(wall) };
-    budget.tool_calls = if budget.tool_calls == 0 { 4 } else { budget.tool_calls.min(4) };
+    budget.wall_time = if budget.wall_time.is_zero() {
+        wall
+    } else {
+        budget.wall_time.min(wall)
+    };
+    budget.tool_calls = if budget.tool_calls == 0 {
+        4
+    } else {
+        budget.tool_calls.min(4)
+    };
     budget.cloud_cents = 0;
     budget
 }
@@ -177,7 +189,10 @@ mod fleet_job_policy_tests {
             Some("caller-band".to_string()),
             Some("caller-part".to_string()),
         );
-        assert_eq!(hints_for_mode(true, peer_hints.clone()), (None, None, None, None, None, None));
+        assert_eq!(
+            hints_for_mode(true, peer_hints.clone()),
+            (None, None, None, None, None, None)
+        );
         assert_eq!(hints_for_mode(false, peer_hints.clone()), peer_hints);
 
         let zero = clamp_fleet_budget(crate::budget::Budget::unlimited());
@@ -244,7 +259,10 @@ impl Shared {
             guest: saved["mode"] == "guest" || fleet_job,
             fleet_job,
             fleet_tool_calls: saved["fleet_tool_calls"].as_u64().unwrap_or(0) as usize,
-            fleet_tool_digest: saved["fleet_tool_digest"].as_str().unwrap_or("").to_string(),
+            fleet_tool_digest: saved["fleet_tool_digest"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             ..ConvLog::default()
         };
         for (n, ev) in saved["events"].as_array().into_iter().flatten().enumerate() {
@@ -888,7 +906,7 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
             // {"model": "<tag>", "role": "<text>", "engine": "<url>"}, all optional: a Room
             // teammate's model (tried first; the config's models stay as fallbacks), the role its
             // owner wrote for it and the engine to ask first (one of the configured ones)
-            let (guest, fleet_job) = match mode_of(&body) {
+            let (guest, fleet_job) = match mode_of(body) {
                 Ok(mode) => mode,
                 Err(e) => return refuse(&mut s, 400, e),
             };
@@ -972,7 +990,11 @@ fn route(sh: &Arc<Shared>, req: &Req, api: &str, body: &Value, mut s: TcpStream)
                 Ok(b) => b,
                 Err(e) => return refuse(&mut s, 400, e),
             };
-            let budget = if fleet_job { clamp_fleet_budget(budget) } else { budget };
+            let budget = if fleet_job {
+                clamp_fleet_budget(budget)
+            } else {
+                budget
+            };
             let meter = crate::budget::Meter::root(budget);
             let verdict = {
                 let mut st = lock(&sh.state);
@@ -1215,13 +1237,7 @@ fn hints_for_mode(fleet_job: bool, hints: ConvHints) -> ConvHints {
     }
 }
 
-fn new_conv(
-    sh: &Arc<Shared>,
-    guest: bool,
-    fleet_job: bool,
-    hints: ConvHints,
-    mut s: TcpStream,
-) {
+fn new_conv(sh: &Arc<Shared>, guest: bool, fleet_job: bool, hints: ConvHints, mut s: TcpStream) {
     let (model, role, engine, format, band, part) = hints_for_mode(fleet_job, hints);
     match Conv::open(&sh.cfg, None) {
         Ok(mut c) => {

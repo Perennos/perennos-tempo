@@ -102,12 +102,16 @@ fn valid_fleet_job_fetch_prefix(prefix: &str) -> bool {
         .strip_prefix("http://")
         .or_else(|| prefix.strip_prefix("https://"));
     let Some(rest) = rest else { return false };
-    let Some((host, path)) = rest.split_once('/') else { return false };
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
     let path = path.split('?').next().unwrap_or(path);
     !host.is_empty()
         && !host.contains('@')
         && (prefix.ends_with('/') || prefix.ends_with('?') || prefix.ends_with('='))
-        && !prefix.chars().any(|c| c.is_whitespace() || c == '#' || c == '\\')
+        && !prefix
+            .chars()
+            .any(|c| c.is_whitespace() || c == '#' || c == '\\')
         && !path.contains('%')
         && !path.split('/').any(|part| part == "." || part == "..")
 }
@@ -360,10 +364,10 @@ impl Config {
             && !url.contains('@')
             && !url.contains('#')
             && !url.contains('\\')
-            && self.fleet_job_fetch_prefixes.iter().any(|prefix| {
-                url.starts_with(prefix)
-                    && !path.contains('%')
-            })
+            && self
+                .fleet_job_fetch_prefixes
+                .iter()
+                .any(|prefix| url.starts_with(prefix) && !path.contains('%'))
     }
 
     pub fn from_json(v: &Value, data_dir_env: Option<String>) -> Result<Config, String> {
@@ -937,9 +941,13 @@ mod tests {
             Config::load(None, None, &blank).unwrap().ollama_url,
             "http://127.0.0.1:9"
         );
-        let none = |_: &str| None;
+        let isolated_data = crate::util::testutil::tmpdir("config-default");
+        let isolated = |key: &str| match key {
+            "TEMPO_AGENT_DATA" => Some(isolated_data.to_string_lossy().into_owned()),
+            _ => None,
+        };
         assert_eq!(
-            Config::load(None, None, &none).unwrap().ollama_url,
+            Config::load(None, None, &isolated).unwrap().ollama_url,
             "http://127.0.0.1:11434"
         );
     }

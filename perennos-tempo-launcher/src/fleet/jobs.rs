@@ -36,8 +36,6 @@ impl Runner for AgentRunner {
     }
 }
 
-use crate::conductor::Chat;
-
 pub struct JobHandler(pub Arc<dyn Runner>);
 
 impl Handler for JobHandler {
@@ -121,7 +119,9 @@ pub struct JobResult {
 }
 
 fn receipt_from(j: &J) -> Result<(usize, String), String> {
-    let calls = j.f64("tool_calls").ok_or("the fleet job returned no tool count")?;
+    let calls = j
+        .f64("tool_calls")
+        .ok_or("the fleet job returned no tool count")?;
     if !calls.is_finite() || calls < 0.0 || calls.fract() != 0.0 || calls > 4.0 {
         return Err("the fleet job returned an invalid tool count".into());
     }
@@ -162,25 +162,6 @@ pub fn wait(node: &Node, job: &str, limit: Duration) -> Result<String, String> {
         Ok(text)
     } else {
         Err(text)
-    }
-}
-
-#[cfg(test)]
-mod receipt_tests {
-    use super::*;
-
-    #[test]
-    fn fleet_job_success_requires_bounded_digest_receipt() {
-        let digest = "a".repeat(64);
-        let good = parse(&format!("{{\"tool_calls\":2,\"tool_digest\":\"{digest}\"}}")).unwrap();
-        assert_eq!(receipt_from(&good), Ok((2, digest)));
-
-        let old_peer = parse("{\"tool_calls\":0}").unwrap();
-        assert!(receipt_from(&old_peer).is_err());
-        let excess = parse(&format!("{{\"tool_calls\":5,\"tool_digest\":\"{}\"}}", "b".repeat(64))).unwrap();
-        assert!(receipt_from(&excess).is_err());
-        let non_integer = parse(&format!("{{\"tool_calls\":2.5,\"tool_digest\":\"{}\"}}", "c".repeat(64))).unwrap();
-        assert!(receipt_from(&non_integer).is_err());
     }
 }
 
@@ -228,4 +209,34 @@ pub fn try_remote(
         }
     }
     Some(Err(last))
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn fleet_job_success_requires_bounded_digest_receipt() {
+        let digest = "a".repeat(64);
+        let good = parse(&format!(
+            "{{\"tool_calls\":2,\"tool_digest\":\"{digest}\"}}"
+        ))
+        .unwrap();
+        assert_eq!(receipt_from(&good), Ok((2, digest)));
+
+        let old_peer = parse("{\"tool_calls\":0}").unwrap();
+        assert!(receipt_from(&old_peer).is_err());
+        let excess = parse(&format!(
+            "{{\"tool_calls\":5,\"tool_digest\":\"{}\"}}",
+            "b".repeat(64)
+        ))
+        .unwrap();
+        assert!(receipt_from(&excess).is_err());
+        let non_integer = parse(&format!(
+            "{{\"tool_calls\":2.5,\"tool_digest\":\"{}\"}}",
+            "c".repeat(64)
+        ))
+        .unwrap();
+        assert!(receipt_from(&non_integer).is_err());
+    }
 }

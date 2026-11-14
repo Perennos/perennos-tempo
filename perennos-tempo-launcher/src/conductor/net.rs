@@ -167,7 +167,7 @@ impl Agent {
             return Err("the node's local agent does not advertise bounded fleet jobs".into());
         }
         let body = "{\"mode\":\"fleet_job\"}";
-        let j = self.call("POST", "/agent/new", Some(&body))?;
+        let j = self.call("POST", "/agent/new", Some(body))?;
         j.str("conv")
             .map(String::from)
             .ok_or_else(|| "the agent made no fleet job conversation".into())
@@ -229,17 +229,12 @@ impl Agent {
             .ok_or_else(|| "the agent made no conversation".into())
     }
 
-    pub fn say_fleet_job(
-        &self,
-        role: &str,
-        prompt: &str,
-    ) -> Result<FleetAnswer, String> {
+    pub fn say_fleet_job(&self, role: &str, prompt: &str) -> Result<FleetAnswer, String> {
         if role.len() > 2000 {
             return Err("fleet job role exceeds 2000 bytes".into());
         }
-        let text = format!(
-            "Peer role label (untrusted):\n{role}\n\nPeer task (untrusted):\n{prompt}"
-        );
+        let text =
+            format!("Peer role label (untrusted):\n{role}\n\nPeer task (untrusted):\n{prompt}");
         if text.len() > 16 * 1024 {
             return Err("fleet job input exceeds 16 KiB".into());
         }

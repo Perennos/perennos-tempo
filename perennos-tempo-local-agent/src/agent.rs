@@ -322,9 +322,8 @@ fn cap_utf8_bytes(text: &str, max_bytes: usize) -> String {
 fn record_fleet_tool(conv: &mut Conv, name: &str, args: &Value, result: &str) {
     let item = json!({"name": name, "args": args, "result": result});
     let leaf = mcp::sha256_hex(item.to_string().as_bytes());
-    conv.fleet_tool_digest = mcp::sha256_hex(
-        format!("{}:{leaf}", conv.fleet_tool_digest).as_bytes(),
-    );
+    conv.fleet_tool_digest =
+        mcp::sha256_hex(format!("{}:{leaf}", conv.fleet_tool_digest).as_bytes());
     conv.fleet_tool_calls = conv.fleet_tool_calls.saturating_add(1);
 }
 
@@ -1314,9 +1313,7 @@ impl Agent {
             conv.emit("status", &m);
             sink.status(&m);
         }
-        let mut lane = if conv.fleet_job {
-            Lane::Heavy
-        } else if conv.model.is_some() || !attached.is_empty() {
+        let mut lane = if conv.fleet_job || conv.model.is_some() || !attached.is_empty() {
             Lane::Heavy
         } else {
             pick_lane(self.cfg(), text)
@@ -1446,8 +1443,12 @@ impl Agent {
                 if remaining == 0 {
                     let out = "Stopped after the read-only tool limit for this job.".to_string();
                     sink.text(&out);
-                    conv.messages.push(json!({"role": "assistant", "content": out}));
-                    conv.emit("assistant", "Stopped after the read-only tool limit for this job.");
+                    conv.messages
+                        .push(json!({"role": "assistant", "content": out}));
+                    conv.emit(
+                        "assistant",
+                        "Stopped after the read-only tool limit for this job.",
+                    );
                     return Ok("Stopped after the read-only tool limit for this job.".into());
                 }
                 if calls.len() > remaining {
@@ -3340,7 +3341,6 @@ mod tests {
         crate::fleet_tools::forget_view();
     }
 }
-
 
 #[cfg(test)]
 mod fleet_job_output_tests {
